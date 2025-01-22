@@ -5,6 +5,6 @@ class HybridIntegrator:
 
     def process_query(self, query, context):
         symbolic_results = self.symbolic_reasoner.process_query(query)
-        if "No symbolic match found." not in symbolic_results:
+        if symbolic_results and "No symbolic match found." not in symbolic_results:
             return symbolic_results
         return [self.neural_retriever.retrieve_answer(context, query)]
