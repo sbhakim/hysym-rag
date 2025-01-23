@@ -1,0 +1,5 @@
+# config.yaml
+model_name: "meta-llama/Llama-3.2-3B"
+data_dir: "data/"
+rules_file: "rules.json"
+knowledge_base: "small_knowledge_base.txt"
