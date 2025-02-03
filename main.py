@@ -13,12 +13,15 @@ from src.evaluation import Evaluation
 from src.app import App
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from sentence_transformers import SentenceTransformer
 import os
 import json
+import torch
 
 class NeuralRetriever:
     """
     NeuralRetriever class for retrieving answers from a neural language model.
+    Also provides an encode() method for obtaining neural embeddings.
     """
     def __init__(self, model_name):
         print(f"Initializing Neural Retriever with model: {model_name}...")
@@ -26,6 +29,8 @@ class NeuralRetriever:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype="auto"
         )
+        # Load a SentenceTransformer for encoding
+        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         print(f"Model {model_name} loaded successfully!")
 
     def retrieve_answer(self, context, question):
@@ -36,6 +41,16 @@ class NeuralRetriever:
         inputs = self.tokenizer(input_text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def encode(self, text):
+        """
+        Encode the text into an embedding tensor using the SentenceTransformer.
+        Force the tensor onto CUDA if available.
+        """
+        emb = self.encoder.encode(text, convert_to_tensor=True)
+        if torch.cuda.is_available():
+            emb = emb.to('cuda')
+        return emb
 
 
 if __name__ == "__main__":
