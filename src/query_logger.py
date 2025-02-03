@@ -9,10 +9,6 @@ class QueryLogger:
         self.log_file = log_file
 
     def log_query(self, query, result, source, complexity=None, resource_usage=None):
-        """
-        Log a query along with its result, source (symbolic/neural),
-        the computed query complexity score, and any resource usage metrics.
-        """
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "query": query,
@@ -31,6 +27,5 @@ class QueryLogger:
             logs = []
 
         logs.append(log_entry)
-
         with open(self.log_file, "w") as file:
             json.dump(logs, file, indent=4)

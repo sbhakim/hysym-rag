@@ -1,3 +1,4 @@
+# src/feedback_manager.py
 import json
 import os
 
@@ -20,6 +21,5 @@ class FeedbackManager:
             feedbacks = []
 
         feedbacks.append(feedback_entry)
-
         with open(self.feedback_file, "w") as file:
             json.dump(feedbacks, file, indent=4)
