@@ -1,50 +1,56 @@
 # src/evaluation.py
-from sklearn.metrics import classification_report
-from difflib import SequenceMatcher
+from sentence_transformers import SentenceTransformer, util
+from rouge_score import rouge_scorer
+import numpy as np
 
 class Evaluation:
-    @staticmethod
-    def evaluate(predictions, ground_truths):
-        """
-        Evaluate predictions against ground truths using similarity and counts.
-        """
+    def __init__(self):
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.rouge = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+
+    def evaluate(self, predictions, ground_truths):
         valid_queries = [q for q in predictions if q in ground_truths]
         if not valid_queries:
-            print("Warning: No matching ground truths found for evaluation")
             return {
                 "average_similarity": 0.0,
-                "precision": 0.0,
-                "recall": 0.0,
-                "f1_score": 0.0,
-                "evaluated_queries": 0
+                "average_rougeL": 0.0,
+                "evaluated_queries": 0,
+                "queries_with_truth": []
             }
-
-        y_true = [ground_truths[q] for q in valid_queries]
-        y_pred = [Evaluation.simplify_prediction(predictions[q]) for q in valid_queries]
-
-        similarities = [
-            SequenceMatcher(None, gt, pred).ratio()
-            for gt, pred in zip(y_true, y_pred)
-        ]
-        avg_similarity = sum(similarities)/len(similarities) if similarities else 0.0
-
+        sim_scores, rouge_scores = [], []
+        for q in valid_queries:
+            gt = ground_truths[q]
+            pred = self.simplify_prediction(predictions[q])
+            emb_gt = self.model.encode(gt, convert_to_tensor=True)
+            emb_pred = self.model.encode(pred, convert_to_tensor=True)
+            sim = util.cos_sim(emb_gt, emb_pred).item()
+            sim_scores.append(sim)
+            rouge_score = self.rouge.score(gt, pred)['rougeL'].fmeasure
+            rouge_scores.append(rouge_score)
+        avg_similarity = np.mean(sim_scores)
+        avg_rouge = np.mean(rouge_scores)
         return {
             "average_similarity": avg_similarity,
+            "average_rougeL": avg_rouge,
             "evaluated_queries": len(valid_queries),
             "queries_with_truth": valid_queries
         }
 
-    @staticmethod
-    def simplify_prediction(prediction):
+    def evaluate_advanced(self, predictions, ground_truths, extra_metrics):
+        """
+        Advanced evaluation merging semantic similarity with extra metrics (e.g. chain depth, energy usage).
+        """
+        base_eval = self.evaluate(predictions, ground_truths)
+        chain_depths = extra_metrics.get("chain_depths", [])
+        energies = extra_metrics.get("energy", [])
+        base_eval["average_chain_depth"] = np.mean(chain_depths) if chain_depths else 0.0
+        base_eval["average_energy"] = np.mean(energies) if energies else 0.0
+        return base_eval
+
+    def simplify_prediction(self, prediction):
+        """
+        For a list prediction, take the first item and strip whitespace.
+        """
         if isinstance(prediction, list):
             prediction = prediction[0]
-        return prediction.split('.')[0]  # only first sentence
-
-    @staticmethod
-    def generate_report(predictions, ground_truths, labels=None):
-        y_true = [ground_truths[q] for q in predictions if q in ground_truths]
-        y_pred = [
-            Evaluation.simplify_prediction(predictions[q])
-            for q in predictions if q in ground_truths
-        ]
-        return classification_report(y_true, y_pred, target_names=labels, zero_division=0)
+        return prediction.strip()

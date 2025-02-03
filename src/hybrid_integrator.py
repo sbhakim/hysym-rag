@@ -12,6 +12,7 @@ class HybridIntegrator:
         self.cache = {}
 
     def process_query(self, query, context):
+        # Check cache
         if query in self.cache:
             print("Retrieving from cache...")
             return self.cache[query]
@@ -22,7 +23,8 @@ class HybridIntegrator:
         print(f"HybridIntegrator: Computed query complexity score: {query_complexity:.4f}")
 
         # Resource-based decision
-        if self.resource_manager.should_use_symbolic(query_complexity):
+        use_symbolic = self.resource_manager.should_use_symbolic(query_complexity)
+        if use_symbolic:
             print("HybridIntegrator: Using symbolic reasoning")
             symbolic_results = self.symbolic_reasoner.process_query(query)
             if symbolic_results and "No symbolic match found." not in symbolic_results:
@@ -30,11 +32,20 @@ class HybridIntegrator:
                 self.cache[query] = (result, source)
                 return result, source
             else:
+                # Fallback to neural if symbolic is empty
                 print("Symbolic gave no valid result; fallback to neural.")
         else:
             print("HybridIntegrator: Defaulting to neural reasoning.")
 
+        # Neural path:
+        import time
+        start_t = time.time()
         neural_answer = [self.neural_retriever.retrieve_answer(context, query)]
+        end_t = time.time()
+
+        # Record the neural inference time
+        self.resource_manager.neural_perf_times.append(end_t - start_t)
+
         result, source = neural_answer, "neural"
         self.cache[query] = (result, source)
         return result, source

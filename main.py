@@ -1,6 +1,6 @@
 # main.py
 
-from src.networkx_symbolic_reasoner import GraphSymbolicReasoner  # Advanced graph-based reasoner
+from src.networkx_symbolic_reasoner import GraphSymbolicReasoner
 from src.hybrid_integrator import HybridIntegrator
 from src.rule_extractor import RuleExtractor
 from src.query_logger import QueryLogger
@@ -53,13 +53,12 @@ if __name__ == "__main__":
     print("Extracting rules from deforestation.txt...")
     RuleExtractor.extract_rules("data/deforestation.txt", "data/rules.json")
 
-    # 4. Initialize the graph-based symbolic reasoner
-    #    We allow deeper chaining (max_hops=5) to capture complex rule dependencies.
+    # 4. Initialize the graph-based symbolic reasoner (max_hops set to 5)
     print("Initializing Graph-Based Symbolic Reasoner...")
     symbolic = GraphSymbolicReasoner(
         "data/rules.json",
-        match_threshold=0.25,  # modest threshold to catch partial matches
-        max_hops=5            # deeper multi-hop reasoning
+        match_threshold=0.25,  # modest threshold
+        max_hops=5             # allow deeper multi-hop chaining
     )
 
     # 5. Initialize the Neural Retriever
@@ -70,12 +69,10 @@ if __name__ == "__main__":
     print("Initializing support components...")
     logger = QueryLogger()
     feedback_manager = FeedbackManager()
-
     print("Initializing QueryExpander...")
     expander = QueryExpander(
-        complexity_config="src/config/complexity_rules.yaml"  # advanced complexity rules
+        complexity_config="src/config/complexity_rules.yaml"
     )
-
     print("Loading evaluation dataset...")
     with open("data/ground_truths.json", "r") as gt_file:
         ground_truths = json.load(gt_file)
@@ -106,18 +103,9 @@ if __name__ == "__main__":
     # 10. Test queries
     print("\n=== Testing System with Various Queries ===")
     test_queries = [
-        {
-            "query": "What are the environmental effects of deforestation?",
-            "type": "ground_truth_available"
-        },
-        {
-            "query": "What is the social impact of deforestation?",
-            "type": "ground_truth_available"
-        },
-        {
-            "query": "What is deforestation?",
-            "type": "exploratory"
-        }
+        {"query": "What are the environmental effects of deforestation?", "type": "ground_truth_available"},
+        {"query": "What is the social impact of deforestation?", "type": "ground_truth_available"},
+        {"query": "What is deforestation?", "type": "exploratory"}
     ]
 
     for q_info in test_queries:
@@ -125,7 +113,6 @@ if __name__ == "__main__":
         print(f"\nProcessing Query: {query}")
         print(f"Query Type: {q_info['type']}")
         print("-" * 50)
-
         try:
             # 1) Compute query complexity
             complexity = expander.get_query_complexity(query)
@@ -134,10 +121,9 @@ if __name__ == "__main__":
             # 2) Resource usage monitoring + run query
             def process_query():
                 return app.run(query, context)
-
             usage = resource_manager.monitor_resource_usage(process_query)
 
-            # The first call above runs the query. Call again to get its result:
+            # Run query again to get its result:
             result, source = process_query()
 
             # 3) Logging
@@ -149,7 +135,6 @@ if __name__ == "__main__":
             print(f"Resource Usage: {usage}")
             print("\nResult Preview:")
             print("-" * 20)
-            # If result is a list, print the first chunk
             if isinstance(result, list) and result:
                 print(f"{result[0][:200]}...")
             else:
@@ -161,11 +146,9 @@ if __name__ == "__main__":
                 print("\nEvaluation Metrics:")
                 eval_metrics = evaluator.evaluate({query: result}, ground_truths)
                 print(f"Similarity Score: {eval_metrics['average_similarity']:.2f}")
-
             # 6) Collect feedback if user desires
             if input("\nWould you like to provide feedback? (yes/no): ").lower() == 'yes':
                 feedback_handler.collect_feedback(query, result)
-
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")
         except Exception as e:
@@ -177,7 +160,6 @@ if __name__ == "__main__":
     print("\nResource Utilization:")
     print(f"- CPU Usage: {final_resources['cpu'] * 100:.1f}%")
     print(f"- Memory Usage: {final_resources['memory'] * 100:.1f}%")
-
     print("\nSystem Information:")
     print(f"Model Path: {neural.model.config._name_or_path}")
     print(f"Cache Location: {os.getenv('HF_HOME', os.path.expanduser('~/.cache/huggingface'))}")

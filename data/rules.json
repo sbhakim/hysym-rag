@@ -2,8 +2,8 @@
     {
         "keywords": [
             "whenever",
-            "unchecked,",
             "continues",
+            "unchecked,",
             "deforestation",
             "it"
         ],
@@ -11,16 +11,16 @@
     },
     {
         "keywords": [
-            "occur",
-            "deforestation"
+            "deforestation",
+            "occur"
         ],
         "response": "there is a loss of biodiversity"
     },
     {
         "keywords": [
-            "remove",
             "tree",
-            "agriculture"
+            "agriculture",
+            "remove"
         ],
         "response": "the soil becomes more prone to erosion"
     }
