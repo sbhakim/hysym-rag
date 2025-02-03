@@ -2,10 +2,10 @@
     {
         "keywords": [
             "whenever",
+            "unchecked,",
             "continues",
             "deforestation",
-            "it",
-            "unchecked,"
+            "it"
         ],
         "response": "an increase in carbon dioxide (co2) levels."
     },
@@ -18,9 +18,9 @@
     },
     {
         "keywords": [
-            "agriculture",
             "remove",
-            "tree"
+            "tree",
+            "agriculture"
         ],
         "response": "the soil becomes more prone to erosion"
     }
