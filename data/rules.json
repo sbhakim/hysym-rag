@@ -1,27 +1,53 @@
 [
     {
         "keywords": [
-            "whenever",
-            "continues",
-            "unchecked,",
             "deforestation",
-            "it"
+            "environmental",
+            "effects"
         ],
-        "response": "an increase in carbon dioxide (co2) levels."
+        "response": "there is a loss of biodiversity",
+        "confidence": 0.9,
+        "source": "default",
+        "type": "basic"
     },
     {
         "keywords": [
             "deforestation",
-            "occur"
+            "soil"
         ],
-        "response": "there is a loss of biodiversity"
+        "response": "the soil becomes more prone to erosion",
+        "confidence": 0.9,
+        "source": "default",
+        "type": "basic"
     },
     {
         "keywords": [
-            "tree",
-            "agriculture",
-            "remove"
+            "deforestation",
+            "climate"
         ],
-        "response": "the soil becomes more prone to erosion"
+        "response": "an increase in carbon dioxide (CO2) levels.",
+        "confidence": 0.9,
+        "source": "default",
+        "type": "basic"
+    },
+    {
+        "keywords": [
+            "deforestation",
+            "water"
+        ],
+        "response": "disruption of the natural water cycle",
+        "confidence": 0.9,
+        "source": "default",
+        "type": "basic"
+    },
+    {
+        "keywords": [
+            "deforestation",
+            "wildlife"
+        ],
+        "response": "loss of habitat for native species",
+        "confidence": 0.9,
+        "source": "default",
+        "type": "basic"
     }
 ]
