@@ -1,1 +1,17 @@
-[]
+[
+    {
+        "keywords": [
+            "occur",
+            "deforestation"
+        ],
+        "response": "there is a loss of biodiversity"
+    },
+    {
+        "keywords": [
+            "agriculture",
+            "tree",
+            "remove"
+        ],
+        "response": "the soil becomes more prone to erosion"
+    }
+]

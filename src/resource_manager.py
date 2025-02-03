@@ -1,15 +1,15 @@
 import psutil
 import time
 
-
 class ResourceManager:
     def __init__(self):
         """
         Initialize ResourceManager with default resource thresholds.
         """
+        # Lowered CPU threshold slightly for demonstration
         self.resource_thresholds = {
             'memory_threshold': 0.8,  # 80% memory utilization
-            'cpu_threshold': 0.9  # 90% CPU utilization
+            'cpu_threshold': 0.75    # 75% CPU utilization (was 0.9)
         }
         print("ResourceManager initialized with default thresholds.")
 
@@ -32,15 +32,19 @@ class ResourceManager:
         Decide whether to use symbolic reasoning based on resource usage and query complexity.
         """
         resources = self.check_resources()
+
+        # If system usage is high, force symbolic
         if (resources['memory_utilization'] > self.resource_thresholds['memory_threshold'] or
                 resources['cpu_usage'] > self.resource_thresholds['cpu_threshold']):
             print("High resource usage detected. Using symbolic reasoning.")
             return True
 
-        if query_complexity < 0.5:  # Simple queries
-            print("Query complexity is low. Using symbolic reasoning.")
+        # For demonstration, if the query complexity is below 1.0, prefer symbolic
+        if query_complexity < 2.0:
+            print("Query complexity is moderate or low. Using symbolic reasoning.")
             return True
 
+        # Otherwise, default to neural
         print("Defaulting to neural reasoning.")
         return False
 
@@ -58,6 +62,6 @@ class ResourceManager:
         end_time = time.time()
 
         return {
-            "memory_used_mb": (end_memory - start_memory) / (1024 ** 2),
-            "time_taken_s": end_time - start_time,
+            "memory_used_mb": round((end_memory - start_memory) / (1024 ** 2), 4),
+            "time_taken_s": round(end_time - start_time, 4),
         }

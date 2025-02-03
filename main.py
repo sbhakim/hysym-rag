@@ -1,3 +1,4 @@
+# main.py
 from src.symbolic_reasoner import SymbolicReasoner
 from src.hybrid_integrator import HybridIntegrator
 from src.rule_extractor import RuleExtractor
@@ -14,14 +15,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import os
 import json
 
-
-
-
 class NeuralRetriever:
     """
     NeuralRetriever class for retrieving answers from a neural language model.
     """
-
     def __init__(self, model_name):
         print(f"Initializing Neural Retriever with model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -39,11 +36,9 @@ class NeuralRetriever:
         outputs = self.model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-
 if __name__ == "__main__":
     # Step 1: Initialize system components
     print("\n=== Initializing HySym-RAG System ===")
-
     # Load configuration first
     print("Loading configuration...")
     config = ConfigLoader.load_config("config.yaml")
@@ -51,7 +46,6 @@ if __name__ == "__main__":
 
     # Initialize core components in the correct order
     print("Initializing core components...")
-
     # First, initialize the resource manager as other components depend on it
     print("Initializing Resource Manager...")
     resource_manager = ResourceManager()
@@ -61,7 +55,7 @@ if __name__ == "__main__":
     RuleExtractor.extract_rules("data/deforestation.txt", "data/rules.json")
 
     print("Initializing Symbolic Reasoner...")
-    symbolic = SymbolicReasoner("data/rules.json")
+    symbolic = SymbolicReasoner("data/rules.json", match_threshold=0.1)
 
     print("Initializing Neural Retriever...")
     neural = NeuralRetriever(model_name)
@@ -77,7 +71,7 @@ if __name__ == "__main__":
         ground_truths = json.load(gt_file)
     evaluator = Evaluation()
 
-    # Create the hybrid integrator
+    # Create the hybrid integrator (note: App will pass the expander too)
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(symbolic, neural, resource_manager)
 
@@ -103,8 +97,6 @@ if __name__ == "__main__":
 
     # Step 2: Process multiple queries to demonstrate different complexity levels
     print("\n=== Testing System with Various Queries ===")
-
-    # Define test queries with known ground truths first
     test_queries = [
         {
             "query": "What are the environmental effects of deforestation?",
@@ -123,7 +115,6 @@ if __name__ == "__main__":
         }
     ]
 
-    # Process each query with proper error handling and resource monitoring
     for query_info in test_queries:
         query = query_info["query"]
         print(f"\nProcessing Query: {query}")
@@ -133,22 +124,17 @@ if __name__ == "__main__":
         try:
             # First measure query complexity
             complexity = expander.get_query_complexity(query)
-            print(f"Query Complexity Score: {complexity}")
+            print(f"Query Complexity Score: {complexity:.4f}")
 
-
-            # Wrap the query processing in resource monitoring
+            # Wrap query processing in resource monitoring
             def process_query():
-                return app.run(query, context)
+                return app.run(query, context)  # Now returns (result, source)
 
-
-            # Monitor resources during query processing
             usage = resource_manager.monitor_resource_usage(process_query)
 
-            # Get the actual result
-            result = process_query()
+            # Unpack the tuple (result, source)
+            result, source = process_query()
 
-            # Determine answer source and log
-            source = "symbolic" if "No symbolic match found." not in result else "neural"
             logger.log_query(query, result, source)
 
             # Output comprehensive results
@@ -157,16 +143,15 @@ if __name__ == "__main__":
             print(f"Resource Usage: {usage}")
             print("\nResult Preview:")
             print("-" * 20)
+            # Assuming result is a list; print first 200 characters of its first element
             print(f"{result[0][:200]}...")
             print("-" * 20)
 
-            # If it's a query with ground truth, show evaluation metrics
             if query_info["type"] == "ground_truth_available":
                 print("\nEvaluation Metrics:")
                 evaluation = evaluator.evaluate({query: result}, ground_truths)
                 print(f"Similarity Score: {evaluation['average_similarity']:.2f}")
 
-            # Optional feedback collection
             if input("\nWould you like to provide feedback? (yes/no): ").lower() == 'yes':
                 feedback_handler.collect_feedback(query, result)
 

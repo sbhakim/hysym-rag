@@ -9,7 +9,11 @@ class QueryExpander:
         }
 
     def get_query_complexity(self, query):
-        # Simple complexity scoring based on query characteristics
+        """
+        Compute a basic complexity score based on:
+        1. Length-based complexity (number of words).
+        2. Keyword-based complexity for terms like 'why', 'how', 'explain', etc.
+        """
         score = 0
         words = query.split()
 
@@ -23,14 +27,23 @@ class QueryExpander:
         return score
 
     def expand_query(self, query):
+        """
+        Expand specific terms (e.g., 'deforestation' → '(deforestation OR forest loss OR ...)')
+        unless the complexity is already above a threshold.
+        """
         complexity = self.get_query_complexity(query)
         print(f"Query complexity score: {complexity}")
 
-        # Existing expansion logic
+        # Skip expansions if complexity is already high
+        if complexity > 1.0:
+            print("Skipping expansions due to high complexity.")
+            return query
+
+        # Otherwise, proceed with existing expansion logic
         expanded_query = query
         for term, related_terms in self.expansion_rules.items():
             if term in query:
                 expansion = f"({term} OR {' OR '.join(related_terms)})"
                 expanded_query = expanded_query.replace(term, expansion)
-        return expanded_query
 
+        return expanded_query
