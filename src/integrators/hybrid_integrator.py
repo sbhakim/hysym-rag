@@ -1,4 +1,4 @@
-# src/hybrid_integrator.py
+# src/integrators/hybrid_integrator.py
 import time
 import logging
 import torch

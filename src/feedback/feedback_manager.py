@@ -1,4 +1,4 @@
-# src/feedback_manager.py
+# src/feedback/feedback_manager.py
 import json
 import os
 

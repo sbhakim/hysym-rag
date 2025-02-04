@@ -1,4 +1,4 @@
-# src/symbolic_reasoner.py
+# src/reasoners/symbolic_reasoner.py
 import json
 import re
 import spacy

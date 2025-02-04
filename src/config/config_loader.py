@@ -1,4 +1,4 @@
-# src/config_loader.py
+# src/config/config_loader.py
 import yaml
 
 class ConfigLoader:

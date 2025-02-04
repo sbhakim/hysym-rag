@@ -1,6 +1,6 @@
 # src/app.py
-from src.hybrid_integrator import HybridIntegrator
-from src.query_expander import QueryExpander
+from src.integrators.hybrid_integrator import HybridIntegrator
+from src.queries.query_expander import QueryExpander
 
 class App:
     """

@@ -1,4 +1,4 @@
-# src/networkx_symbolic_reasoner.py
+# src/reasoners/networkx_symbolic_reasoner.py
 import json
 import spacy
 import networkx as nx

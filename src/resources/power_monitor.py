@@ -1,4 +1,4 @@
-# src/power_monitor.py
+# src/resources/power_monitor.py
 from collections import defaultdict
 import time
 

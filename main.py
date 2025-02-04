@@ -1,15 +1,15 @@
 # main.py
 
-from src.networkx_symbolic_reasoner import GraphSymbolicReasoner
-from src.hybrid_integrator import HybridIntegrator
-from src.rule_extractor import RuleExtractor
-from src.query_logger import QueryLogger
-from src.resource_manager import ResourceManager
-from src.feedback_manager import FeedbackManager
-from src.feedback_handler import FeedbackHandler
-from src.config_loader import ConfigLoader
-from src.query_expander import QueryExpander
-from src.evaluation import Evaluation
+from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
+from src.integrators.hybrid_integrator import HybridIntegrator
+from src.utils.rule_extractor import RuleExtractor
+from src.queries.query_logger import QueryLogger
+from src.resources.resource_manager import ResourceManager
+from src.feedback.feedback_manager import FeedbackManager
+from src.feedback.feedback_handler import FeedbackHandler
+from src.config.config_loader import ConfigLoader
+from src.queries.query_expander import QueryExpander
+from src.utils.evaluation import Evaluation
 from src.app import App
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
     # 1. Load config (contains LLM model name, etc.)
     print("Loading configuration...")
-    config = ConfigLoader.load_config("config.yaml")
+    config = ConfigLoader.load_config("src/config/config.yaml")
     model_name = config["model_name"]
 
     # 2. Initialize ResourceManager (others depend on it)

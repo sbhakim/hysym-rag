@@ -1,4 +1,4 @@
-# src/query_logger.py
+# src/queries/query_logger.py
 import json
 import os
 from datetime import datetime

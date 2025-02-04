@@ -1,4 +1,4 @@
-# src/rule_extractor.py
+# src/utils/rule_extractor.py
 
 import json
 import re

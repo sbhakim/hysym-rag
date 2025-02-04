@@ -1,4 +1,4 @@
-# src/query_expander.py
+# src/queries/query_expander.py
 import yaml
 from transformers import AutoTokenizer, AutoModel
 import torch

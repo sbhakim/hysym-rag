@@ -1,4 +1,4 @@
-# src/resource_manager.py
+# src/resources/resource_manager.py
 import yaml
 import psutil
 import time
@@ -7,13 +7,12 @@ from pathlib import Path
 from datetime import datetime
 import logging
 import pynvml
-from collections import defaultdict
 
 # Import the ResourceOptimizer
-from src.resource_optimizer import ResourceOptimizer
+from src.resources.resource_optimizer import ResourceOptimizer
 
 # Import the PowerMonitor for energy tracking
-from src.power_monitor import PowerMonitor
+from src.resources.power_monitor import PowerMonitor
 
 # For applying cgroup limits; ensure you have a suitable cgroups library installed.
 # This is a placeholder; adjust the import and API according to your cgroups package.

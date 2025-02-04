@@ -1,4 +1,4 @@
-# src/evaluation.py
+# src/utils/evaluation.py
 from sentence_transformers import SentenceTransformer, util
 from rouge_score import rouge_scorer
 import numpy as np
