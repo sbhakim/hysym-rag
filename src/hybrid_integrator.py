@@ -1,5 +1,4 @@
-# hybrid_integrator.py
-
+# src/hybrid_integrator.py
 import time
 import logging
 import torch
@@ -11,7 +10,6 @@ from src.knowledge_integrator import AlignmentLayer
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
 
 class HybridIntegrator:
     """
@@ -124,16 +122,12 @@ class HybridIntegrator:
             return cached_result
 
         try:
-            # Prepare device for tensor operations
+            # Prepare device for tensor operations (Ensure both embeddings are on the same device)
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             # Get embeddings from both reasoning systems
-            symbolic_emb = self.symbolic_reasoner.encode(query)
-            neural_emb = self.neural_retriever.encode(query)
-
-            # Ensure embeddings are on the same device
-            symbolic_emb = symbolic_emb.to(device)
-            neural_emb = neural_emb.to(device)
+            symbolic_emb = self.symbolic_reasoner.encode(query).to(device)
+            neural_emb = self.neural_retriever.encode(query).to(device)
 
             # Perform alignment and get confidence score
             aligned_emb, confidence, debug_info = self.alignment_layer(symbolic_emb, neural_emb)

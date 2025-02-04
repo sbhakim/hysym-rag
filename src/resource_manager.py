@@ -7,9 +7,13 @@ from pathlib import Path
 from datetime import datetime
 import logging
 import pynvml
+from collections import defaultdict
 
 # Import the ResourceOptimizer
 from src.resource_optimizer import ResourceOptimizer
+
+# Import the PowerMonitor for energy tracking
+from src.power_monitor import PowerMonitor
 
 # For applying cgroup limits; ensure you have a suitable cgroups library installed.
 # This is a placeholder; adjust the import and API according to your cgroups package.
@@ -17,11 +21,6 @@ import cgroups
 
 
 class ResourceManager:
-    """
-    Enhanced resource manager with adaptive thresholds, trend detection,
-    predictive usage modeling, and optional neural performance tracking.
-    """
-
     def __init__(self, config_path=None):
         self.config_path = Path(config_path) if config_path else Path("src/config/resource_config.yaml")
         self.load_config()
@@ -40,6 +39,9 @@ class ResourceManager:
         # Initialize the ResourceOptimizer
         self.resource_optimizer = ResourceOptimizer()
         self.logger.info("ResourceManager: successfully initialized with advanced configuration.")
+
+        # Initialize the PowerMonitor for energy tracking
+        self.power_monitor = PowerMonitor()
 
     def setup_logging(self):
         logging.basicConfig(
@@ -97,38 +99,17 @@ class ResourceManager:
             self.current_thresholds[res] = np.clip(new_thresh, base_thresh - max_adj, base_thresh + max_adj)
         self.last_adjustment = datetime.now()
 
-    def average_neural_inference_time(self):
-        return np.mean(self.neural_perf_times) if self.neural_perf_times else 0.0
+    def monitor_energy(self):
+        # Track energy consumption
+        for component in ['gpu', 'cpu']:
+            duration = self.get_usage_time(component)
+            self.power_monitor.track(component, duration)
 
-    def should_use_symbolic(self, query_complexity):
-        usage = self.check_resources()
-        trends = {res: self.calculate_trend(res) for res in ["cpu", "memory", "gpu"]}
-        self.adjust_thresholds(trends)
-        predicted_usage = {res: min(1.0, usage[res] * (1 + trends[res])) for res in ["cpu", "memory", "gpu"]}
-        weights = {"cpu": 0.4, "memory": 0.3, "gpu": 0.3}
-        risk_score = sum(predicted_usage[res] / self.current_thresholds[res] * weights[res] for res in predicted_usage)
-        neural_perf_factor = 1.0 if self.average_neural_inference_time() >= 3.0 else 0.0
-        overall_score = risk_score + neural_perf_factor
-        if overall_score > 0.8 or query_complexity < 1.0:
-            self.logger.info(
-                f"Decision: symbolic (overall_score={overall_score:.2f}, query_complexity={query_complexity:.2f})")
-            return True
-        else:
-            self.logger.info(
-                f"Decision: neural (overall_score={overall_score:.2f}, query_complexity={query_complexity:.2f})")
-            return False
-
-    def monitor_resource_usage(self, inference_func):
-        process = psutil.Process()
-        start_mem = process.memory_info().rss
-        start_time = time.time()
-        inference_func()
-        end_mem = process.memory_info().rss
-        end_time = time.time()
-        return {
-            "memory_used_mb": round((end_mem - start_mem) / (1024 ** 2), 4),
-            "time_taken_s": round(end_time - start_time, 4)
-        }
+    def get_usage_time(self, component):
+        # Simulate the time usage for the components (or replace with actual tracking method)
+        # This could depend on the tracking mechanism you want, e.g., tracking GPU/CPU cycles.
+        # Here we simply return an arbitrary value.
+        return 1.0  # For demonstration, you would replace with actual tracking logic.
 
     def optimize_resources(self):
         """
@@ -150,7 +131,6 @@ class ResourceManager:
     def apply_optimal_allocations(self, allocations):
         """
         Apply optimized resource limits using Linux cgroups.
-        This example uses a hypothetical cgroups library.
         """
         try:
             # CPU allocation: convert fraction to percentage (e.g., 0.5 => 50%)
@@ -160,11 +140,45 @@ class ResourceManager:
             self.logger.info(f"Applied CPU limit: {cpu_limit}%")
 
             # GPU memory allocation: set a limit based on optimal allocation for GPU memory.
-            # Assume that 'gpu_mem' is provided by our ResourceOptimizer or from check_resources.
-            # Here we use a placeholder value; adjust as needed.
             gpu_mem_limit = allocations.get('gpu_mem', 0.8) * (1024 ** 3)
             cgroup_gpu = cgroups.Cgroup('gpu')
             cgroup_gpu.set_memory_limit(gpu_mem_limit)
             self.logger.info(f"Applied GPU memory limit: {gpu_mem_limit / (1024 ** 3):.2f} GB")
         except Exception as e:
             self.logger.error(f"Error applying cgroup allocations: {str(e)}")
+
+
+    def monitor_resource_usage(self, inference_func):
+        """
+        Monitors the resource usage (CPU, memory, GPU) while an inference function is executed.
+
+        Args:
+            inference_func (function): The function that will be executed for inference (e.g., processing a query).
+
+        Returns:
+            dict: A dictionary containing the resource usage information during inference.
+        """
+        start_cpu = psutil.cpu_percent(interval=0.1)
+        start_mem = psutil.virtual_memory().percent
+        start_gpu = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu
+
+        start_time = time.time()
+        inference_func()  # Execute the provided inference function
+        end_time = time.time()
+
+        end_cpu = psutil.cpu_percent(interval=0.1)
+        end_mem = psutil.virtual_memory().percent
+        end_gpu = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu
+
+        # Calculate resource usage during inference
+        cpu_usage = end_cpu - start_cpu
+        memory_usage = end_mem - start_mem
+        gpu_usage = end_gpu - start_gpu
+        time_taken = end_time - start_time
+
+        return {
+            "cpu_usage": cpu_usage,
+            "memory_usage": memory_usage,
+            "gpu_usage": gpu_usage,
+            "time_taken": time_taken
+        }
