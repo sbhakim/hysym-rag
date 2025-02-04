@@ -69,17 +69,10 @@ graph TD
 ```
 
 
-
 2. Install dependencies:
 ```
    pip install -r requirements.txt
    python -m spacy download en_core_web_sm en_core_web_md
-```
-
-3. Configure environment:
-
-```
-   cp configs/default_config.yaml local_config.yaml
 ```
 
 ## Contributing
