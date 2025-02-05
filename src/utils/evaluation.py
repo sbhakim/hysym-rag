@@ -91,8 +91,18 @@ class Evaluation:
 
     def simplify_prediction(self, prediction):
         """
-        For a list prediction, take the first item and strip whitespace.
+        Normalize the prediction output:
+          - If the prediction is a list, join its elements into a single string.
+          - If the prediction is a dict and contains a 'result' key, extract it.
+          - Otherwise, convert non-string predictions to string.
+          - Finally, strip leading/trailing whitespace.
         """
         if isinstance(prediction, list):
-            prediction = prediction[0]
+            # Join list elements with a space
+            prediction = " ".join(str(item) for item in prediction)
+        elif isinstance(prediction, dict):
+            # Extract the 'result' key if available, else convert the dict to string
+            prediction = prediction.get("result", str(prediction))
+        elif not isinstance(prediction, str):
+            prediction = str(prediction)
         return prediction.strip()
