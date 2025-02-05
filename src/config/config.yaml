@@ -3,3 +3,10 @@ model_name: "meta-llama/Llama-3.2-3B"
 data_dir: "data/"
 rules_file: "rules.json"
 knowledge_base: "small_knowledge_base.txt"
+
+
+embeddings:
+  symbolic_dim: 300
+  neural_dim: 384
+  target_dim: 768
+  model_name: "all-MiniLM-L6-v2"

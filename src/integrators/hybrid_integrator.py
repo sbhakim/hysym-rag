@@ -1,8 +1,9 @@
 # src/integrators/hybrid_integrator.py
+
 import time
 import logging
 import torch
-from typing import Tuple, List, Dict, Optional, Any
+from typing import Tuple, List, Dict, Optional
 from datetime import datetime, timedelta
 
 from src.knowledge_integrator import AlignmentLayer
@@ -13,11 +14,6 @@ logger = logging.getLogger(__name__)
 class HybridIntegrator:
     """
     HySym-RAG's core integration system that combines symbolic and neural reasoning.
-    This implementation focuses on:
-    1. Dynamic alignment between symbolic and neural representations
-    2. Confidence-based processing path selection
-    3. Intelligent caching for efficiency
-    4. Consistent device handling across modules
     """
 
     def __init__(self, symbolic_reasoner, neural_retriever, resource_manager, query_expander=None, cache_ttl=3600,
@@ -29,23 +25,28 @@ class HybridIntegrator:
         self.cache = {}
         self.cache_ttl = cache_ttl
         self.batch_size = batch_size
-        self.performance_stats = {'symbolic_hits': 0, 'neural_hits': 0, 'cache_hits': 0, 'total_queries': 0,
-                                  'hybrid_successes': 0}
-        self.alignment_layer = AlignmentLayer(sym_dim=300, neural_dim=768)
+        self.performance_stats = {
+            'symbolic_hits': 0,
+            'neural_hits': 0,
+            'cache_hits': 0,
+            'total_queries': 0,
+            'hybrid_successes': 0
+        }
+        self.alignment_layer = AlignmentLayer(sym_dim=300, neural_dim=384, target_dim=768)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("HybridIntegrator initialized successfully with alignment layer")
 
     def ensure_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """
         Ensures the given tensor is on the correct device.
-
-        Args:
-            tensor (torch.Tensor): Tensor to ensure device consistency.
-
-        Returns:
-            torch.Tensor: Tensor moved to the correct device if necessary.
         """
         return tensor.to(self.device) if tensor.device != self.device else tensor
+
+    def ensure_device_consistency(self, *tensors: torch.Tensor) -> List[torch.Tensor]:
+        """
+        Ensure all tensors are moved to the same device as the primary tensor.
+        """
+        return [self.ensure_device(tensor) for tensor in tensors]
 
     def _generate_cache_key(self, query: str) -> str:
         """
@@ -85,53 +86,78 @@ class HybridIntegrator:
         }
 
     def process_query(self, query: str, context: str) -> Tuple[List[str], str]:
+        """
+        Processes a query using the hybrid reasoning approach.
+        """
         self.performance_stats['total_queries'] += 1
         cache_key = self._generate_cache_key(query)
         cached_result = self._get_valid_cache(cache_key)
+
         if cached_result:
             return cached_result
 
         try:
-            device = self.device
-            symbolic_emb = self.ensure_device(self.symbolic_reasoner.encode(query))
-            neural_emb = self.ensure_device(self.neural_retriever.encode(query))
+            # Step 1: Encode query into embeddings and ensure device consistency
+            symbolic_emb = self.symbolic_reasoner.encode(query)
+            neural_emb = self.neural_retriever.encode(query)
+            symbolic_emb, neural_emb = self.ensure_device_consistency(symbolic_emb, neural_emb)
 
-            # Validate embedding sizes
+            # Step 2: Inspect and validate embeddings
+            logger.debug(f"Raw symbolic embedding shape: {symbolic_emb.shape}")
+            logger.debug(f"Raw neural embedding shape: {neural_emb.shape}")
+
+            # Ensure embeddings are 2D
+            if symbolic_emb.dim() == 1:
+                symbolic_emb = symbolic_emb.unsqueeze(0)
+            if neural_emb.dim() == 1:
+                neural_emb = neural_emb.unsqueeze(0)
+
+            # Validate dimensions against AlignmentLayer input
             if symbolic_emb.size(1) != self.alignment_layer.sym_projection[0].in_features:
-                raise ValueError("Symbolic embedding size mismatch.")
+                logger.warning("Transforming symbolic embedding to match the expected dimensions.")
+                symbolic_emb = torch.nn.Linear(symbolic_emb.size(1), 300).to(self.device)(symbolic_emb)
+
             if neural_emb.size(1) != self.alignment_layer.neural_projection[0].in_features:
-                raise ValueError("Neural embedding size mismatch.")
+                logger.error(f"Neural embedding size mismatch: {neural_emb.size(1)}")
+                raise ValueError(
+                    f"Neural embedding size mismatch: {neural_emb.size(1)} vs expected {self.alignment_layer.neural_projection[0].in_features}")
 
-            logger.debug(f"Symbolic embedding: {symbolic_emb.shape}, device: {symbolic_emb.device}")
-            logger.debug(f"Neural embedding: {neural_emb.shape}, device: {neural_emb.device}")
+            # Step 3: Perform alignment
+            try:
+                aligned_emb, confidence, debug_info = self.alignment_layer(symbolic_emb, neural_emb)
+                logger.info(f"Alignment confidence: {confidence:.3f}")
+            except Exception as alignment_error:
+                logger.error(f"Error in alignment layer: {str(alignment_error)}. Falling back to neural embeddings.")
+                aligned_emb = neural_emb
+                confidence = 0.0
 
-            aligned_emb, confidence, debug_info = self.alignment_layer(symbolic_emb, neural_emb)
-            logger.info(f"Alignment confidence: {confidence:.3f}")
-
-            if confidence > 0.7:
+            # Step 4: Select reasoning path based on alignment confidence
+            if confidence > 0.7:  # High confidence threshold
                 result = self._process_symbolic(query)
                 if result:
                     self.performance_stats['hybrid_successes'] += 1
                     self._update_cache(cache_key, (result, "hybrid"))
                     return result, "hybrid"
 
+                # Fallback to neural processing if symbolic fails
                 result = self._process_neural_optimized(query, context)
                 self._update_cache(cache_key, (result, "neural"))
                 return result, "neural"
-            else:
+            else:  # Low confidence: Default to neural processing
                 result = self._process_neural_optimized(query, context)
                 self._update_cache(cache_key, (result, "neural"))
                 return result, "neural"
 
-        except RuntimeError as e:
-            if "CUDA" in str(e):
-                logger.error(f"CUDA error: {str(e)}. Resetting GPU.")
+        except RuntimeError as runtime_error:
+            # Handle CUDA-specific errors
+            if "CUDA" in str(runtime_error):
+                logger.error(f"CUDA error encountered: {str(runtime_error)}. Resetting GPU.")
                 torch.cuda.empty_cache()
                 self.device = torch.device("cpu")
                 logger.warning("Falling back to CPU due to CUDA error.")
             raise
-        except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}")
+        except Exception as generic_error:
+            logger.error(f"Unexpected error: {str(generic_error)}")
             result = self._process_symbolic(query)
             if result:
                 return result, "symbolic"

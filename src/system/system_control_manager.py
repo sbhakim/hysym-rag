@@ -1,67 +1,23 @@
+# src/system/system_control_manager.py
+
 import logging
-import torch
-from typing import Tuple, Optional
+import time
+from typing import Any, Dict, Optional, Tuple
 from datetime import datetime, timedelta
-
-logger = logging.getLogger(__name__)
-
-
-class UnifiedResponseAggregator:
-    """
-    Combines symbolic and neural answers into a single response with partial chain-of-thought.
-    """
-
-    def __init__(self, include_explanations: bool = True):
-        self.include_explanations = include_explanations
-
-    def aggregate(
-            self,
-            symbolic_responses: list,
-            neural_response: str,
-            chain_of_thought: Optional[list] = None
-    ) -> str:
-        """
-        Produces a unified answer. Optionally includes brief chain-of-thought explanations.
-
-        Args:
-            symbolic_responses (list): List of extracted statements from symbolic reasoner.
-            neural_response (str): The neural model's final answer string.
-            chain_of_thought (list): Optional debug info on how symbolic reasoning progressed.
-
-        Returns:
-            str: A single combined response.
-        """
-        response_parts = []
-
-        if symbolic_responses:
-            response_parts.append("**Symbolic Reasoning Found:**")
-            for i, resp in enumerate(symbolic_responses, start=1):
-                response_parts.append(f"{i}. {resp}")
-
-        response_parts.append("**Neural Model Suggests:**")
-        response_parts.append(neural_response)
-
-        if self.include_explanations and chain_of_thought:
-            response_parts.append("\n**Chain of Thought (Symbolic Steps):**")
-            for step in chain_of_thought:
-                response_parts.append(f"- {step}")
-
-        return "\n".join(response_parts)
-
 
 class SystemControlManager:
     """
-    Coordinates scheduling, fallback logic, and error handling for HySym-RAG.
-    Works alongside the ResourceManager and HybridIntegrator.
+    Manages the overall system control flow, including error handling,
+    resource management, and query processing.
     """
 
     def __init__(
             self,
             hybrid_integrator,
             resource_manager,
-            aggregator: UnifiedResponseAggregator,
+            aggregator,
             error_retry_limit: int = 2,
-            max_query_time: int = 10
+            max_query_time: float = 10.0
     ):
         self.hybrid_integrator = hybrid_integrator
         self.resource_manager = resource_manager
@@ -69,91 +25,249 @@ class SystemControlManager:
         self.error_retry_limit = error_retry_limit
         self.max_query_time = max_query_time
 
-    def ensure_device_consistency(self, *tensors):
-        """
-        Ensure all tensors are moved to the same device as the primary component (neural model).
-        """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return [tensor.to(device) if tensor.device != device else tensor for tensor in tensors]
+        # Setup logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger("SystemControlManager")
 
-    def process_query_with_fallback(self, query: str, context: str) -> str:
-        """
-        Top-level method for handling a query with scheduling, fallback,
-        error handling, and unified response generation.
-        """
-        start_time = datetime.now()
-        attempts = 0
-        symbolic_part = []
-        neural_part = ""
-        chain_of_thought = []
-        final_response = "No answer generated."
+        # Track performance metrics
+        self.performance_metrics = {
+            'total_queries': 0,
+            'successful_queries': 0,
+            'failed_queries': 0,
+            'avg_response_time': 0.0,
+            'total_retries': 0
+        }
 
-        while attempts < self.error_retry_limit:
-            attempts += 1
+    def process_query_with_fallback(
+            self,
+            query: str,
+            context: str,
+            max_retries: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Process a query with automatic fallback mechanisms and error handling.
+
+        Args:
+            query: The input query string.
+            context: Additional context for processing.
+            max_retries: Optional override for retry limit.
+
+        Returns:
+            Dict containing the response and metadata.
+        """
+        # Validate inputs
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("Query must be a non-empty string")
+
+        if not isinstance(context, str):
+            context = str(context)  # Convert to string if possible
+        start_time = time.time()
+        retries = 0
+        max_retries = max_retries or self.error_retry_limit
+
+        while retries <= max_retries:
             try:
-                # Check resource usage and adapt if needed
-                usage = self.resource_manager.check_resources()
-                self._adaptive_scheduling(usage)
+                # Monitor resources before processing
+                resource_status = self.resource_manager.check_resources()
+                if not self._validate_resources(resource_status):
+                    self.logger.warning("Resource limits exceeded, optimizing allocation...")
+                    self.resource_manager.optimize_resources()
 
-                # Use the HybridIntegrator
-                results, source = self.hybrid_integrator.process_query(query, context)
+                # Process query with timing constraints
+                result = self._timed_process_query(query, context)
 
-                # Ensure device consistency for tensors
-                results = self.ensure_device_consistency(*results) if isinstance(results, torch.Tensor) else results
+                # Update performance metrics
+                self._update_metrics(start_time, True)
 
-                # Gather results and aggregate
-                if source in ("hybrid", "symbolic") and isinstance(results, list):
-                    symbolic_part = results
-                    chain_of_thought = results
-                if source == "neural" and isinstance(results, list):
-                    neural_part = results[0]
-                if source == "hybrid" and symbolic_part and len(results) > 0:
-                    neural_part = results[-1]
+                return self.aggregator.format_response({
+                    'result': result,
+                    'processing_time': time.time() - start_time,
+                    'resource_usage': resource_status,
+                    'retries': retries
+                })
 
-                final_response = self.aggregator.aggregate(
-                    symbolic_responses=symbolic_part,
-                    neural_response=neural_part,
-                    chain_of_thought=chain_of_thought
-                )
-                break
-
-            except RuntimeError as e:
-                logger.error(f"Runtime error encountered: {str(e)} | Attempt: {attempts}")
-                if "CUDA" in str(e):
-                    logger.error("CUDA-related issue detected. Ensuring consistent device allocation.")
-                    self.hybrid_integrator.ensure_device_consistency()
-                continue
+            except TimeoutError as te:
+                self.logger.error(f"Query processing timeout: {str(te)}")
+                retries += 1
+                if retries <= max_retries:
+                    self._handle_timeout()
+                    continue
+                return self._handle_final_failure(start_time, "Timeout")
 
             except Exception as e:
-                logger.error(f"Unexpected error: {str(e)} | Attempt: {attempts}")
-                continue
+                self.logger.error(f"Error processing query: {str(e)}")
+                retries += 1
+                if retries <= max_retries:
+                    self._handle_error(e)
+                    continue
+                return self._handle_final_failure(start_time, str(e))
 
-            time_elapsed = (datetime.now() - start_time).total_seconds()
-            if time_elapsed > self.max_query_time or attempts >= self.error_retry_limit:
-                final_response = (
-                    f"Error encountered while processing. "
-                    f"Attempts: {attempts}. Time Elapsed: {time_elapsed:.1f}s."
-                )
-                break
-
-        return final_response
-
-    def _adaptive_scheduling(self, usage: dict):
+    def _timed_process_query(
+            self,
+            query: str,
+            context: str
+    ) -> Tuple[str, str]:
         """
-        Example of scheduling logic based on usage.
-        If GPU is heavily used, we might favor symbolic paths, etc.
+        Process a query with a timeout constraint and dimension validation.
+        Returns a tuple of (result, reasoning_type).
         """
-        gpu_usage = usage.get("gpu", 0.0)
-        cpu_usage = usage.get("cpu", 0.0)
+        try:
+            # Validate hybrid integrator's alignment layer dimensions
+            if hasattr(self.hybrid_integrator, 'alignment_layer'):
+                sym_dim = self.hybrid_integrator.alignment_layer.sym_adapter.in_features
+                neural_dim = self.hybrid_integrator.alignment_layer.neural_adapter.in_features
+                self.logger.debug(f"Alignment layer dimensions - Symbolic: {sym_dim}, Neural: {neural_dim}")
+            start = time.time()
 
-        if gpu_usage > self.resource_manager.current_thresholds['gpu']:
-            logger.info("[SystemControlManager] High GPU usage detected, adjusting scheduling to symbolic preference.")
-            self.hybrid_integrator.batch_size = 1
-        elif cpu_usage > self.resource_manager.current_thresholds['cpu']:
-            logger.info("[SystemControlManager] High CPU usage detected, reducing symbolic expansions.")
-            if hasattr(self.hybrid_integrator.symbolic_reasoner, 'max_hops'):
-                self.hybrid_integrator.symbolic_reasoner.max_hops = 2
+            def _check_timeout():
+                if time.time() - start > self.max_query_time:
+                    raise TimeoutError("Query processing exceeded maximum allowed time")
+
+            try:
+                # First attempt with symbolic reasoning.
+                # Note: Changed to use process_query() since GraphSymbolicReasoner does not define process()
+                self.logger.info("Attempting symbolic reasoning...")
+                symbolic_result = self.hybrid_integrator.symbolic_reasoner.process_query(query)
+                _check_timeout()
+
+                if symbolic_result:
+                    self.logger.info("Symbolic reasoning successful")
+                    return symbolic_result, "symbolic"
+
+                # Fallback to neural if symbolic fails.
+                self.logger.info("Symbolic reasoning insufficient, falling back to neural...")
+                try:
+                    neural_result = self.hybrid_integrator.neural.retrieve_answer(context, query)
+                    _check_timeout()
+                    self.logger.info("Neural processing successful")
+                    return neural_result, "neural"
+                except Exception as neural_error:
+                    self.logger.error(f"Neural processing failed: {str(neural_error)}")
+                    # If we have any symbolic result, return it as fallback
+                    if symbolic_result:
+                        return symbolic_result, "symbolic_fallback"
+                    raise
+
+            except Exception as e:
+                self.logger.error(f"Error in timed process: {str(e)}")
+                raise
+
+        except Exception as e:
+            self.logger.error(f"Unexpected error in timed process: {str(e)}")
+            raise
+
+    def _validate_resources(self, status: Dict[str, float]) -> bool:
+        """
+        Validate resource usage against thresholds.
+        """
+        cpu_threshold = 0.9  # 90% CPU usage limit.
+        memory_threshold = 0.85  # 85% memory usage limit.
+        gpu_threshold = 0.95  # 95% GPU usage limit.
+
+        return (
+            status['cpu'] < cpu_threshold and
+            status['memory'] < memory_threshold and
+            status.get('gpu', 0) < gpu_threshold
+        )
+
+    def _handle_timeout(self):
+        """
+        Handle timeout scenarios by adjusting resource allocation.
+        """
+        self.logger.info("Adjusting resource allocation due to timeout...")
+        self.resource_manager.optimize_resources()
+        time.sleep(1)  # Brief pause before retry.
+
+    def _handle_error(self, error: Exception):
+        """
+        Handle general processing errors.
+        """
+        self.logger.info(f"Attempting recovery from error: {str(error)}")
+        self.resource_manager.optimize_resources()
+        time.sleep(0.5)
+
+    def _handle_final_failure(
+            self,
+            start_time: float,
+            error_msg: str
+    ) -> Dict[str, Any]:
+        """
+        Handle the case when all retries are exhausted.
+        """
+        self._update_metrics(start_time, False)
+        return self.aggregator.format_response({
+            'error': error_msg,
+            'processing_time': time.time() - start_time,
+            'resource_usage': self.resource_manager.check_resources(),
+            'status': 'failed'
+        })
+
+    def _update_metrics(self, start_time: float, success: bool):
+        """
+        Update internal performance metrics with proper error handling.
+        """
+        try:
+            # Calculate response time first.
+            response_time = time.time() - start_time
+
+            # Update query counts.
+            self.performance_metrics['total_queries'] += 1
+            if success:
+                self.performance_metrics['successful_queries'] += 1
+            else:
+                self.performance_metrics['failed_queries'] += 1
+
+            # Get current metrics.
+            total_queries = self.performance_metrics['total_queries']
+            current_avg = self.performance_metrics['avg_response_time']
+
+            # Calculate new average - handle first query case.
+            if total_queries == 1:
+                new_avg = response_time
+            else:
+                new_avg = ((current_avg * (total_queries - 1)) + response_time) / total_queries
+
+            # Update the metrics.
+            self.performance_metrics['avg_response_time'] = new_avg
+
+            self.logger.debug(
+                f"Updated metrics - Success: {success}, "
+                f"Response Time: {response_time:.2f}s, "
+                f"New Avg: {new_avg:.2f}s"
+            )
+        except Exception as e:
+            self.logger.error(f"Error updating metrics: {str(e)}")
+
+class UnifiedResponseAggregator:
+    """
+    Aggregates and formats system responses consistently.
+    """
+
+    def __init__(self, include_explanations: bool = False):
+        self.include_explanations = include_explanations
+
+    def format_response(self, response_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Format the response with a consistent structure and optional explanations.
+        """
+        formatted = {
+            'timestamp': datetime.now().isoformat(),
+            'status': 'success' if 'result' in response_data else 'error',
+            'processing_time': response_data.get('processing_time', 0),
+            'resource_usage': response_data.get('resource_usage', {}),
+        }
+
+        if 'result' in response_data:
+            # Ensure the result is a string.
+            result = response_data['result']
+            if isinstance(result, dict) and 'result' in result:
+                result = result['result']
+            elif not isinstance(result, str):
+                result = str(result)
+            formatted['result'] = result
+            if self.include_explanations:
+                formatted['reasoning_path'] = response_data.get('reasoning_path', 'Direct response')
         else:
-            self.hybrid_integrator.batch_size = 4
-            if hasattr(self.hybrid_integrator.symbolic_reasoner, 'max_hops'):
-                self.hybrid_integrator.symbolic_reasoner.max_hops = 5
+            formatted['error'] = response_data.get('error', 'Unknown error occurred')
+
+        return formatted

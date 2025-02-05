@@ -44,14 +44,15 @@ class NeuralRetriever:
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
     def encode(self, text):
-        """
-        Encode the text into an embedding tensor using the SentenceTransformer.
-        Force the tensor onto CUDA if available.
-        """
-        emb = self.encoder.encode(text, convert_to_tensor=True)
-        if torch.cuda.is_available():
-            emb = emb.to('cuda')
-        return emb
+        """Add dimension validation"""
+        try:
+            emb = self.encoder.encode(text, convert_to_tensor=True)
+            if torch.cuda.is_available():
+                emb = emb.to('cuda')
+            return emb
+        except Exception as e:
+            logger.error(f"Error encoding text: {str(e)}")
+            raise
 
 
 if __name__ == "__main__":
