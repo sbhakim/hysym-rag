@@ -75,6 +75,39 @@ graph TD
    python -m spacy download en_core_web_sm en_core_web_md
 ```
 
+## Quick Start
+
+1. Run the system:
+   ```bash
+   python src/main.py
+   python src/main.py --query "What are the environmental effects of deforestation?"
+    ```
+## Project Structure
+
+```bash
+
+HySym-RAG/
+├── src/                     # Main source code
+│   ├── main.py              # Entry point for running the system
+│   ├── app.py               # Core application logic
+│   ├── config/              # Configuration files
+│   ├── reasoners/           # Symbolic and neural reasoning modules
+│   ├── integrators/         # Hybrid integration logic
+│   ├── resources/           # Resource management utilities
+│   ├── queries/             # Query expansion and logging utilities
+│   └── utils/               # Helper scripts and evaluation utilities
+├── data/                    # Input data and extracted rules
+│   ├── deforestation.txt    # Sample knowledge base
+│   ├── rules.json           # Extracted rules
+│   └── ground_truths.json   # Ground truth data for evaluation
+├── tests/                   # Unit and integration tests
+├── examples/                # Example queries and outputs
+├── requirements.txt         # Python dependencies
+├── README.md                # Project overview and usage instructions
+└── LICENSE                  # Project license
+    
+```
+
 ## Contributing
 
 We welcome contributions! Please follow these steps:
