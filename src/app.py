@@ -6,30 +6,36 @@ class App:
     """
     Main application class to integrate symbolic and neural reasoning.
     """
-    def __init__(self, symbolic, neural, logger, feedback, evaluator, expander, ground_truths):
+    def __init__(self, symbolic, neural, logger, feedback, evaluator, expander, ground_truths, system_manager=None):
         self.integrator = HybridIntegrator(symbolic, neural, feedback, expander)
         self.logger = logger
         self.feedback = feedback
         self.evaluator = evaluator
         self.expander = expander or QueryExpander()
         self.ground_truths = ground_truths
+        self.system_manager = system_manager  # Add system_manager as an attribute
 
     def run(self, query, context):
         """
         Process the query with expanded terms and pass it to the hybrid integrator.
         Returns (result, source).
         """
-        expanded_query = self.expander.expand_query(query)
-        print(f"Expanded Query: {expanded_query}")
-
-        result, source = self.integrator.process_query(expanded_query, context)
-        print(f"Answer retrieved using: {source} reasoning.")
-
-        # Evaluate if we have a ground truth
-        if self.evaluator and query in self.ground_truths:
-            evaluation = self.evaluator.evaluate({query: result}, self.ground_truths)
-            print(f"Evaluation Metrics: {evaluation}")
+        if self.system_manager:
+            # Use SystemControlManager for enhanced processing
+            return self.system_manager.process_query_with_fallback(query, context)
         else:
-            print("Note: No ground truth available for evaluation")
+            # Default fallback to HybridIntegrator
+            expanded_query = self.expander.expand_query(query)
+            print(f"Expanded Query: {expanded_query}")
 
-        return result, source
+            result, source = self.integrator.process_query(expanded_query, context)
+            print(f"Answer retrieved using: {source} reasoning.")
+
+            # Evaluate if we have a ground truth
+            if self.evaluator and query in self.ground_truths:
+                evaluation = self.evaluator.evaluate({query: result}, self.ground_truths)
+                print(f"Evaluation Metrics: {evaluation}")
+            else:
+                print("Note: No ground truth available for evaluation")
+
+            return result, source

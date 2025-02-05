@@ -85,7 +85,6 @@ graph TD
 ## Project Structure
 
 ```bash
-
 HySym-RAG/
 ├── src/                     # Main source code
 │   ├── main.py              # Entry point for running the system
@@ -105,7 +104,6 @@ HySym-RAG/
 ├── requirements.txt         # Python dependencies
 ├── README.md                # Project overview and usage instructions
 └── LICENSE                  # Project license
-    
 ```
 
 ## Contributing

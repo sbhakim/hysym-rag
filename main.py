@@ -11,6 +11,7 @@ from src.config.config_loader import ConfigLoader
 from src.queries.query_expander import QueryExpander
 from src.utils.evaluation import Evaluation
 from src.app import App
+from src.system.system_control_manager import SystemControlManager, UnifiedResponseAggregator
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
@@ -97,7 +98,18 @@ if __name__ == "__main__":
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(symbolic, neural, resource_manager, expander)
 
-    # 8. Main application + feedback handling
+    # 8. Initialize UnifiedResponseAggregator and SystemControlManager
+    print("Initializing System Control Components...")
+    aggregator = UnifiedResponseAggregator(include_explanations=True)
+    system_manager = SystemControlManager(
+        hybrid_integrator=integrator,
+        resource_manager=resource_manager,
+        aggregator=aggregator,
+        error_retry_limit=2,
+        max_query_time=10
+    )
+
+    # 9. Main application + feedback handling
     print("Initializing Application...")
     feedback_handler = FeedbackHandler(feedback_manager)
     app = App(
@@ -107,15 +119,16 @@ if __name__ == "__main__":
         feedback=resource_manager,  # Resource-aware scheduling
         evaluator=evaluator,
         expander=expander,
-        ground_truths=ground_truths
+        ground_truths=ground_truths,
+        system_manager=system_manager  # Add system_manager to App
     )
 
-    # 9. Load knowledge base (for neural context)
+    # 10. Load knowledge base (for neural context)
     print("Loading knowledge base...")
     with open("data/small_knowledge_base.txt", "r") as kb_file:
         context = kb_file.read()
 
-    # 10. Test queries
+    # 11. Test queries using SystemControlManager
     print("\n=== Testing System with Various Queries ===")
     test_queries = [
         {"query": "What are the environmental effects of deforestation?", "type": "ground_truth_available"},
@@ -133,37 +146,31 @@ if __name__ == "__main__":
             complexity = expander.get_query_complexity(query)
             print(f"Query Complexity Score: {complexity:.4f}")
 
-            # 2) Resource usage monitoring + run query
-            def process_query():
-                return app.run(query, context)
-            usage = resource_manager.monitor_resource_usage(process_query)
+            # 2) Process query through SystemControlManager
+            final_answer = system_manager.process_query_with_fallback(query, context)
 
-            # Run query again to get its result:
-            result, source = process_query()
+            # 3) Resource usage monitoring
+            usage = resource_manager.check_resources()
 
-            # 3) Logging
-            logger.log_query(query, result, source, complexity, usage)
+            # 4) Logging
+            logger.log_query(query, final_answer, "hybrid", complexity, usage)
 
-            # 4) Output partial info
-            print(f"\nProcessing Results:")
-            print(f"Source: {source}")
-            print(f"Resource Usage: {usage}")
-            print("\nResult Preview:")
+            # 5) Output result
+            print("\nProcessing Results:")
             print("-" * 20)
-            if isinstance(result, list) and result:
-                print(f"{result[0][:200]}...")
-            else:
-                print(str(result)[:200] + "...")
+            print(final_answer)
             print("-" * 20)
 
-            # 5) Evaluate if ground truth is available
+            # 6) Evaluate if ground truth is available
             if q_info["type"] == "ground_truth_available":
                 print("\nEvaluation Metrics:")
-                eval_metrics = evaluator.evaluate({query: result}, ground_truths)
+                eval_metrics = evaluator.evaluate({query: final_answer}, ground_truths)
                 print(f"Similarity Score: {eval_metrics['average_similarity']:.2f}")
-            # 6) Collect feedback if user desires
+
+            # 7) Collect feedback if user desires
             if input("\nWould you like to provide feedback? (yes/no): ").lower() == 'yes':
-                feedback_handler.collect_feedback(query, result)
+                feedback_handler.collect_feedback(query, final_answer)
+
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")
         except Exception as e:
