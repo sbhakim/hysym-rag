@@ -30,34 +30,114 @@ class NeuralRetriever:
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         # Set a maximum input length for prompt tokenization
         self.max_input_length = 512
-        # Guidance template for rule-guided generation
+        # Original guidance template (fallback)
         self.guidance_template = (
             "Following these rules:\n{rules}\n\n"
             "Based on the context and rules, provide a precise answer."
         )
+        # --- New: Enhanced prompt templates for rule-guided generation ---
+        self.prompt_templates = {
+            'causal': {
+                'prefix': "Let's analyze this step by step, considering the following principles:\n",
+                'suffix': "\nBased on these principles and using step-by-step reasoning:\n"
+            },
+            'factual': {
+                'prefix': "Consider these key points:\n",
+                'suffix': "\nUsing the above information:\n"
+            },
+            'exploratory': {
+                'prefix': "Taking into account these relevant facts:\n",
+                'suffix': "\nLet's explore the answer:\n"
+            }
+        }
         print(f"Model {model_name} loaded successfully!")
+
+    def format_rule_guidance(self, rules, query_type='factual'):
+        """
+        Format rules with advanced template selection and rule prioritization.
+        """
+        if not rules:
+            return ""
+
+        # Determine template based on query type
+        template = self.prompt_templates.get(query_type, self.prompt_templates['factual'])
+
+        # Process and prioritize rules: limit to top 3 most relevant rules
+        formatted_rules = []
+        for rule in rules[:3]:
+            if isinstance(rule, dict):
+                rule_text = rule.get("response", str(rule))
+                confidence = rule.get("confidence", 1.0)
+                # Format based on confidence level
+                if confidence > 0.8:
+                    prefix = "Critical principle:"
+                else:
+                    prefix = "Related principle:"
+                formatted_rules.append(f"{prefix} {rule_text}")
+            else:
+                formatted_rules.append(f"- {str(rule)}")
+
+        # Combine with template parts
+        return (
+                template['prefix'] +
+                "\n".join(formatted_rules) +
+                template['suffix']
+        )
+
+    def _determine_query_type(self, question):
+        """
+        Determine query type for template selection.
+        """
+        question_lower = question.lower()
+        if any(word in question_lower for word in ['why', 'how', 'cause', 'effect', 'lead to']):
+            return 'causal'
+        elif any(word in question_lower for word in ['what is', 'define', 'explain']):
+            return 'exploratory'
+        return 'factual'
+
+    def _get_generation_params(self, query_type):
+        """
+        Get generation parameters based on query type.
+        """
+        params = {
+            'causal': {
+                'max_length': 300,
+                'temperature': 0.7,
+                'num_beams': 2,
+            },
+            'factual': {
+                'max_length': 200,
+                'temperature': 0.3,
+                'num_beams': 1,
+            },
+            'exploratory': {
+                'max_length': 250,
+                'temperature': 0.5,
+                'num_beams': 2,
+            }
+        }
+        return params.get(query_type, params['factual'])
 
     def retrieve_answer(self, context, question, symbolic_guidance=None):
         """
-        Generate an answer using symbolic guidance and chain-of-thought prompting
-        for causal queries.
+        Enhanced answer generation with improved rule guidance.
         """
-        # Build guidance text if symbolic guidance is provided
-        guidance_text = ""
-        if symbolic_guidance:
-            # Format guidance as bullet points using the guidance template
-            rule_points = [f"- {rule}" for rule in symbolic_guidance]
-            guidance_text = self.guidance_template.format(rules="\n".join(rule_points))
+        # Determine query type based on question content
+        query_type = self._determine_query_type(question)
 
-        if is_causal_query(question):
-            cot_prompt = "Step-by-step causal reasoning:"
-            input_text = f"{cot_prompt}\nContext: {context}\nQuestion: {question}\nAnswer:"
-        else:
-            input_text = f"Context: {context}\nQuestion: {question}\nAnswer:"
+        # Format guidance with appropriate template if symbolic guidance is provided
+        guidance_text = self.format_rule_guidance(symbolic_guidance, query_type=query_type) if symbolic_guidance else ""
 
-        # Prepend guidance text if available
-        if guidance_text:
-            input_text = guidance_text + "\n" + input_text
+        # Construct complete prompt including guidance, context, and question
+        input_text = (
+            f"{guidance_text}\n"
+            f"Context: {context}\n"
+            f"Question: {question}\n"
+            f"Answer:"
+        )
+
+        # Get generation parameters based on query type
+        generation_params = self._get_generation_params(query_type)
 
         inputs = self.tokenizer(
             input_text,
@@ -65,7 +145,12 @@ class NeuralRetriever:
             truncation=True,
             max_length=self.max_input_length
         ).to(self.model.device)
-        outputs = self.model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
+
+        outputs = self.model.generate(
+            **inputs,
+            **generation_params
+        )
+
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
     def retrieve_answers_batched(self, contexts, questions, symbolic_guidances=None):
@@ -80,8 +165,7 @@ class NeuralRetriever:
             guidance = symbolic_guidances[i] if symbolic_guidances and i < len(symbolic_guidances) else None
             guidance_text = ""
             if guidance:
-                rule_points = [f"- {rule}" for rule in guidance]
-                guidance_text = self.guidance_template.format(rules="\n".join(rule_points))
+                guidance_text = self.format_rule_guidance(guidance)
             if is_causal_query(questions[i]):
                 cot_prompt = "Step-by-step causal reasoning:"
                 input_text = f"{cot_prompt}\nContext: {contexts[i]}\nQuestion: {questions[i]}\nAnswer:"

@@ -5,15 +5,16 @@ import psutil
 import time
 import numpy as np
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import pynvml
 
 # Import the ResourceOptimizer
 from src.resources.resource_optimizer import ResourceOptimizer
-
 # Import the PowerMonitor for energy tracking
 from src.resources.power_monitor import PowerMonitor
+# Import the new AdaptiveManager for learning resource thresholds
+from src.resources.adaptive_manager import AdaptiveManager
 
 # For applying cgroup limits; in development, we disable these calls.
 import cgroups
@@ -87,6 +88,8 @@ class ResourceManager:
         # Resource optimization components
         self.resource_optimizer = ResourceOptimizer()
         self.power_monitor = PowerMonitor()
+        # Initialize the adaptive manager
+        self.adaptive_manager = AdaptiveManager()
 
         # Performance tracking metrics
         self.total_queries = 0
@@ -110,7 +113,11 @@ class ResourceManager:
         self.monitoring = cfg['monitoring']
         self.adaptation = cfg['adaptation']
 
-    def check_resources(self):
+    def check_resources(self, query_type=None):
+        """
+        Enhanced resource checking with adaptive thresholds.
+        Optionally accepts a query_type to use learned thresholds.
+        """
         cpu_usage = psutil.cpu_percent(interval=1) / 100.0
         process = psutil.Process()
         memory_usage = process.memory_info().rss / (1024 ** 3)  # in GB
@@ -118,6 +125,19 @@ class ResourceManager:
         gpu_mem = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle).used / (1024 ** 3)
         usage = {"cpu": cpu_usage, "memory": memory_usage, "gpu": gpu_util, "gpu_mem": gpu_mem}
         self.update_usage_history(usage)
+
+        if query_type:
+            thresholds = self.adaptive_manager.get_thresholds(query_type)
+            usage['thresholds'] = thresholds
+
+            # Check if we're approaching thresholds (90% of each)
+            for resource, value in usage.items():
+                if resource in thresholds:
+                    if value > thresholds[resource] * 0.9:
+                        self.logger.warning(
+                            f"Resource {resource} approaching threshold for query type {query_type}"
+                        )
+
         return usage
 
     def update_usage_history(self, usage):
@@ -291,10 +311,10 @@ class ResourceManager:
 
         # Combine metrics into final score
         efficiency_score = (
-            0.4 * recent_accuracy +
-            0.3 * latency_score +
-            0.2 * (1.0 - recent_resource) +
-            0.1 * success_rate
+                0.4 * recent_accuracy +
+                0.3 * latency_score +
+                0.2 * (1.0 - recent_resource) +
+                0.1 * success_rate
         )
 
         return np.clip(efficiency_score, 0, 1)
