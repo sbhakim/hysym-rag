@@ -1,0 +1,21 @@
+resource_thresholds:
+  cpu:
+    base_threshold: 0.75
+    critical_threshold: 0.90
+    adjustment_factor: 0.1
+  memory:
+    base_threshold: 0.70
+    critical_threshold: 0.85
+    adjustment_factor: 0.2
+  gpu:
+    base_threshold: 0.60
+    critical_threshold: 0.75
+    adjustment_factor: 0.3
+
+monitoring:
+  window_size: 5
+  smoothing_factor: 0.4
+
+adaptation:
+  cool_down_period: 30
+  max_adjustment: 0.2

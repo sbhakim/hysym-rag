@@ -3,10 +3,12 @@
 import json
 import re
 import spacy
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer, AutoModel
 from collections import defaultdict
 from spacy.tokens import Token
 import logging
+from sklearn.cluster import KMeans
+import numpy as np
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +38,7 @@ except Exception as e:
 class RuleExtractor:
     """
     Enhanced RuleExtractor with pattern matching, coreference resolution,
-    and transformer-based rule scoring.
+    transformer-based rule scoring, and dynamic rule generation from neural patterns.
     """
 
     # Define linguistic patterns that indicate causal relationships
@@ -60,14 +62,12 @@ class RuleExtractor:
         """
         doc = nlp(text)
         resolved_text = []
-
         for token in doc:
             if token._.coref_clusters:
                 # Use the main mention from the first cluster
                 resolved_text.append(token._.coref_clusters[0].main.text)
             else:
                 resolved_text.append(token.text)
-
         return " ".join(resolved_text)
 
     @staticmethod
@@ -77,19 +77,15 @@ class RuleExtractor:
         Returns a list of cause-effect pairs with their source context.
         """
         chains = []
-
         for sent in doc.sents:
             sent_text = sent.text.lower()
-
             # Check for explicit causal relationships
             for cue in RuleExtractor.CAUSAL_CUES:
                 if cue in sent_text:
-                    # Split the sentence around the causal cue
                     parts = sent_text.split(cue)
                     if len(parts) == 2:
                         cause = parts[0].strip()
                         effect = parts[1].strip()
-
                         if cause and effect:
                             chains.append({
                                 "cause": cause,
@@ -97,26 +93,19 @@ class RuleExtractor:
                                 "source": sent.text,
                                 "type": "explicit"
                             })
-
             # Check for implicit relationships
             for token in sent:
                 if token.text.lower() in RuleExtractor.IMPLICIT_INDICATORS:
-                    # Look for subject and object
                     subject = None
                     obj = None
-
-                    # Find the subject (look to the left of the verb)
                     for left in token.lefts:
                         if left.dep_ in ("nsubj", "nsubjpass"):
                             subject = left
                             break
-
-                    # Find the object (look to the right of the verb)
                     for right in token.rights:
                         if right.dep_ in ("dobj", "pobj"):
                             obj = right
                             break
-
                     if subject and obj:
                         chains.append({
                             "cause": subject.text,
@@ -124,7 +113,6 @@ class RuleExtractor:
                             "source": sent.text,
                             "type": "implicit"
                         })
-
         return chains
 
     @staticmethod
@@ -135,15 +123,12 @@ class RuleExtractor:
         """
         doc = nlp(text.lower())
         keywords = []
-
         for token in doc:
-            # Include tokens that are meaningful parts of speech and not stopwords
             if (token.pos_ in ("NOUN", "VERB", "ADJ") and
                     not token.is_stop and
                     len(token.text) > 1):
                 keywords.append(token.lemma_)
-
-        return list(set(keywords))  # Remove duplicates
+        return list(set(keywords))
 
     @staticmethod
     def score_rule(cause, effect):
@@ -152,69 +137,33 @@ class RuleExtractor:
         Returns a confidence score between 0 and 1.
         """
         try:
-            # Create the input text in a format suitable for natural language inference
             input_text = f"premise: {cause} hypothesis: {effect}"
-
-            # Use the model for textual entailment instead of classification
-            result = rule_scorer(
-                input_text,
-                return_all_scores=True
-            )
-
-            # Calculate a confidence score based on the entailment probability
+            result = rule_scorer(input_text, return_all_scores=True)
             entailment_score = next(
                 (score["score"] for score in result[0] if score["label"] == "ENTAILMENT"),
                 0.0
             )
-
             return entailment_score
         except Exception as e:
             logger.warning(f"Error scoring rule: {str(e)}")
-            # Return a moderate confidence score as fallback
             return 0.5
 
     @staticmethod
     def extract_rules(input_file, output_file, quality_threshold=0.7):
         """
-        Extract rules from an input text file, combining automatic extraction with default rules.
-
-        This method performs several key steps:
-        1. Reads and preprocesses the input text
-        2. Extracts causal relationships using linguistic patterns
-        3. Converts relationships into rules with confidence scores
-        4. Falls back to default rules if needed
-        5. Saves the final ruleset to a JSON file
-
-        Args:
-            input_file (str): Path to the input text file containing domain knowledge
-            output_file (str): Path where the extracted rules will be saved
-            quality_threshold (float): Minimum confidence score (0.0-1.0) for including rules
-
-        Returns:
-            int: Number of rules successfully extracted and saved
+        Extract rules from an input text file and save them to a JSON file.
         """
         try:
             logger.info(f"Starting rule extraction from {input_file}")
-
-            # Read and preprocess the input text
             with open(input_file, 'r', encoding='utf-8') as file:
                 content = file.read()
-
-            # Resolve coreferences to improve relationship extraction
             resolved_content = RuleExtractor.resolve_coreferences(content)
             doc = nlp(resolved_content)
-
-            # Extract causal relationships from the text
             causal_chains = RuleExtractor.build_causal_chains(doc)
             logger.info(f"Found {len(causal_chains)} potential causal relationships")
-
-            # Convert causal chains to rules
             rules = []
             for chain in causal_chains:
-                # Score the quality of the potential rule
                 score = RuleExtractor.score_rule(chain["cause"], chain["effect"])
-
-                # Only include rules that meet the quality threshold
                 if score >= quality_threshold:
                     rule = {
                         "keywords": RuleExtractor.extract_keywords(chain["cause"]),
@@ -224,8 +173,6 @@ class RuleExtractor:
                         "type": chain.get("type", "extracted")
                     }
                     rules.append(rule)
-
-            # If no rules were extracted or passed the threshold, add default rules
             if not rules:
                 logger.info("No rules passed quality threshold, adding default environmental rules")
                 default_rules = [
@@ -267,27 +214,13 @@ class RuleExtractor:
                 ]
                 rules.extend(default_rules)
                 logger.info(f"Added {len(default_rules)} default rules")
-
-            # Sort rules by confidence score for better processing later
             rules.sort(key=lambda x: x["confidence"], reverse=True)
-
-            # Save the final ruleset to the output file
-            try:
-                with open(output_file, 'w', encoding='utf-8') as out_file:
-                    json.dump(rules, out_file, indent=4, ensure_ascii=False)
-                logger.info(f"Successfully saved {len(rules)} rules to {output_file}")
-            except IOError as e:
-                logger.error(f"Error saving rules to file: {str(e)}")
-                raise
-
-            # Return the number of rules successfully saved
+            with open(output_file, 'w', encoding='utf-8') as out_file:
+                json.dump(rules, out_file, indent=4, ensure_ascii=False)
+            logger.info(f"Successfully saved {len(rules)} rules to {output_file}")
             return len(rules)
-
         except Exception as e:
-            # Handle any unexpected errors during rule extraction
             logger.error(f"Error during rule extraction: {str(e)}")
-
-            # Create emergency fallback rules to ensure system can continue operating
             emergency_rules = [{
                 "keywords": ["deforestation"],
                 "response": "has negative environmental impacts including biodiversity loss",
@@ -295,9 +228,7 @@ class RuleExtractor:
                 "source": "emergency_fallback",
                 "type": "basic"
             }]
-
             try:
-                # Save emergency rules
                 with open(output_file, 'w', encoding='utf-8') as out_file:
                     json.dump(emergency_rules, out_file, indent=4)
                 logger.info("Saved emergency fallback rule due to extraction error")
@@ -305,3 +236,143 @@ class RuleExtractor:
             except Exception as write_error:
                 logger.critical(f"Critical error: Could not save emergency rules: {str(write_error)}")
                 return 0
+
+    # --- Dynamic Rule Generation Methods (Integrated in DynamicRuleGenerator below) ---
+    def cluster_embeddings(self, embeddings, num_clusters=5):
+        """Cluster embeddings and return clusters."""
+        n_samples = embeddings.shape[0]
+        if n_samples < num_clusters:
+            num_clusters = n_samples
+            logger.info(f"Reducing number of clusters to {num_clusters} due to low sample count.")
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+        labels = kmeans.fit_predict(embeddings)
+        clusters = defaultdict(list)
+        for label, emb in zip(labels, embeddings):
+            clusters[label].append(emb)
+        return list(clusters.values())
+
+    def generate_rule_from_cluster(self, cluster_texts):
+        """
+        Generate a rule from a cluster of texts.
+        Use a simple heuristic: combine the texts and extract the first causal pair.
+        """
+        combined_text = " ".join(cluster_texts)
+        doc = nlp(combined_text)
+        chains = self.build_causal_chains(doc)
+        if chains:
+            pair = chains[0]
+            return {
+                "keywords": self.extract_keywords(pair["cause"]),
+                "response": pair["effect"],
+                "confidence": self.score_rule(pair["cause"], pair["effect"]),
+                "source": "distilled",
+                "type": "generated"
+            }
+        else:
+            return {
+                "keywords": self.extract_keywords(cluster_texts[0]),
+                "response": cluster_texts[0],
+                "confidence": 0.5,
+                "source": "distilled_fallback",
+                "type": "generated"
+            }
+
+    def distill_rules_from_embeddings(self, text_data, num_clusters=5, similarity_threshold=0.8):
+        """
+        Distill symbolic rules from neural embeddings without needing external training data.
+        Args:
+            text_data (list): List of sentences or phrases.
+            num_clusters (int): Desired number of clusters.
+            similarity_threshold: (Not used directly here but could be used to filter clusters)
+        Returns:
+            List of distilled rules.
+        """
+        from sentence_transformers import SentenceTransformer
+        encoder = SentenceTransformer("all-MiniLM-L6-v2")
+        embeddings = encoder.encode(text_data, convert_to_tensor=True).cpu().numpy()
+        n_samples = embeddings.shape[0]
+        if n_samples < num_clusters:
+            num_clusters = n_samples
+            logger.info(f"Reducing number of clusters to {num_clusters} due to low sample count.")
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+        labels = kmeans.fit_predict(embeddings)
+        clusters_texts = defaultdict(list)
+        for label, text in zip(labels, text_data):
+            clusters_texts[label].append(text)
+        new_rules = []
+        for cluster_texts in clusters_texts.values():
+            if len(cluster_texts) > 1:
+                rule = self.generate_rule_from_cluster(cluster_texts)
+                new_rules.append(rule)
+        return new_rules
+
+    def update_rules_from_feedback(self, feedback_data):
+        """
+        Update rules based on user feedback.
+        Args:
+            feedback_data: List of feedback entries containing queries, results, and ratings.
+        """
+        for entry in feedback_data:
+            if entry.get("rating", 0) >= 4:
+                keywords = self.extract_keywords(entry["query"])
+                response = entry["result"]
+                new_rule = {
+                    "keywords": keywords,
+                    "response": response,
+                    "confidence": entry["rating"] / 5.0,
+                    "source": "user_feedback",
+                    "type": "feedback"
+                }
+                logger.info(f"New feedback rule: {new_rule}")
+        logger.info("Feedback-based rule update complete.")
+
+
+class DynamicRuleGenerator:
+    """
+    Dynamically generates new rules by clustering neural embeddings of text data.
+    This class serves as a wrapper that leverages RuleExtractor's dynamic methods.
+    """
+
+    def __init__(self, encoder_model="all-MiniLM-L6-v2", threshold=0.7):
+        from sentence_transformers import SentenceTransformer
+        self.encoder = SentenceTransformer(encoder_model)
+        self.threshold = threshold
+        # Create an instance of RuleExtractor to use its methods.
+        self.rule_extractor = RuleExtractor()
+
+    def generate_rules_from_embeddings(self, text_data, num_clusters=5):
+        """
+        Generate new rules by clustering neural embeddings of the provided text data.
+        """
+        from collections import defaultdict
+        from sklearn.cluster import KMeans
+        embeddings = self.encoder.encode(text_data, convert_to_tensor=True).cpu().numpy()
+        n_samples = embeddings.shape[0]
+        if n_samples < num_clusters:
+            num_clusters = n_samples
+            logger.info(f"Reducing number of clusters to {num_clusters} due to low sample count.")
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+        labels = kmeans.fit_predict(embeddings)
+        clusters_texts = defaultdict(list)
+        for label, text in zip(labels, text_data):
+            clusters_texts[label].append(text)
+        new_rules = []
+        for cluster_texts in clusters_texts.values():
+            if len(cluster_texts) > 1:
+                rule = self.rule_extractor.generate_rule_from_cluster(cluster_texts)
+                new_rules.append(rule)
+        return new_rules
+
+    def update_rule_base(self, new_rules, output_file="data/rules.json"):
+        """
+        Append new rules to the existing rule base.
+        """
+        try:
+            with open(output_file, "r") as file:
+                existing_rules = json.load(file)
+        except FileNotFoundError:
+            existing_rules = []
+        existing_rules.extend(new_rules)
+        with open(output_file, "w") as file:
+            json.dump(existing_rules, file, indent=4)
+        logger.info(f"Updated rule base with {len(new_rules)} new rules.")

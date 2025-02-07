@@ -3,6 +3,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+
+hysym_code_1.txt
+hysym_code.txt
+extract_hysym.sh
+hysym_code_2.txt
+.idea/
+logs/
+
+
 # C extensions
 *.so
 

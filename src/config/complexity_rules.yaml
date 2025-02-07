@@ -1,0 +1,31 @@
+question_types:
+  basic:
+    - what: 0.2
+    - when: 0.3
+    - where: 0.3
+  analytical:
+    - why: 0.8
+    - how: 0.8
+    - explain: 0.9
+    - analyze: 0.9
+
+domain_terms:
+  environmental:
+    - term: "biodiversity"
+      weight: 0.4
+      synonyms: ["species diversity", "ecological diversity"]
+    - term: "climate"
+      weight: 0.4
+      synonyms: ["global warming", "temperature"]
+
+structural_patterns:
+  multi_part:
+    - pattern: "and"
+      weight: 0.5
+    - pattern: "or"
+      weight: 0.5
+  dependency:
+    - pattern: "because"
+      weight: 0.4
+    - pattern: "due to"
+      weight: 0.4
