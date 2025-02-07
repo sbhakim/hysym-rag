@@ -74,11 +74,25 @@ class AlignmentLayer(nn.Module):
             nn.Linear(self.hidden_dim, target_dim)
         )
 
-        # Confidence scoring module
+        # Confidence scoring module (original)
         self.confidence_scorer = nn.Sequential(
             nn.Linear(target_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 1),
+            nn.Sigmoid()
+        )
+        # NEW: Rule confidence gate for additional rule-based confidence estimation
+        self.rule_confidence_gate = nn.Sequential(
+            nn.Linear(target_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+        # NEW: Context analyzer for computing context-based confidence
+        self.context_analyzer = nn.Sequential(
+            nn.Linear(target_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
             nn.Sigmoid()
         )
 
@@ -107,7 +121,7 @@ class AlignmentLayer(nn.Module):
             logger.error(f"Error in dynamic_project: {str(e)}")
             raise
 
-    def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor) -> Tuple[torch.Tensor, float, Optional[dict]]:
+    def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor, rule_confidence: Optional[float] = None) -> Tuple[torch.Tensor, float, Optional[dict]]:
         try:
             self._log_memory_usage("start_forward")
             sym_emb = self._validate_and_prepare_input(sym_emb, "Symbolic")
@@ -140,10 +154,19 @@ class AlignmentLayer(nn.Module):
                     neural_emb = self.neural_adapter(neural_emb)
                 combined = torch.cat([attended_features, neural_emb.unsqueeze(1)], dim=-1)
             aligned_embedding = self.alignment_projection(combined)
-            confidence_score = self.confidence_scorer(aligned_embedding).squeeze(-1)
+            # Compute context-based confidence
+            context_score = self.context_analyzer(aligned_embedding)
+            # If an external rule_confidence value is provided, compute a rule-based score and average it
+            if rule_confidence is not None:
+                rule_score = self.rule_confidence_gate(aligned_embedding)
+                dynamic_confidence = (context_score + rule_score) / 2
+            else:
+                dynamic_confidence = context_score
+            # Alternatively, you might still combine with the original confidence_scorer if needed:
+            # confidence_score = self.confidence_scorer(aligned_embedding).squeeze(-1)
+            confidence_score = dynamic_confidence  # Using the dynamic confidence computed above
             self._log_memory_usage("after_alignment")
-            # Incorporate confidence-weighted fusion: fuse aligned and original neural embedding.
-            # Assuming neural_emb is compatible with aligned_embedding dimensions.
+            # Dynamic fusion: fuse aligned and original neural embedding weighted by the computed confidence score.
             fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
             debug_info = {
                 'attention_weights': attention_weights.detach().cpu().numpy(),
@@ -154,8 +177,11 @@ class AlignmentLayer(nn.Module):
                 'aligned_emb_shape': list(aligned_embedding.shape),
                 'fused_emb_shape': list(fused_embedding.shape),
                 'attended_features_shape': list(attended_features.shape),
-                'combined_shape': list(combined.shape)
+                'combined_shape': list(combined.shape),
+                'context_score': context_score.mean().item()
             }
+            if rule_confidence is not None:
+                debug_info['rule_score'] = rule_score.mean().item()
             logger.info(f"Alignment completed successfully. Confidence: {confidence_score.mean().item():.4f}")
             self._log_memory_usage("end_forward")
             return fused_embedding, confidence_score.mean().item(), debug_info
