@@ -4,6 +4,13 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import torch
 
+def is_causal_query(question):
+    """
+    Determines if the question likely requires causal reasoning.
+    """
+    causal_keywords = ['cause', 'result', 'lead to', 'because']
+    return any(keyword in question.lower() for keyword in causal_keywords)
+
 class NeuralRetriever:
     def __init__(self, model_name):
         print(f"Initializing Neural Retriever with model: {model_name}...")
@@ -11,14 +18,20 @@ class NeuralRetriever:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype="auto"
         )
+        # Load a SentenceTransformer for encoding
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         print(f"Model {model_name} loaded successfully!")
 
     def retrieve_answer(self, context, question, symbolic_guidance=None):
         """
-        Generate an answer using symbolic guidance to influence neural attention.
+        Generate an answer using symbolic guidance and chain-of-thought prompting
+        for causal queries.
         """
-        input_text = f"Context: {context}\nQuestion: {question}\nAnswer:"
+        if is_causal_query(question):
+            cot_prompt = "Step-by-step causal reasoning:"
+            input_text = f"{cot_prompt}\nContext: {context}\nQuestion: {question}\nAnswer:"
+        else:
+            input_text = f"Context: {context}\nQuestion: {question}\nAnswer:"
         if symbolic_guidance:
             guidance_text = " ".join(symbolic_guidance)
             input_text = f"Guidance: {guidance_text}\n" + input_text
@@ -27,6 +40,9 @@ class NeuralRetriever:
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
     def encode(self, text):
+        """
+        Returns the neural embedding for the provided text.
+        """
         try:
             emb = self.encoder.encode(text, convert_to_tensor=True)
             if torch.cuda.is_available():

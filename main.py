@@ -196,8 +196,8 @@ if __name__ == "__main__":
                 print(f"Similarity Score: {eval_metrics['average_similarity']:.2f}")
 
             # 7) Collect feedback if user desires
-            if input("\nWould you like to provide feedback? (yes/no): ").lower() == 'yes':
-                feedback_handler.collect_feedback(query, final_answer)
+        #    if input("\nWould you like to provide feedback? (yes/no): ").lower() == 'yes':
+        #        feedback_handler.collect_feedback(query, final_answer)
 
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")

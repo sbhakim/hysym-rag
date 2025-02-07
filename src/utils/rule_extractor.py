@@ -32,7 +32,8 @@ except Exception as e:
 class RuleExtractor:
     """
     Enhanced RuleExtractor with pattern matching, coreference resolution,
-    transformer-based rule scoring, and neural pattern distillation.
+    transformer-based rule scoring, neural pattern distillation, and optional
+    transformer-based causal extraction.
     """
     CAUSAL_CUES = {
         "cause", "caused by", "result in", "lead to", "leads to",
@@ -133,7 +134,27 @@ class RuleExtractor:
         return distilled_rules
 
     @staticmethod
-    def extract_rules(input_file, output_file, quality_threshold=0.7, neural_data=None):
+    def extract_causal_rules(text, quality_threshold=0.8):
+        """
+        Uses a pre-trained relation extraction model to extract causal rules.
+        Here we use 'Babelscape/rebel-large' as an example.
+        """
+        causal_extractor = pipeline("relation-extraction", model="Babelscape/rebel-large")
+        results = causal_extractor(text)
+        causal_rules = []
+        for res in results:
+            if res["score"] >= quality_threshold:
+                causal_rules.append({
+                    "keywords": RuleExtractor.extract_keywords(res["cause"]),
+                    "response": res["effect"],
+                    "confidence": res["score"],
+                    "source": "transformer_causal",
+                    "type": "causal_extracted"
+                })
+        return causal_rules
+
+    @staticmethod
+    def extract_rules(input_file, output_file, quality_threshold=0.7, neural_data=None, use_transformer=False):
         try:
             logger.info(f"Starting rule extraction from {input_file}")
             with open(input_file, 'r', encoding='utf-8') as file:
@@ -154,6 +175,10 @@ class RuleExtractor:
                         "type": chain.get("type", "extracted")
                     }
                     rules.append(rule)
+            if use_transformer:
+                transformer_rules = RuleExtractor.extract_causal_rules(resolved_content, quality_threshold)
+                rules.extend(transformer_rules)
+                logger.info(f"Extracted {len(transformer_rules)} causal rules using transformer-based extraction")
             if not rules:
                 logger.info("No rules passed quality threshold, adding default environmental rules")
                 default_rules = [
