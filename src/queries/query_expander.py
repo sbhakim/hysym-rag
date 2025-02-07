@@ -4,25 +4,73 @@ from transformers import AutoTokenizer, AutoModel
 import torch
 import spacy
 import os
+from sentence_transformers import SentenceTransformer, util
+
 
 class QueryExpander:
-    def __init__(self, complexity_config=None, expansion_rules=None):
-        # Original expansion rules
+    def __init__(self, complexity_config=None, expansion_rules=None, embedder=None):
+        # Original expansion rules (if not provided, use default)
         self.expansion_rules = expansion_rules or {
             "deforestation": ["forest loss", "tree cutting", "logging"],
             "climate change": ["global warming", "greenhouse gases"],
             "biodiversity": ["species diversity", "ecosystem diversity"]
         }
-        # Use a medium-size spacy model for vector support (ensure you have it installed)
+        # Use a medium-size spaCy model for structural analysis
         self.nlp = spacy.load("en_core_web_md")
+        # Initialize tokenizer and model for computing query complexity
         self.tokenizer = AutoTokenizer.from_pretrained("prajjwal1/bert-tiny")
         self.model = AutoModel.from_pretrained("prajjwal1/bert-tiny", output_attentions=True)
+        # Load additional configuration if provided
         self.config = {}
         if complexity_config and os.path.exists(complexity_config):
             with open(complexity_config, "r") as f:
                 self.config = yaml.safe_load(f)
         # Set a similarity threshold for expansion
         self.sim_threshold = 0.6
+        # Initialize embedder for rule guidance (use SentenceTransformer)
+        self.embedder = embedder or SentenceTransformer('all-MiniLM-L6-v2')
+        # Initialize cache and precompute rule embeddings
+        self.rule_cache = {}
+        self.rule_embeddings = None
+        self._initialize_rule_embeddings()
+
+    def _initialize_rule_embeddings(self):
+        """Pre-compute embeddings for all rules to improve efficiency."""
+        if not self.expansion_rules:
+            return
+        rule_texts = []
+        # Use both rule keys and their synonyms for computing embeddings
+        for rule_key, synonyms in self.expansion_rules.items():
+            rule_texts.append(rule_key)
+            rule_texts.extend(synonyms)
+        self.rule_embeddings = self.embedder.encode(
+            rule_texts,
+            convert_to_tensor=True,
+            show_progress_bar=False
+        )
+
+    def _get_rule_guidance(self, query):
+        """Get relevant rules for query expansion."""
+        cache_key = hash(query)
+        if cache_key in self.rule_cache:
+            return self.rule_cache[cache_key]
+        # Encode the query using the SentenceTransformer embedder
+        query_embedding = self.embedder.encode(query, convert_to_tensor=True, show_progress_bar=False)
+        similarities = util.cos_sim(query_embedding.unsqueeze(0), self.rule_embeddings).squeeze()
+        # Find indices where similarity meets the threshold
+        relevant_indices = (similarities >= self.sim_threshold).nonzero(as_tuple=False).squeeze()
+        if relevant_indices.dim() == 0:
+            if similarities.item() >= self.sim_threshold:
+                relevant_indices = [int(relevant_indices.item())]
+            else:
+                relevant_indices = []
+        else:
+            relevant_indices = relevant_indices.tolist()
+        # Map indices back to the rule keys (first N entries correspond to keys)
+        rule_keys = list(self.expansion_rules.keys())
+        relevant_rules = [rule_keys[i] for i in relevant_indices if i < len(rule_keys)]
+        self.rule_cache[cache_key] = relevant_rules
+        return relevant_rules
 
     def get_query_complexity(self, query):
         inputs = self.tokenizer(query, return_tensors="pt")
@@ -53,17 +101,15 @@ class QueryExpander:
 
     def _semantic_expansion(self, query):
         """
-        Perform semantic query expansion using spacy vectors.
+        Perform semantic query expansion using spaCy vectors.
         For each term in our expansion rules that appears in the query,
         find similar words (from the provided candidate list) that exceed a similarity threshold.
         """
         doc = self.nlp(query)
         expanded_terms = []
         for term, candidates in self.expansion_rules.items():
-            # Process the domain term using spacy
             term_doc = self.nlp(term)
             if term.lower() in query.lower():
-                # For each candidate, compute similarity with the domain term
                 similar = []
                 for cand in candidates:
                     cand_doc = self.nlp(cand)
@@ -71,31 +117,34 @@ class QueryExpander:
                     if sim >= self.sim_threshold:
                         similar.append(cand)
                 if similar:
-                    # Append the domain term along with selected synonyms
                     expanded_terms.append(f"({term} OR {' OR '.join(similar)})")
         return " ".join(expanded_terms)
 
     def expand_query(self, query):
         complexity = self.get_query_complexity(query)
         print(f"Query complexity score: {complexity}")
-        # If complexity is high, skip expansion
         if complexity > 1.0:
             print("Skipping expansion due to high complexity.")
             return query
-        # Perform semantic expansion
+        # Perform semantic expansion and basic string-based expansion
         semantic_expansion = self._semantic_expansion(query)
-        # Also perform original string-based expansion (if desired)
         basic_expansion = query
         for term, synonyms in self.expansion_rules.items():
             if term.lower() in query.lower():
                 expansion_group = f"({term} OR {' OR '.join(synonyms)})"
                 basic_expansion = basic_expansion.replace(term, expansion_group)
-        # Combine original query with semantic expansion (if any)
-        if semantic_expansion:
-            expanded = basic_expansion + " " + semantic_expansion
+        # Get rule-guided expansion
+        rule_guidance = self._get_rule_guidance(query)
+        if rule_guidance:
+            expanded_terms = set(basic_expansion.split())
+            expanded_terms.update(rule_guidance)
+            combined_expansion = " ".join(expanded_terms)
         else:
-            expanded = basic_expansion
-        return expanded.strip()
+            combined_expansion = basic_expansion
+        if semantic_expansion:
+            combined_expansion = combined_expansion + " " + semantic_expansion
+        return combined_expansion.strip()
+
 
 # For testing purposes:
 if __name__ == "__main__":
