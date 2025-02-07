@@ -172,10 +172,13 @@ class SystemControlManager:
         except Exception as e:
             self.logger.error(f"Error updating metrics: {str(e)}")
 
+
 class UnifiedResponseAggregator:
     """
-    Aggregates and formats system responses consistently.
+    Aggregates and formats system responses with intelligent synthesis of
+    symbolic and neural outputs.
     """
+
     def __init__(self, include_explanations: bool = False):
         self.include_explanations = include_explanations
 
@@ -186,15 +189,55 @@ class UnifiedResponseAggregator:
             'processing_time': response_data.get('processing_time', 0),
             'resource_usage': response_data.get('resource_usage', {}),
         }
+
         if 'result' in response_data:
             result = response_data['result']
-            if isinstance(result, dict) and 'result' in result:
-                result = result['result']
-            elif not isinstance(result, str):
-                result = str(result)
-            formatted['result'] = result
+            # Extract the symbolic and neural parts if this is a hybrid result
+            if isinstance(result, str) and 'Symbolic:' in result:
+                formatted['result'] = self._synthesize_hybrid_response(result)
+            else:
+                formatted['result'] = self._clean_response(result)
+
             if self.include_explanations:
                 formatted['reasoning_path'] = response_data.get('reasoning_path', 'Direct response')
         else:
             formatted['error'] = response_data.get('error', 'Unknown error occurred')
         return formatted
+
+    def _synthesize_hybrid_response(self, hybrid_result: str) -> str:
+        # Split into symbolic and neural parts
+        parts = hybrid_result.split('\nNeural:')
+        symbolic_part = parts[0].replace('Symbolic:', '').strip()
+        neural_part = parts[1].strip() if len(parts) > 1 else ""
+
+        # Extract symbolic insights
+        symbolic_points = [point.strip() for point in symbolic_part.strip('[]').split(',')]
+
+        # Build a coherent response
+        synthesized = "Based on analysis, deforestation has several key environmental impacts:\n\n"
+
+        # Add symbolic insights first
+        for point in symbolic_points:
+            point = point.strip().strip("'").strip('"')
+            if point:
+                synthesized += f"- {point.capitalize()}\n"
+
+        # Add neural elaboration if available
+        if neural_part:
+            # Clean up neural response by removing question patterns
+            neural_clean = neural_part.split('Question:')[0].strip()
+            neural_clean = neural_clean.split('Answer:')[-1].strip()
+
+            synthesized += f"\nFurther analysis reveals: {neural_clean}"
+
+        return synthesized
+
+    def _clean_response(self, result: Any) -> str:
+        """
+        Clean and format a single-source response.
+        """
+        if isinstance(result, list):
+            return "\n".join(f"- {item}" for item in result)
+        elif isinstance(result, dict):
+            return result.get('result', str(result))
+        return str(result).strip()
