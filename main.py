@@ -34,11 +34,11 @@ class NeuralRetriever:
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         print(f"Model {model_name} loaded successfully!")
 
-    def retrieve_answer(self, context, question):
-        """
-        Generate an answer from the neural model given a context and a question.
-        """
-        input_text = f"Context: {context}\nQuestion: {question}\nAnswer:"
+    def retrieve_answer(self, context, question, symbolic_guidance=None):
+        input_text = f"Context: {context}\nQuestion: {question}"
+        if symbolic_guidance:
+            input_text = f"Guidance: {' '.join(symbolic_guidance)}\n{input_text}"
+        input_text += "\nAnswer:"
         inputs = self.tokenizer(input_text, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)

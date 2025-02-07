@@ -1,17 +1,25 @@
 resource_thresholds:
   cpu:
-    base_threshold: 0.7
-    adjustment_factor: 0.1
+    base_threshold: 0.85    # Increased from 0.7
+    adjustment_factor: 0.08  # Reduced from 0.1
   memory:
-    base_threshold: 0.7
-    adjustment_factor: 0.1
+    base_threshold: 0.85    # Increased from 0.7
+    adjustment_factor: 0.08  # Reduced from 0.1
   gpu:
-    base_threshold: 0.7
-    adjustment_factor: 0.1
+    base_threshold: 0.95    # Significantly increased from 0.7
+    adjustment_factor: 0.05  # Reduced from 0.1
 
 monitoring:
-  window_size: 10
+  window_size: 15           # Increased from 10
+  sampling_interval: 5      # New parameter for smoother monitoring
+  alert_threshold: 0.95     # New parameter for critical resource usage
 
 adaptation:
-  cool_down_period: 60
-  max_adjustment: 0.2
+  cool_down_period: 30      # Reduced from 60 for faster adaptation
+  max_adjustment: 0.15      # Reduced from 0.2 for more stability
+  min_adjustment: 0.02      # New parameter for fine-grained control
+
+recovery:                   # New section for handling resource pressure
+  backoff_factor: 1.5
+  max_retries: 3
+  grace_period: 10
