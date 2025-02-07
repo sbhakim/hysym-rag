@@ -1,6 +1,7 @@
 # main.py
 
 from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
+from src.reasoners.neural_retriever import NeuralRetriever
 from src.integrators.hybrid_integrator import HybridIntegrator
 from src.utils.rule_extractor import RuleExtractor
 from src.queries.query_logger import QueryLogger
@@ -18,56 +19,23 @@ from sentence_transformers import SentenceTransformer
 import os
 import json
 import torch
+import warnings
 
-class NeuralRetriever:
-    """
-    NeuralRetriever class for retrieving answers from a neural language model.
-    Also provides an encode() method for obtaining neural embeddings.
-    """
-    def __init__(self, model_name):
-        print(f"Initializing Neural Retriever with model: {model_name}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, device_map="auto", torch_dtype="auto"
-        )
-        # Load a SentenceTransformer for encoding
-        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-        print(f"Model {model_name} loaded successfully!")
-
-    def retrieve_answer(self, context, question, symbolic_guidance=None):
-        input_text = f"Context: {context}\nQuestion: {question}"
-        if symbolic_guidance:
-            input_text = f"Guidance: {' '.join(symbolic_guidance)}\n{input_text}"
-        input_text += "\nAnswer:"
-        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.model.device)
-        outputs = self.model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    def encode(self, text):
-        """Add dimension validation"""
-        try:
-            emb = self.encoder.encode(text, convert_to_tensor=True)
-            if torch.cuda.is_available():
-                emb = emb.to('cuda')
-            return emb
-        except Exception as e:
-            logger.error(f"Error encoding text: {str(e)}")
-            raise
-
+# Suppress specific spaCy warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
 
 if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
 
-    # 1. Load config (existing code)
+    # 1. Load configuration
     print("Loading configuration...")
     config = ConfigLoader.load_config("src/config/config.yaml")
     model_name = config["model_name"]
 
-    # 2. Initialize ResourceManager with performance tracking enabled
+    # 2. Initialize Resource Manager with performance tracking enabled
     print("Initializing Resource Manager...")
     resource_manager = ResourceManager(
         config_path="src/config/resource_config.yaml",
-        # New parameters for performance tracking
         enable_performance_tracking=True,
         history_window_size=100  # Keep history of last 100 queries
     )
@@ -81,14 +49,14 @@ if __name__ == "__main__":
     symbolic = GraphSymbolicReasoner(
         "data/rules.json",
         match_threshold=0.25,  # modest threshold
-        max_hops=5             # allow deeper multi-hop chaining
+        max_hops=5  # allow deeper multi-hop chaining
     )
 
-    # 5. Initialize the Neural Retriever
+    # 5. Initialize the Neural Retriever (optionally enable quantization)
     print("Initializing Neural Retriever...")
-    neural = NeuralRetriever(model_name)
+    neural = NeuralRetriever(model_name, use_quantization=False)
 
-    # 6. Support components: logger, feedback manager, query expander, evaluation
+    # 6. Initialize support components: logger, feedback manager, query expander, evaluation
     print("Initializing support components...")
     logger = QueryLogger()
     feedback_manager = FeedbackManager()
@@ -101,7 +69,7 @@ if __name__ == "__main__":
         ground_truths = json.load(gt_file)
     evaluator = Evaluation()
 
-    # 7. Hybrid integrator (decides symbolic vs. neural calls)
+    # 7. Create Hybrid Integrator (deciding symbolic vs. neural calls)
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(symbolic, neural, resource_manager, expander)
 
@@ -116,18 +84,18 @@ if __name__ == "__main__":
         max_query_time=10
     )
 
-    # 9. Main application + feedback handling
+    # 9. Initialize Application and Feedback Handler
     print("Initializing Application...")
     feedback_handler = FeedbackHandler(feedback_manager)
     app = App(
         symbolic=symbolic,
         neural=neural,
         logger=logger,
-        feedback=resource_manager,  # Resource-aware scheduling
+        feedback=resource_manager,  # resource-aware scheduling
         evaluator=evaluator,
         expander=expander,
         ground_truths=ground_truths,
-        system_manager=system_manager  # Add system_manager to App
+        system_manager=system_manager
     )
 
     # 10. Load knowledge base (for neural context)
@@ -142,7 +110,6 @@ if __name__ == "__main__":
         {"query": "What is the social impact of deforestation?", "type": "ground_truth_available"},
         {"query": "What is deforestation?", "type": "exploratory"},
         {"query": "How does deforestation cause climate change?", "type": "ground_truth_available"}
-
     ]
 
     for q_info in test_queries:
@@ -151,26 +118,19 @@ if __name__ == "__main__":
         print(f"Query Type: {q_info['type']}")
         print("-" * 50)
         try:
-            # Process query as before
+            # Process query: get complexity, resource metrics, and final answer via hybrid processing
             complexity = expander.get_query_complexity(query)
             print(f"Query Complexity Score: {complexity:.4f}")
 
-            # Get performance metrics before query
             initial_metrics = resource_manager.check_resources()
-
-            # Process query
             final_answer = system_manager.process_query_with_fallback(query, context)
-
-            # Get performance metrics after query
             final_metrics = resource_manager.check_resources()
-
-            # Calculate resource usage
             resource_delta = {
                 key: final_metrics[key] - initial_metrics[key]
                 for key in final_metrics
             }
 
-            # Log query and results
+            # Log the query and result
             logger.log_query(
                 query=query,
                 result=final_answer,
@@ -179,7 +139,6 @@ if __name__ == "__main__":
                 resource_usage=resource_delta
             )
 
-            # Output results with performance information
             print("\nProcessing Results:")
             print("-" * 20)
             print(final_answer)
@@ -189,22 +148,48 @@ if __name__ == "__main__":
             print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
 
-            # Evaluate if ground truth is available
             if q_info["type"] == "ground_truth_available":
                 print("\nEvaluation Metrics:")
                 eval_metrics = evaluator.evaluate({query: final_answer}, ground_truths)
                 print(f"Similarity Score: {eval_metrics['average_similarity']:.2f}")
-
-            # 7) Collect feedback if user desires
-        #    if input("\nWould you like to provide feedback? (yes/no): ").lower() == 'yes':
-        #        feedback_handler.collect_feedback(query, final_answer)
 
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # Final summary
+    # 12. Comparison Experiment: Hybrid vs Neural-Only
+    print("\n=== Comparison Experiment: Hybrid vs Neural-Only ===")
+    comparison_queries = [
+        "What are the environmental effects of deforestation?"
+    ]
+
+    # Print header for comparison table
+    header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (GB)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
+    print(header)
+    print("-" * len(header))
+
+    for query in comparison_queries:
+        # Run Hybrid Reasoning
+        initial_metrics_hybrid = resource_manager.check_resources()
+        hybrid_answer = system_manager.process_query_with_fallback(query, context)
+        final_metrics_hybrid = resource_manager.check_resources()
+        hybrid_delta = {k: final_metrics_hybrid[k] - initial_metrics_hybrid[k] for k in final_metrics_hybrid}
+
+        # Run Neural-Only Reasoning (direct call)
+        initial_metrics_neural = resource_manager.check_resources()
+        neural_answer = neural.retrieve_answer(context, query)
+        final_metrics_neural = resource_manager.check_resources()
+        neural_delta = {k: final_metrics_neural[k] - initial_metrics_neural[k] for k in final_metrics_neural}
+
+        # Prepare and print table rows
+        row_hybrid = f"{query:<50} | {'Hybrid':<15} | {hybrid_delta['cpu'] * 100:>10.1f} | {hybrid_delta['memory']:>15.2f} | {hybrid_delta['gpu'] * 100:>10.1f} | {hybrid_answer}"
+        row_neural = f"{query:<50} | {'Neural':<15} | {neural_delta['cpu'] * 100:>10.1f} | {neural_delta['memory']:>15.2f} | {neural_delta['gpu'] * 100:>10.1f} | {neural_answer}"
+        print(row_hybrid)
+        print(row_neural)
+        print("-" * len(header))
+
+    # 13. Final performance summary
     print("\n=== System Performance Summary ===")
     performance_stats = system_manager.get_performance_metrics()
     print("\nOverall Performance:")

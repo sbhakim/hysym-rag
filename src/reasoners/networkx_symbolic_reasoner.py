@@ -1,10 +1,12 @@
 # src/reasoners/networkx_symbolic_reasoner.py
+
 import json
 import spacy
 import networkx as nx
 import logging
 from sentence_transformers import SentenceTransformer, util
 import torch
+import numpy as np
 
 logger = logging.getLogger("GraphSymbolicReasoner")
 try:
@@ -13,11 +15,13 @@ except Exception as e:
     logger.error(f"Error loading spaCy model in GraphSymbolicReasoner: {str(e)}")
     raise
 
+
 class GraphSymbolicReasoner:
     """
     A graph-based symbolic reasoner that uses sentence embeddings for matching and supports
     multi-hop chaining by traversing a rule graph. It also provides an extract_keywords method.
     """
+
     def __init__(self, rules_file, match_threshold=0.25, max_hops=5):
         self.match_threshold = match_threshold
         self.max_hops = max_hops
@@ -25,8 +29,8 @@ class GraphSymbolicReasoner:
         self.nlp = spacy.load("en_core_web_sm")
         self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
         self.rule_index = {}
+        self.traversal_cache = {}  # cache for traversal results
         self.build_rule_index()
-        self.graph = nx.DiGraph()
         self.build_graph()
         self.build_causal_graph()
         logger.info("GraphSymbolicReasoner initialized successfully.")
@@ -43,9 +47,12 @@ class GraphSymbolicReasoner:
             rule["embedding"] = embedding
             rule["id"] = rule_id
             self.rule_index[rule_id] = rule
+        # Prepare for vectorized matching.
+        self.rule_ids = list(self.rule_index.keys())
+        self.rule_embeddings = torch.stack([self.rule_index[rid]["embedding"] for rid in self.rule_ids])
 
     def build_graph(self):
-        self.graph.clear()
+        self.graph = nx.DiGraph()
         for rule_id, rule in self.rule_index.items():
             self.graph.add_node(rule_id, rule=rule)
         for id1, rule1 in self.rule_index.items():
@@ -70,7 +77,8 @@ class GraphSymbolicReasoner:
         Extract meaningful keywords from the input text using spaCy.
         """
         doc = self.nlp(text.lower())
-        keywords = [token.lemma_ for token in doc if token.pos_ in ("NOUN", "VERB", "ADJ") and not token.is_stop and len(token.text) > 1]
+        keywords = [token.lemma_ for token in doc
+                    if token.pos_ in ("NOUN", "VERB", "ADJ") and not token.is_stop and len(token.text) > 1]
         return list(set(keywords))
 
     def encode(self, query):
@@ -79,15 +87,21 @@ class GraphSymbolicReasoner:
     def traverse_graph(self, query_embedding, max_hops=None):
         if max_hops is None:
             max_hops = self.max_hops
+        # Compute a fingerprint for caching (using tobytes)
+        fingerprint = hash(query_embedding.detach().cpu().numpy().tobytes())
+        if fingerprint in self.traversal_cache:
+            return self.traversal_cache[fingerprint]
+
+        # Vectorized similarity computation
+        sims = util.cos_sim(query_embedding, self.rule_embeddings).squeeze(0)
+        initial_indices = (sims >= self.match_threshold).nonzero(as_tuple=False).flatten().tolist()
+        if not initial_indices:
+            self.traversal_cache[fingerprint] = []
+            return []
+        initial_matches = [self.rule_ids[i] for i in initial_indices]
+
         visited = set()
         results = []
-        initial_matches = []
-        for rule_id, rule in self.rule_index.items():
-            sim = util.cos_sim(query_embedding, rule["embedding"]).item()
-            if sim >= self.match_threshold:
-                initial_matches.append(rule_id)
-        if not initial_matches:
-            return []
         current_nodes = initial_matches
         hops = 0
         while current_nodes and hops < max_hops:
@@ -101,6 +115,8 @@ class GraphSymbolicReasoner:
                 new_nodes.extend(list(self.graph.neighbors(node_id)))
             current_nodes = new_nodes
             hops += 1
+
+        self.traversal_cache[fingerprint] = results
         return results
 
     def traverse_causal_graph(self, query):
@@ -113,7 +129,8 @@ class GraphSymbolicReasoner:
                 for target in self.causal_graph.nodes():
                     if target != token:
                         try:
-                            paths = nx.all_simple_paths(self.causal_graph, source=token, target=target, cutoff=self.max_hops)
+                            paths = nx.all_simple_paths(self.causal_graph, source=token, target=target,
+                                                        cutoff=self.max_hops)
                             for path in paths:
                                 responses.append(" -> ".join(path))
                         except nx.NetworkXNoPath:

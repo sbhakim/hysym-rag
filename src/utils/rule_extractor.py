@@ -105,7 +105,7 @@ class RuleExtractor:
     def score_rule(cause, effect):
         try:
             input_text = f"premise: {cause} hypothesis: {effect}"
-            result = rule_scorer(input_text, return_all_scores=True)
+            result = rule_scorer(input_text)
             entailment_score = next((score["score"] for score in result[0] if score["label"] == "ENTAILMENT"), 0.0)
             return entailment_score
         except Exception as e:
