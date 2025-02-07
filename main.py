@@ -57,14 +57,20 @@ class NeuralRetriever:
 
 if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
-    # 1. Load config (contains LLM model name, etc.)
+
+    # 1. Load config (existing code)
     print("Loading configuration...")
     config = ConfigLoader.load_config("src/config/config.yaml")
     model_name = config["model_name"]
 
-    # 2. Initialize ResourceManager (others depend on it)
+    # 2. Initialize ResourceManager with performance tracking enabled
     print("Initializing Resource Manager...")
-    resource_manager = ResourceManager("src/config/resource_config.yaml")
+    resource_manager = ResourceManager(
+        config_path="src/config/resource_config.yaml",
+        # New parameters for performance tracking
+        enable_performance_tracking=True,
+        history_window_size=100  # Keep history of last 100 queries
+    )
 
     # 3. Extract symbolic rules into data/rules.json
     print("Extracting rules from deforestation.txt...")
@@ -145,26 +151,45 @@ if __name__ == "__main__":
         print(f"Query Type: {q_info['type']}")
         print("-" * 50)
         try:
-            # 1) Compute query complexity
+            # Process query as before
             complexity = expander.get_query_complexity(query)
             print(f"Query Complexity Score: {complexity:.4f}")
 
-            # 2) Process query through SystemControlManager
+            # Get performance metrics before query
+            initial_metrics = resource_manager.check_resources()
+
+            # Process query
             final_answer = system_manager.process_query_with_fallback(query, context)
 
-            # 3) Resource usage monitoring
-            usage = resource_manager.check_resources()
+            # Get performance metrics after query
+            final_metrics = resource_manager.check_resources()
 
-            # 4) Logging
-            logger.log_query(query, final_answer, "hybrid", complexity, usage)
+            # Calculate resource usage
+            resource_delta = {
+                key: final_metrics[key] - initial_metrics[key]
+                for key in final_metrics
+            }
 
-            # 5) Output result
+            # Log query and results
+            logger.log_query(
+                query=query,
+                result=final_answer,
+                source="hybrid",
+                complexity=complexity,
+                resource_usage=resource_delta
+            )
+
+            # Output results with performance information
             print("\nProcessing Results:")
             print("-" * 20)
             print(final_answer)
+            print("\nResource Usage:")
+            print(f"CPU Delta: {resource_delta['cpu'] * 100:.1f}%")
+            print(f"Memory Delta: {resource_delta['memory']:.2f} GB")
+            print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
 
-            # 6) Evaluate if ground truth is available
+            # Evaluate if ground truth is available
             if q_info["type"] == "ground_truth_available":
                 print("\nEvaluation Metrics:")
                 eval_metrics = evaluator.evaluate({query: final_answer}, ground_truths)
@@ -181,10 +206,23 @@ if __name__ == "__main__":
 
     # Final summary
     print("\n=== System Performance Summary ===")
-    final_resources = resource_manager.check_resources()
+    performance_stats = system_manager.get_performance_metrics()
+    print("\nOverall Performance:")
+    print(f"- Total Queries: {performance_stats['total_queries']}")
+    print(f"- Average Response Time: {performance_stats['avg_response_time']:.2f}s")
+    print(f"- Success Rate: {performance_stats['success_rate']:.1f}%")
+
     print("\nResource Utilization:")
+    final_resources = resource_manager.check_resources()
     print(f"- CPU Usage: {final_resources['cpu'] * 100:.1f}%")
     print(f"- Memory Usage: {final_resources['memory'] * 100:.1f}%")
+    print(f"- GPU Usage: {final_resources['gpu'] * 100:.1f}%")
+
+    print("\nReasoning Path Distribution:")
+    path_stats = system_manager.get_reasoning_path_stats()
+    for path, percentage in path_stats.items():
+        print(f"- {path}: {percentage:.1f}%")
+
     print("\nSystem Information:")
     print(f"Model Path: {neural.model.config._name_or_path}")
     print(f"Cache Location: {os.getenv('HF_HOME', os.path.expanduser('~/.cache/huggingface'))}")
