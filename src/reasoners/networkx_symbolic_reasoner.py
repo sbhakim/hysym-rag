@@ -15,13 +15,11 @@ except Exception as e:
     logger.error(f"Error loading spaCy model in GraphSymbolicReasoner: {str(e)}")
     raise
 
-
 class GraphSymbolicReasoner:
     """
     A graph-based symbolic reasoner that uses sentence embeddings for matching and supports
     multi-hop chaining by traversing a rule graph. It also provides an extract_keywords method.
     """
-
     def __init__(self, rules_file, match_threshold=0.25, max_hops=5):
         self.match_threshold = match_threshold
         self.max_hops = max_hops
@@ -47,7 +45,6 @@ class GraphSymbolicReasoner:
             rule["embedding"] = embedding
             rule["id"] = rule_id
             self.rule_index[rule_id] = rule
-        # Prepare for vectorized matching.
         self.rule_ids = list(self.rule_index.keys())
         self.rule_embeddings = torch.stack([self.rule_index[rid]["embedding"] for rid in self.rule_ids])
 
@@ -87,12 +84,10 @@ class GraphSymbolicReasoner:
     def traverse_graph(self, query_embedding, max_hops=None):
         if max_hops is None:
             max_hops = self.max_hops
-        # Compute a fingerprint for caching (using tobytes)
         fingerprint = hash(query_embedding.detach().cpu().numpy().tobytes())
         if fingerprint in self.traversal_cache:
             return self.traversal_cache[fingerprint]
 
-        # Vectorized similarity computation
         sims = util.cos_sim(query_embedding, self.rule_embeddings).squeeze(0)
         initial_indices = (sims >= self.match_threshold).nonzero(as_tuple=False).flatten().tolist()
         if not initial_indices:
@@ -129,8 +124,7 @@ class GraphSymbolicReasoner:
                 for target in self.causal_graph.nodes():
                     if target != token:
                         try:
-                            paths = nx.all_simple_paths(self.causal_graph, source=token, target=target,
-                                                        cutoff=self.max_hops)
+                            paths = nx.all_simple_paths(self.causal_graph, source=token, target=target, cutoff=self.max_hops)
                             for path in paths:
                                 responses.append(" -> ".join(path))
                         except nx.NetworkXNoPath:
@@ -147,3 +141,39 @@ class GraphSymbolicReasoner:
             return ["No symbolic match found."]
         logger.info(f"Multi-hop symbolic responses found: {responses}")
         return responses
+
+    # --- NEW: Method to add dynamic rules ---
+    def add_dynamic_rules(self, new_rules):
+        """
+        Add newly extracted rules to both self.rules and the internal graph structures in-memory.
+        """
+        if not new_rules:
+            return
+
+        start_index = len(self.rules)
+        for i, rule in enumerate(new_rules):
+            rule_id = f"rule_{start_index + i}"
+            # Compute embedding
+            cause_text = " ".join(rule.get("keywords", []))
+            rule_embedding = self.embedder.encode(cause_text, convert_to_tensor=True)
+            rule["embedding"] = rule_embedding
+            rule["id"] = rule_id
+            self.rules.append(rule)
+            # Add to rule_index
+            self.rule_index[rule_id] = rule
+
+            # Expand self.rule_ids and self.rule_embeddings
+            self.rule_ids.append(rule_id)
+            self.rule_embeddings = torch.cat([self.rule_embeddings, rule_embedding.unsqueeze(0)], dim=0)
+
+            # Add node to the main graph
+            self.graph.add_node(rule_id, rule=rule)
+            # Possibly add edges to existing nodes if keywords overlap:
+            for existing_id, existing_rule in self.rule_index.items():
+                if existing_id == rule_id:
+                    continue
+                if set(rule.get("keywords", [])) & set(existing_rule.get("keywords", [])):
+                    self.graph.add_edge(rule_id, existing_id)
+                    self.graph.add_edge(existing_id, rule_id)
+
+        logger.info(f"Added {len(new_rules)} dynamic rules to the symbolic reasoner.")

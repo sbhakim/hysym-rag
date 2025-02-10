@@ -109,7 +109,8 @@ if __name__ == "__main__":
         {"query": "What are the environmental effects of deforestation?", "type": "ground_truth_available"},
         {"query": "What is the social impact of deforestation?", "type": "ground_truth_available"},
         {"query": "What is deforestation?", "type": "exploratory"},
-        {"query": "How does deforestation cause climate change?", "type": "ground_truth_available"}
+        {"query": "How does deforestation cause climate change?", "type": "ground_truth_available"},
+        {"query": "How does deforestation cause soil erosion?", "type": "ground_truth_available"}  # NEW query added
     ]
 
     for q_info in test_queries:

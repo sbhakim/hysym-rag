@@ -1,10 +1,9 @@
 Forests are essential for biodiversity, carbon storage, and water regulation.
 
-If deforestation occurs, then there is a loss of biodiversity.
-If deforestation continues unchecked, then carbon dioxide (CO2) levels increase.
-If trees are removed for agriculture, then the soil becomes more prone to erosion.
-If deforestation is driven by the demand for timber, farmland, or housing in tropical regions, then environmental degradation intensifies.
-If forest cover is reduced, then water regulation and local climate stability are compromised.
-If unsustainable logging practices occur, then habitat fragmentation increases, leading to a decline in native species.
-If deforestation accelerates, then the loss of ecosystem services disrupts regional economies.
-
+Deforestation causes soil erosion.
+Deforestation leads to increased carbon dioxide emissions.
+Deforestation results in loss of biodiversity.
+Deforestation causes disruption of the natural water cycle.
+Deforestation leads to the displacement of local communities.
+Deforestation produces significant habitat loss for native species.
+Deforestation gives rise to environmental degradation and climate change.

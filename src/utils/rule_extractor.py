@@ -246,3 +246,35 @@ class RuleExtractor:
             except Exception as write_error:
                 logger.critical(f"Critical error: Could not save emergency rules: {str(write_error)}")
                 return 0
+
+# --- NEW: Helper method for dynamic rule extraction from neural output ---
+def extract_rules_from_neural_output(neural_text, threshold=0.4):
+    """
+    Parses neural outputs to find potential new rules.
+    Returns a list of new rule dicts in the same shape as the default rules.
+    Example shape: {
+        "keywords": [...],
+        "response": "...",
+        "confidence": 0.9,
+        "source": "dynamic_neural",
+        "type": "neural_extracted"
+    }
+    """
+    new_rules = []
+    # Simple example: looking for patterns "X leads to Y" or "X causes Y"
+    pattern = re.compile(r"(.*?) (?:leads to|causes) (.*?)(\.|$)", re.IGNORECASE)
+    matches = pattern.findall(neural_text)
+    for match in matches:
+        cause = match[0].strip()
+        effect = match[1].strip()
+        if cause and effect:
+            keywords = [kw.lower() for kw in cause.split() if len(kw) > 2]
+            response_text = f"{cause} leads to {effect}"
+            new_rules.append({
+                "keywords": keywords,
+                "response": response_text,
+                "confidence": 0.8,
+                "source": "dynamic_neural",
+                "type": "neural_extracted"
+            })
+    return new_rules

@@ -7,9 +7,8 @@ from typing import Tuple, List, Dict, Optional
 from datetime import datetime, timedelta
 from sentence_transformers import util
 
-# Now we can use util.cos_sim() for cosine similarity calculations between embeddings
-
 from src.knowledge_integrator import AlignmentLayer
+from src.utils.rule_extractor import extract_rules_from_neural_output  # NEW import
 
 logger = logging.getLogger(__name__)
 
@@ -83,73 +82,53 @@ class HybridIntegrator:
         Returns:
             Tuple of (result list, reasoning type used)
         """
-        # Track query statistics for performance monitoring
         self.performance_stats['total_queries'] += 1
 
-        # Check cache first to avoid redundant computation
         cache_key = self._generate_cache_key(query)
         cached_result = self._get_valid_cache(cache_key)
         if cached_result:
             return cached_result
 
         try:
-            # Get query complexity to guide processing path
             if self.query_expander:
                 complexity = self.query_expander.get_query_complexity(query)
                 logger.info(f"Query complexity score: {complexity:.4f}")
             else:
-                complexity = 0.5  # Default moderate complexity
+                complexity = 0.5
 
-            # Determine initial processing strategy based on complexity
             if complexity < 0.4:
-                # Simple queries go straight to symbolic reasoning
                 symbolic_result = self._process_symbolic(query)
                 if symbolic_result:
                     return symbolic_result, "symbolic"
 
-            # For moderate to complex queries, use hybrid approach
             symbolic_emb = self.symbolic_reasoner.encode(query)
             neural_emb = self.neural.encode(query)
-
-            # Ensure consistent device placement and shape
             symbolic_emb, neural_emb = self.ensure_device_consistency(symbolic_emb, neural_emb)
             symbolic_emb = self._prepare_embedding(symbolic_emb, 300, "symbolic")
             neural_emb = self._prepare_embedding(neural_emb, 384, "neural")
 
-            # Attempt alignment of symbolic and neural representations
             try:
                 aligned_emb, confidence, debug_info = self.alignment_layer(symbolic_emb, neural_emb)
                 logger.info(f"Alignment confidence: {confidence:.3f}")
-
-                # Log detailed debug information if available
                 if debug_info:
                     logger.debug(f"Alignment debug info: {debug_info}")
-
             except Exception as alignment_error:
                 logger.error(f"Alignment error: {str(alignment_error)}. Falling back to neural.")
                 confidence = 0.0
 
-            # Process based on alignment confidence and complexity
-            if confidence > 0.6:  # Lowered threshold for more hybrid processing
+            if confidence > 0.6:
                 symbolic_result = self._process_symbolic(query)
                 if symbolic_result:
-                    # Try hybrid processing with symbolic guidance
                     try:
-                        neural_result = self._process_neural_optimized(
-                            query,
-                            context,
-                            symbolic_guidance=symbolic_result
-                        )
+                        neural_result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result)
                         combined_result = self._combine_results(symbolic_result, neural_result)
                         self.performance_stats['hybrid_successes'] += 1
                         self._update_cache(cache_key, (combined_result, "hybrid"))
                         return combined_result, "hybrid"
                     except Exception as hybrid_error:
                         logger.warning(f"Hybrid processing failed: {str(hybrid_error)}")
-                        # Fall back to symbolic result if hybrid fails
                         return symbolic_result, "symbolic"
 
-            # Default to neural processing for low confidence or failed hybrid
             result = self._process_neural_optimized(query, context)
             self._update_cache(cache_key, (result, "neural"))
             return result, "neural"
@@ -162,36 +141,24 @@ class HybridIntegrator:
             logger.error(f"Unexpected error: {str(generic_error)}")
             return self._handle_fallback(query, context)
 
-    def _prepare_embedding(self, embedding: torch.Tensor, target_dim: int,
-                           name: str) -> torch.Tensor:
-        """Helper method to prepare embeddings for alignment."""
+    def _prepare_embedding(self, embedding: torch.Tensor, target_dim: int, name: str) -> torch.Tensor:
         if embedding.dim() == 1:
             embedding = embedding.unsqueeze(0)
-
         if embedding.size(1) != target_dim:
             logger.warning(f"Transforming {name} embedding from {embedding.size(1)} to {target_dim}")
             projection = torch.nn.Linear(embedding.size(1), target_dim).to(self.device)
             embedding = projection(embedding)
-
         return embedding
 
-    def _combine_results(self, symbolic_results: List[str],
-                         neural_result: List[str]) -> List[str]:
-        """Intelligently combine symbolic and neural results."""
+    def _combine_results(self, symbolic_results: List[str], neural_result: List[str]) -> List[str]:
         combined = []
-        # Add symbolic insights first
         combined.extend(symbolic_results)
-
-        # Add neural response if it provides new information
         for neural_resp in neural_result:
-            if not any(self._high_overlap(neural_resp, sym_resp)
-                       for sym_resp in symbolic_results):
+            if not any(self._high_overlap(neural_resp, sym_resp) for sym_resp in symbolic_results):
                 combined.append(neural_resp)
-
         return combined
 
     def _high_overlap(self, text1: str, text2: str, threshold: float = 0.7) -> bool:
-        """Check if two text segments have high semantic overlap."""
         emb1 = self.neural.encode(text1)
         emb2 = self.neural.encode(text2)
         similarity = util.cos_sim(emb1, emb2).item()
@@ -208,12 +175,19 @@ class HybridIntegrator:
             logger.error(f"Error in symbolic processing: {str(e)}")
             return None
 
-    def _process_neural_optimized(self, query: str, context: str) -> List[str]:
+    def _process_neural_optimized(self, query: str, context: str, symbolic_guidance: Optional[List[str]] = None) -> List[str]:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         try:
             start_time = time.time()
-            result = [self.neural.retrieve_answer(context, query)]
+            answer_text = self.neural.retrieve_answer(context, query, symbolic_guidance=symbolic_guidance)
+            result = [answer_text]
+            # --- NEW DYNAMIC RULE PARSING ---
+            dynamic_rules = extract_rules_from_neural_output(answer_text)
+            if dynamic_rules:
+                logger.info(f"Extracted {len(dynamic_rules)} dynamic rules from neural output.")
+                self.symbolic_reasoner.add_dynamic_rules(dynamic_rules)
+            # --- END DYNAMIC RULE PARSING ---
             processing_time = time.time() - start_time
             self.resource_manager.neural_perf_times.append(processing_time)
             self.performance_stats['neural_hits'] += 1
@@ -232,3 +206,11 @@ class HybridIntegrator:
             'average_neural_time': (sum(self.resource_manager.neural_perf_times) / len(self.resource_manager.neural_perf_times)
                                     if self.resource_manager.neural_perf_times else 0)
         }
+
+    def _handle_runtime_error(self, error: RuntimeError):
+        logger.error(f"Runtime error occurred: {str(error)}")
+        # Additional handling if needed
+
+    def _handle_fallback(self, query: str, context: str) -> Tuple[List[str], str]:
+        fallback_response = ["Unable to process query. Please try again later."]
+        return fallback_response, "fallback"
