@@ -38,5 +38,10 @@
   {
     "query": "How can sustainable forestry practices mitigate the impacts of deforestation?",
     "type": "exploratory"
+  },
+  {
+    "query": "What is deforestation?",
+    "type": "exploratory",
+    "forced_path": "symbolic"
   }
 ]

@@ -112,8 +112,11 @@ if __name__ == "__main__":
     print("\n=== Testing System with Various Queries ===")
     for q_info in test_queries:
         query = q_info["query"]
+        forced_path = q_info.get("forced_path", None)  # check for forced path
         print(f"\nProcessing Query: {query}")
         print(f"Query Type: {q_info['type']}")
+        if forced_path:
+            print(f"Forced Path: {forced_path}")
         print("-" * 50)
         try:
             # Process query: get complexity, resource metrics, and final answer via hybrid processing
@@ -121,7 +124,7 @@ if __name__ == "__main__":
             print(f"Query Complexity Score: {complexity:.4f}")
 
             initial_metrics = resource_manager.check_resources()
-            final_answer = system_manager.process_query_with_fallback(query, context)
+            final_answer = system_manager.process_query_with_fallback(query, context, forced_path=forced_path)
             final_metrics = resource_manager.check_resources()
             resource_delta = {
                 key: final_metrics[key] - initial_metrics[key]
@@ -142,7 +145,7 @@ if __name__ == "__main__":
             print(final_answer)
             print("\nResource Usage:")
             print(f"CPU Delta: {resource_delta['cpu'] * 100:.1f}%")
-            # Since memory is now a fraction (0-1), multiply by 100 for percentage
+            # Memory is now a fraction, so display as percentage.
             print(f"Memory Delta: {resource_delta['memory'] * 100:.1f}%")
             print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
