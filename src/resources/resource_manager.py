@@ -119,8 +119,8 @@ class ResourceManager:
         Optionally accepts a query_type to use learned thresholds.
         """
         cpu_usage = psutil.cpu_percent(interval=1) / 100.0
-        process = psutil.Process()
-        memory_usage = process.memory_info().rss / (1024 ** 3)  # in GB
+        # Use percentage of total memory rather than absolute GB
+        memory_usage = psutil.virtual_memory().percent / 100.0
         gpu_util = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu / 100.0
         gpu_mem = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle).used / (1024 ** 3)
         usage = {"cpu": cpu_usage, "memory": memory_usage, "gpu": gpu_util, "gpu_mem": gpu_mem}
@@ -194,7 +194,7 @@ class ResourceManager:
         gpu_usage = usage.get("gpu", 0)
         optimal_alloc = self.resource_optimizer.optimize(cpu_usage, mem_usage, gpu_usage)
         self.logger.info(f"Optimal allocations: {optimal_alloc}")
-        # For development, disable cgroup application by simply not applying any limits.
+        # For development, cgroup allocation is disabled.
         # self.apply_optimal_allocations(optimal_alloc)
         self.logger.info("Cgroup allocation disabled for development.")
         return optimal_alloc
@@ -311,10 +311,10 @@ class ResourceManager:
 
         # Combine metrics into final score
         efficiency_score = (
-                0.4 * recent_accuracy +
-                0.3 * latency_score +
-                0.2 * (1.0 - recent_resource) +
-                0.1 * success_rate
+            0.4 * recent_accuracy +
+            0.3 * latency_score +
+            0.2 * (1.0 - recent_resource) +
+            0.1 * success_rate
         )
 
         return np.clip(efficiency_score, 0, 1)
@@ -378,3 +378,54 @@ class ResourceManager:
         # self.apply_optimal_allocations(optimal_allocation)
         self.logger.info("Cgroup allocation disabled for development.")
         return optimal_allocation
+
+    def apply_optimal_allocations(self, allocations):
+        """
+        Apply optimized resource limits using Linux cgroups.
+        In production, ensure your system has proper cgroup hierarchies.
+        For development, you can safely disable this function.
+        """
+        try:
+            # Uncomment the following lines in production when cgroup hierarchies are available.
+            # cpu_limit = allocations['cpu'] * 100
+            # cgroup_cpu = cgroups.Cgroup('cpu')
+            # cgroup_cpu.set_cpu_limit(cpu_limit)
+            # self.logger.info(f"Applied CPU limit: {cpu_limit}%")
+            #
+            # gpu_mem_limit = allocations.get('gpu_mem', 0.8) * (1024 ** 3)
+            # cgroup_gpu = cgroups.Cgroup('gpu')
+            # cgroup_gpu.set_memory_limit(gpu_mem_limit)
+            # self.logger.info(f"Applied GPU memory limit: {gpu_mem_limit / (1024 ** 3):.2f} GB")
+            pass
+        except Exception as e:
+            self.logger.error(f"Error applying cgroup allocations: {str(e)}")
+
+    def monitor_resource_usage(self, inference_func):
+        """
+        Monitors the resource usage while an inference function is executed.
+        """
+        start_cpu = psutil.cpu_percent(interval=0.1)
+        start_mem = psutil.virtual_memory().percent
+        start_gpu = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu
+
+        start_time = time.time()
+        inference_func()
+        end_time = time.time()
+
+        end_cpu = psutil.cpu_percent(interval=0.1)
+        end_mem = psutil.virtual_memory().percent
+        end_gpu = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu
+
+        cpu_usage = end_cpu - start_cpu
+        memory_usage = end_mem - start_mem
+        gpu_usage = end_gpu - start_gpu
+        time_taken = end_time - start_time
+
+        return {
+            "cpu_usage": cpu_usage,
+            "memory_usage": memory_usage,
+            "gpu_usage": gpu_usage,
+            "time_taken": time_taken
+        }
+
+

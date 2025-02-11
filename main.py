@@ -103,16 +103,13 @@ if __name__ == "__main__":
     with open("data/small_knowledge_base.txt", "r") as kb_file:
         context = kb_file.read()
 
-    # 11. Test queries using SystemControlManager
-    print("\n=== Testing System with Various Queries ===")
-    test_queries = [
-        {"query": "What are the environmental effects of deforestation?", "type": "ground_truth_available"},
-        {"query": "What is the social impact of deforestation?", "type": "ground_truth_available"},
-        {"query": "What is deforestation?", "type": "exploratory"},
-        {"query": "How does deforestation cause climate change?", "type": "ground_truth_available"},
-        {"query": "How does deforestation cause soil erosion?", "type": "ground_truth_available"}  # NEW query added
-    ]
+    # 11. Load queries from data/query_list.json
+    print("\nLoading query list from data/query_list.json...")
+    with open("data/query_list.json", "r") as q_file:
+        test_queries = json.load(q_file)
 
+    # 12. Test queries using SystemControlManager
+    print("\n=== Testing System with Various Queries ===")
     for q_info in test_queries:
         query = q_info["query"]
         print(f"\nProcessing Query: {query}")
@@ -145,7 +142,8 @@ if __name__ == "__main__":
             print(final_answer)
             print("\nResource Usage:")
             print(f"CPU Delta: {resource_delta['cpu'] * 100:.1f}%")
-            print(f"Memory Delta: {resource_delta['memory']:.2f} GB")
+            # Since memory is now a fraction (0-1), multiply by 100 for percentage
+            print(f"Memory Delta: {resource_delta['memory'] * 100:.1f}%")
             print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
 
@@ -159,38 +157,39 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # 12. Comparison Experiment: Hybrid vs Neural-Only
+    # 13. Comparison Experiment: Hybrid vs Neural-Only
     print("\n=== Comparison Experiment: Hybrid vs Neural-Only ===")
     comparison_queries = [
         "What are the environmental effects of deforestation?"
     ]
 
     # Print header for comparison table
-    header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (GB)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
+    header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (%)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
     print(header)
     print("-" * len(header))
 
     for query in comparison_queries:
         # Run Hybrid Reasoning
         initial_metrics_hybrid = resource_manager.check_resources()
-        hybrid_answer = system_manager.process_query_with_fallback(query, context)
+        hybrid_answer = system_manager.process_query_with_fallback(query, context)  # Let system choose path
         final_metrics_hybrid = resource_manager.check_resources()
         hybrid_delta = {k: final_metrics_hybrid[k] - initial_metrics_hybrid[k] for k in final_metrics_hybrid}
 
-        # Run Neural-Only Reasoning (direct call)
+        # Run Neural-Only Reasoning (direct call - now using system_manager with forced path)
         initial_metrics_neural = resource_manager.check_resources()
-        neural_answer = neural.retrieve_answer(context, query)
+        neural_answer_raw = system_manager.process_query_with_fallback(query, context, forced_path="neural")  # Force "neural" path
+        neural_answer = aggregator.format_response({'result': neural_answer_raw})  # Format response for consistency
         final_metrics_neural = resource_manager.check_resources()
         neural_delta = {k: final_metrics_neural[k] - initial_metrics_neural[k] for k in final_metrics_neural}
 
         # Prepare and print table rows
-        row_hybrid = f"{query:<50} | {'Hybrid':<15} | {hybrid_delta['cpu'] * 100:>10.1f} | {hybrid_delta['memory']:>15.2f} | {hybrid_delta['gpu'] * 100:>10.1f} | {hybrid_answer}"
-        row_neural = f"{query:<50} | {'Neural':<15} | {neural_delta['cpu'] * 100:>10.1f} | {neural_delta['memory']:>15.2f} | {neural_delta['gpu'] * 100:>10.1f} | {neural_answer}"
+        row_hybrid = f"{query:<50} | {'Hyb.':<15} | {hybrid_delta['cpu'] * 100:>10.1f} | {hybrid_delta['memory'] * 100:>15.1f} | {hybrid_delta['gpu'] * 100:>10.1f} | {hybrid_answer}"
+        row_neural = f"{query:<50} | {'Neural':<15} | {neural_delta['cpu'] * 100:>10.1f} | {neural_delta['memory'] * 100:>15.1f} | {neural_delta['gpu'] * 100:>10.1f} | {str(neural_answer)[:150]}..."
         print(row_hybrid)
         print(row_neural)
         print("-" * len(header))
 
-    # 13. Final performance summary
+    # 14. Final performance summary
     print("\n=== System Performance Summary ===")
     performance_stats = system_manager.get_performance_metrics()
     print("\nOverall Performance:")

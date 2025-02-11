@@ -1,0 +1,42 @@
+[
+  {
+    "query": "What are the environmental effects of deforestation?",
+    "type": "ground_truth_available"
+  },
+  {
+    "query": "How does deforestation impact the water cycle?",
+    "type": "ground_truth_available"
+  },
+  {
+    "query": "What are the economic consequences of deforestation?",
+    "type": "exploratory"
+  },
+  {
+    "query": "How does deforestation affect biodiversity?",
+    "type": "ground_truth_available"
+  },
+  {
+    "query": "What are the social implications of deforestation on indigenous communities?",
+    "type": "ground_truth_available"
+  },
+  {
+    "query": "How does deforestation contribute to climate change?",
+    "type": "ground_truth_available"
+  },
+  {
+    "query": "What are the long-term ecological impacts of deforestation?",
+    "type": "exploratory"
+  },
+  {
+    "query": "How does deforestation affect soil quality and lead to erosion?",
+    "type": "ground_truth_available"
+  },
+  {
+    "query": "What role does deforestation play in the loss of carbon sinks?",
+    "type": "exploratory"
+  },
+  {
+    "query": "How can sustainable forestry practices mitigate the impacts of deforestation?",
+    "type": "exploratory"
+  }
+]

@@ -43,7 +43,7 @@ class Evaluation:
         sim_scores, rouge_scores = [], []
         for q in valid_queries:
             gt = ground_truths[q]
-            pred = self.simplify_prediction(predictions[q])
+            pred = self.simplify_prediction(predictions[q]) # Reverted to using simplify_prediction
             emb_gt = self.model.encode(gt, convert_to_tensor=True)
             emb_pred = self.model.encode(pred, convert_to_tensor=True)
             sim = util.cos_sim(emb_gt, emb_pred).item()

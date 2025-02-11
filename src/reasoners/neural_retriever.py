@@ -101,17 +101,17 @@ class NeuralRetriever:
         """
         params = {
             'causal': {
-                'max_length': 300,
+                'max_new_tokens': 100,
                 'temperature': 0.7,
                 'num_beams': 2,
             },
             'factual': {
-                'max_length': 200,
+                'max_new_tokens': 80,
                 'temperature': 0.3,
                 'num_beams': 1,
             },
             'exploratory': {
-                'max_length': 250,
+                'max_new_tokens': 90,
                 'temperature': 0.5,
                 'num_beams': 2,
             }

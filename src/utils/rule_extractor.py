@@ -179,7 +179,12 @@ class RuleExtractor:
                 transformer_rules = RuleExtractor.extract_causal_rules(resolved_content, quality_threshold)
                 rules.extend(transformer_rules)
                 logger.info(f"Extracted {len(transformer_rules)} causal rules using transformer-based extraction")
-            if not rules:
+
+            if rules:  # Check if any rules were extracted before quality threshold
+                logger.info(f"Extracted {len(rules)} rules that passed quality threshold:")
+                for i, rule in enumerate(rules[:min(3, len(rules))]):  # Print top 3
+                    logger.info(f"Rule {i + 1}: {rule}")  # Print the rule
+            else:
                 logger.info("No rules passed quality threshold, adding default environmental rules")
                 default_rules = [
                     {
