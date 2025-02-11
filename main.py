@@ -154,6 +154,9 @@ if __name__ == "__main__":
                 print("\nEvaluation Metrics:")
                 eval_metrics = evaluator.evaluate({query: final_answer}, ground_truths)
                 print(f"Similarity Score: {eval_metrics['average_similarity']:.2f}")
+                print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}") # Print ROUGE-L
+                print(f"F1 Score: {eval_metrics['average_f1']:.2f}")       # Print F1 Score
+
 
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")

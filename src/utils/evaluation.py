@@ -36,11 +36,12 @@ class Evaluation:
         if not valid_queries:
             return {
                 "average_similarity": 0.0,
-                "average_rougeL": 0.0,
+                "average_rougeL": 0.0, # Initialize ROUGE-L
+                "average_f1": 0.0,     # Initialize F1 score
                 "evaluated_queries": 0,
                 "queries_with_truth": []
             }
-        sim_scores, rouge_scores = [], []
+        sim_scores, rouge_scores, f1_scores = [], [], [] # Initialize f1_scores list
         for q in valid_queries:
             gt = ground_truths[q]
             pred = self.simplify_prediction(predictions[q]) # Reverted to using simplify_prediction
@@ -50,11 +51,17 @@ class Evaluation:
             sim_scores.append(sim)
             rouge_score = self.rouge.score(gt, pred)['rougeL'].fmeasure
             rouge_scores.append(rouge_score)
+            f1 = self.f1_score(pred, gt) # Calculate F1 score
+            f1_scores.append(f1)        # Append F1 score to the list
+
         avg_similarity = np.mean(sim_scores)
         avg_rouge = np.mean(rouge_scores)
+        avg_f1 = np.mean(f1_scores)      # Calculate average F1 score
+
         return {
             "average_similarity": avg_similarity,
-            "average_rougeL": avg_rouge,
+            "average_rougeL": avg_rouge,     # Return average ROUGE-L
+            "average_f1": avg_f1,         # Return average F1 score
             "evaluated_queries": len(valid_queries),
             "queries_with_truth": valid_queries
         }

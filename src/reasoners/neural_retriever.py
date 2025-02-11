@@ -1,9 +1,11 @@
 # src/reasoners/neural_retriever.py
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 import torch
+import logging
 
+logger = logging.getLogger(__name__)
 
 def is_causal_query(question):
     """
@@ -118,15 +120,55 @@ class NeuralRetriever:
         }
         return params.get(query_type, params['factual'])
 
-    def retrieve_answer(self, context, question, symbolic_guidance=None):
+    def retrieve_answer(self, context, question, symbolic_guidance=None, rule_guided_retrieval=True, similarity_threshold=0.4): # Added similarity_threshold
         """
-        Enhanced answer generation with improved rule guidance.
+        Enhanced answer generation with improved rule guidance and RG-Retriever logic using semantic similarity.
         """
         # Determine query type based on question content
         query_type = self._determine_query_type(question)
 
         # Format guidance with appropriate template if symbolic guidance is provided
         guidance_text = self.format_rule_guidance(symbolic_guidance, query_type=query_type) if symbolic_guidance else ""
+
+        # --- RG-Retriever Logic (Semantic Similarity) ---
+        if rule_guided_retrieval and symbolic_guidance: # Apply rule-guided retrieval only if enabled and rules are present
+            rule_embeddings = []
+            for rule in symbolic_guidance[:3]: # Consider top 3 rules
+                if isinstance(rule, dict):
+                    rule_text = rule.get("response", str(rule)) # Use rule response for embedding
+                elif isinstance(rule, str):
+                    rule_text = rule # Use rule string directly
+                else:
+                    rule_text = ""
+                if rule_text:
+                    rule_embedding = self.encoder.encode(rule_text, convert_to_tensor=True)
+                    rule_embeddings.append(rule_embedding)
+
+            if rule_embeddings:
+                context_sentences = context.split('.') # Split context into sentences
+                filtered_context_sentences = []
+                for sentence in context_sentences:
+                    sentence_embedding = self.encoder.encode(sentence, convert_to_tensor=True)
+                    similarities = [util.cos_sim(sentence_embedding, rule_emb).item() for rule_emb in rule_embeddings]
+                    max_similarity = max(similarities) if similarities else 0.0 # Get max similarity to any rule
+
+                    if max_similarity >= similarity_threshold: # Filter based on semantic similarity threshold
+                        filtered_context_sentences.append(sentence)
+
+                if filtered_context_sentences:
+                    filtered_context = ". ".join(filtered_context_sentences) # Reconstruct filtered context
+                    logger.info(f"RG-Retriever (Semantic): Context filtered based on rule similarity (threshold={similarity_threshold}). Original length: {len(context)}, Filtered length: {len(filtered_context)}")
+                    context = filtered_context # Use filtered context for generation
+                else:
+                    logger.info("RG-Retriever (Semantic): No context filtering applied - no sentences above similarity threshold.")
+            else:
+                logger.info("RG-Retriever (Semantic): No rules embeddings available for context filtering.")
+
+
+        else:
+            logger.info("RG-Retriever: Rule-guided retrieval disabled or no rules provided.")
+        # --- End RG-Retriever Logic (Semantic Similarity) ---
+
 
         # Construct complete prompt including guidance, context, and question
         input_text = (

@@ -116,9 +116,12 @@ class HybridIntegrator:
                 logger.error(f"Alignment error: {str(alignment_error)}. Falling back to neural.")
                 confidence = 0.0
 
+            symbolic_result_for_neural_guidance = None # Initialize variable to hold symbolic results for neural guidance
+
             if confidence > 0.6:
                 symbolic_result = self._process_symbolic(query)
                 if symbolic_result:
+                    symbolic_result_for_neural_guidance = symbolic_result # Store symbolic results for neural guidance
                     try:
                         neural_result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result)
                         combined_result = self._combine_results(symbolic_result, neural_result)
@@ -129,7 +132,8 @@ class HybridIntegrator:
                         logger.warning(f"Hybrid processing failed: {str(hybrid_error)}")
                         return symbolic_result, "symbolic"
 
-            result = self._process_neural_optimized(query, context)
+            # Pass symbolic_result_for_neural_guidance for RG-Retriever even in neural-only path
+            result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result_for_neural_guidance)
             self._update_cache(cache_key, (result, "neural"))
             return result, "neural"
 
@@ -140,6 +144,7 @@ class HybridIntegrator:
         except Exception as generic_error:
             logger.error(f"Unexpected error: {str(generic_error)}")
             return self._handle_fallback(query, context)
+
 
     def _prepare_embedding(self, embedding: torch.Tensor, target_dim: int, name: str) -> torch.Tensor:
         if embedding.dim() == 1:
@@ -180,7 +185,8 @@ class HybridIntegrator:
             torch.cuda.empty_cache()
         try:
             start_time = time.time()
-            answer_text = self.neural.retrieve_answer(context, query, symbolic_guidance=symbolic_guidance)
+            # Pass symbolic_guidance to neural retriever for RG-Retriever and RG-Generator
+            answer_text = self.neural.retrieve_answer(context, query, symbolic_guidance=symbolic_guidance, rule_guided_retrieval=True) # Enabled RG-Retriever here
             result = [answer_text]
             # --- NEW DYNAMIC RULE PARSING ---
             dynamic_rules = extract_rules_from_neural_output(answer_text)
