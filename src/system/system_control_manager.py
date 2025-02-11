@@ -41,7 +41,7 @@ class SystemControlManager:
         }
 
     def process_query_with_fallback(
-        self, query: str, context: str, max_retries: Optional[int] = None, forced_path: Optional[str] = None
+        self, query: str, context: str, max_retries: Optional[int] = None, forced_path: Optional[str] = None, query_complexity: Optional[float] = None # Added query_complexity parameter
     ) -> Dict[str, Any]:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Query must be a non-empty string")
@@ -59,7 +59,7 @@ class SystemControlManager:
                     self.logger.warning("Resource limits exceeded, optimizing allocation...")
                     self.resource_manager.optimize_resources()
 
-                result, reasoning_type = self._timed_process_query(query, context, forced_path)
+                result, reasoning_type = self._timed_process_query(query, context, forced_path, query_complexity) # Pass query_complexity
                 self._update_metrics(start_time, True)
                 return self.aggregator.format_response({
                     'result': result,
@@ -84,7 +84,7 @@ class SystemControlManager:
                 return self._handle_final_failure(start_time, str(e))
 
     def _timed_process_query(
-        self, query: str, context: str, forced_path: Optional[str] = None
+        self, query: str, context: str, forced_path: Optional[str] = None, query_complexity: Optional[float] = None # Added query_complexity parameter
     ) -> Tuple[str, str]:
         start = time.time()
 
@@ -92,14 +92,21 @@ class SystemControlManager:
             if time.time() - start > self.max_query_time:
                 raise TimeoutError("Query processing exceeded maximum time")
 
-        complexity = self.hybrid_integrator.query_expander.get_query_complexity(query) if self.hybrid_integrator.query_expander else 1.0
-        self.logger.info(f"Query complexity score: {complexity:.4f}")
+        if query_complexity is None and self.hybrid_integrator.query_expander: # Calculate complexity only if not passed and expander is available
+            query_complexity = self.hybrid_integrator.query_expander.get_query_complexity(query)
+            self.logger.info(f"Query complexity score (calculated): {query_complexity:.4f}")
+        elif query_complexity is None:
+            query_complexity = 0.5 # Default complexity if expander is not available or complexity is not passed
+            self.logger.info(f"Query complexity score (default): {query_complexity:.4f}")
+        else:
+             self.logger.info(f"Query complexity score (passed): {query_complexity:.4f}")
+
 
         try:
-            optimal_path = forced_path or self.resource_manager.get_optimal_reasoning_path(complexity)
+            optimal_path = forced_path or self.resource_manager.get_optimal_reasoning_path(query_complexity)
             self.logger.info(f"Selected reasoning path: {optimal_path}")
 
-            if optimal_path == "symbolic" or complexity < 0.5:
+            if optimal_path == "symbolic" or query_complexity < 0.5:
                 self.logger.info("Routing to symbolic reasoning...")
                 self.reasoning_path_stats["symbolic"] += 1
                 symbolic_result = self.hybrid_integrator.symbolic_reasoner.process_query(query)
@@ -115,13 +122,15 @@ class SystemControlManager:
                 symbolic_keywords = []
                 if symbolic_result and isinstance(symbolic_result, list):
                     symbolic_keywords = [kw for resp in symbolic_result for kw in self.hybrid_integrator.symbolic_reasoner.extract_keywords(resp)]
-                neural_result = self.hybrid_integrator.neural.retrieve_answer(context, query, symbolic_guidance=symbolic_keywords)
+                # Pass query_complexity here
+                neural_result = self.hybrid_integrator.neural.retrieve_answer(context, query, symbolic_guidance=symbolic_keywords, query_complexity=query_complexity)
                 _check_timeout()
                 return f"Symbolic: {symbolic_result}\nNeural: {neural_result}", "hybrid"
 
             self.logger.info("Routing to neural reasoning...")
             self.reasoning_path_stats["neural"] += 1
-            result = self.hybrid_integrator.neural.retrieve_answer(context, query)
+            # Pass query_complexity here
+            result = self.hybrid_integrator.neural.retrieve_answer(context, query, query_complexity=query_complexity)
             _check_timeout()
             return result, "neural"
 
