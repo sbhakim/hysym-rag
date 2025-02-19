@@ -86,24 +86,39 @@ graph TD
 
 ```bash
 HySym-RAG/
-├── src/                     # Main source code
-│   ├── main.py              # Entry point for running the system
-│   ├── app.py               # Core application logic
-│   ├── config/              # Configuration files
-│   ├── reasoners/           # Symbolic and neural reasoning modules
-│   ├── integrators/         # Hybrid integration logic
-│   ├── resources/           # Resource management utilities
-│   ├── queries/             # Query expansion and logging utilities
-│   └── utils/               # Helper scripts and evaluation utilities
-├── data/                    # Input data and extracted rules
-│   ├── deforestation.txt    # Sample knowledge base
-│   ├── rules.json           # Extracted rules
-│   └── ground_truths.json   # Ground truth data for evaluation
-├── tests/                   # Unit and integration tests
-├── examples/                # Example queries and outputs
-├── requirements.txt         # Python dependencies
-├── README.md                # Project overview and usage instructions
-└── LICENSE                  # Project license
+├── src/                          # Main source code
+│   ├── main.py                   # Entry point for running the system
+│   ├── app.py                    # Core application logic
+│   ├── config/                    # Configuration files
+│   │   ├── config_loader.py       # Loads YAML configuration files
+│   │   ├── config.yaml            # Main system configuration
+│   │   ├── resource_config.yaml   # Resource management thresholds
+│   └── reasoners/                 # Symbolic and neural reasoning modules
+│       ├── networkx_symbolic_reasoner.py  # Graph-based symbolic reasoner
+│       ├── neural_retriever.py    # Transformer-based neural retriever
+│   ├── integrators/               # Hybrid integration logic
+│       ├── hybrid_integrator.py   # Decides between symbolic and neural reasoning
+│   ├── resources/                 # Resource management utilities
+│       ├── resource_manager.py    # Monitors and optimizes system resources
+│       ├── adaptive_manager.py    # Adaptive resource thresholding
+│       ├── power_monitor.py       # Tracks energy consumption
+│   ├── queries/                   # Query expansion and logging utilities
+│       ├── query_expander.py      # Expands and refines queries
+│       ├── query_logger.py        # Logs query results and resource usage
+│   ├── feedback/                  # User feedback and rating system
+│       ├── feedback_handler.py    # Manages user feedback collection
+│       ├── feedback_manager.py    # Stores feedback and integrates it into learning
+│   ├── system/                    # System control and performance tracking
+│       ├── system_control_manager.py  # Manages query routing and error recovery
+│   ├── utils/                      # Helper scripts and evaluation utilities
+│       ├── rule_extractor.py       # Extracts causal knowledge from text
+│       ├── evaluation.py           # Evaluates system performance
+├── data/                           # Input data and extracted rules
+├── tests/                          # Unit and integration tests
+├── requirements.txt                # Python dependencies
+├── README.md                       # Project overview and usage instructions
+└── LICENSE                         # Project license
+   
 ```
 
 ## Contributing
