@@ -1,6 +1,5 @@
 # src/reasoners/neural_retriever.py
 
-
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer, util
 import torch
@@ -8,6 +7,7 @@ import logging
 from src.reasoners.rg_retriever import RuleGuidedRetriever
 
 logger = logging.getLogger(__name__)
+
 
 def is_causal_query(question):
     """
@@ -53,13 +53,13 @@ class NeuralRetriever:
         # Initialize Advanced RG-Retriever with adaptive threshold and paragraph filtering
         self.rg_retriever = RuleGuidedRetriever(
             encoder=self.encoder,
-            similarity_threshold=0.4, # Base similarity threshold
+            similarity_threshold=0.4,  # Base similarity threshold
             adaptive_threshold=True,  # Enable adaptive threshold
-            context_granularity="paragraph" # Use paragraph-level filtering
+            context_granularity="paragraph"  # Use paragraph-level filtering
         )
 
     def format_rule_guidance(self, rules, query_type='factual'):
-        """Format rules (same as before)."""
+        """Format rules for guidance."""
         if not rules:
             return ""
         template = self.prompt_templates.get(query_type, self.prompt_templates['factual'])
@@ -75,7 +75,7 @@ class NeuralRetriever:
         return template['prefix'] + "\n".join(formatted_rules) + template['suffix']
 
     def _determine_query_type(self, question):
-        """Determine query type (same as before)."""
+        """Determine query type based on keywords."""
         question_lower = question.lower()
         if any(word in question_lower for word in ['why', 'how', 'cause', 'effect', 'lead to']):
             return 'causal'
@@ -84,39 +84,57 @@ class NeuralRetriever:
         return 'factual'
 
     def _get_generation_params(self, query_type):
-        """Get generation parameters (same as before)."""
+        """Return generation parameters based on query type."""
         params = {
             'causal': {'max_new_tokens': 100, 'temperature': 0.7, 'num_beams': 2},
             'factual': {'max_new_tokens': 80, 'temperature': 0.3, 'num_beams': 1},
-            'exploratory': {'max_new_tokens': 90, 'temperature': 0.5, 'num_beams': 2}}
+            'exploratory': {'max_new_tokens': 90, 'temperature': 0.5, 'num_beams': 2}
+        }
         return params.get(query_type, params['factual'])
 
-    def retrieve_answer(self, context, question, symbolic_guidance=None, rule_guided_retrieval=True, query_complexity=0.5): # Added query_complexity to retrieve_answer
+    def retrieve_answer(self, context, question, symbolic_guidance=None, rule_guided_retrieval=True,
+                        query_complexity=0.5):
         """
-        Enhanced answer generation with delegated RG-Retriever logic.
+        Enhanced answer generation with consistent return format.
+
+        Returns:
+            str: The generated answer text
         """
-        query_type = self._determine_query_type(question)
-        guidance_text = self.format_rule_guidance(symbolic_guidance, query_type=query_type) if symbolic_guidance else ""
+        try:
+            query_type = self._determine_query_type(question)
+            guidance_text = self.format_rule_guidance(symbolic_guidance,
+                                                      query_type=query_type) if symbolic_guidance else ""
 
-        # --- Delegated RG-Retriever Logic ---
-        if rule_guided_retrieval and symbolic_guidance:
-            # Pass query_complexity to RG-Retriever for adaptive threshold
-            context = self.rg_retriever.filter_context_by_rules(context, symbolic_guidance, query_complexity=query_complexity) # Use Advanced RG-Retriever, pass complexity
-        else:
-            logger.info("RG-Retriever: Rule-guided retrieval disabled or no rules provided.")
-        # --- End RG-Retriever Logic ---
+            if rule_guided_retrieval and symbolic_guidance and hasattr(self, 'rg_retriever'):
+                try:
+                    context = self.rg_retriever.filter_context_by_rules(
+                        context, symbolic_guidance, query_complexity=query_complexity
+                    )
+                except Exception as e:
+                    logger.warning(f"RG-Retriever failed: {str(e)}. Using original context.")
 
-        input_text = f"{guidance_text}\nContext: {context}\nQuestion: {question}\nAnswer:"
-        generation_params = self._get_generation_params(query_type)
-        inputs = self.tokenizer(input_text, return_tensors="pt", truncation=True, max_length=self.max_input_length).to(self.model.device)
-        outputs = self.model.generate(**inputs, **generation_params)
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Prepare input and generate response
+            input_text = f"{guidance_text}\nContext: {context}\nQuestion: {question}\nAnswer:"
+            generation_params = self._get_generation_params(query_type)
 
-    # retrieve_answers_batched and encode methods remain unchanged
+            inputs = self.tokenizer(
+                input_text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_input_length
+            ).to(self.model.device)
 
+            outputs = self.model.generate(**inputs, **generation_params)
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+            return response  # Return just the string response
+
+        except Exception as e:
+            logger.error(f"Error in retrieve_answer: {str(e)}")
+            return "Error generating response."
 
     def retrieve_answers_batched(self, contexts, questions, symbolic_guidances=None):
-        """Batch version of retrieve_answer (unchanged)."""
+        """Batch version of retrieve_answer."""
         batch_inputs = []
         for i in range(len(questions)):
             guidance = symbolic_guidances[i] if symbolic_guidances and i < len(symbolic_guidances) else None
@@ -143,7 +161,7 @@ class NeuralRetriever:
         return decoded
 
     def encode(self, text):
-        """Encode text (unchanged)."""
+        """Encode text using SentenceTransformer."""
         try:
             emb = self.encoder.encode(text, convert_to_tensor=True)
             if torch.cuda.is_available():

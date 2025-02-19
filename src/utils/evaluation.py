@@ -1,150 +1,110 @@
-# src/utils/evaluation.py
+# ===== src/utils/evaluation.py =====
 
-from sentence_transformers import SentenceTransformer, util
-from rouge_score import rouge_scorer
 import numpy as np
-import time
-
+import re
+from typing import Dict
+import nltk
+try:
+    from nltk.translate.bleu_score import sentence_bleu
+except ImportError:
+    sentence_bleu = None
+from difflib import SequenceMatcher
 
 class Evaluation:
-    def __init__(self, cpu_wattage=65, gpu_wattage=250):
-        # Load a semantic model for similarity evaluation.
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
-        # Initialize ROUGE scorer.
-        self.rouge = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-        # Estimated wattages (in Watts) for energy calculation.
-        self.cpu_wattage = cpu_wattage
-        self.gpu_wattage = gpu_wattage
+    def __init__(self):
+        pass
 
-    def simplify_prediction(self, prediction):
-        """
-        Normalizes the prediction output.
-        """
-        if isinstance(prediction, list):
-            prediction = " ".join(str(item) for item in prediction)
-        elif isinstance(prediction, dict):
-            prediction = prediction.get("result", str(prediction))
-        elif not isinstance(prediction, str):
-            prediction = str(prediction)
-        return prediction.strip()
+    def _normalize_text(self, text):
+        if not text:
+            return ""
+        text = text.lower()
+        text = re.sub(r'[^a-z0-9\s]', '', text)
+        return text.strip()
 
-    def evaluate(self, predictions, ground_truths):
+    def evaluate(self, predictions: Dict[str, Dict], ground_truths: Dict[str, str]):
         """
-        Evaluate basic metrics: average cosine similarity and ROUGE-L.
-        """
-        valid_queries = [q for q in predictions if q in ground_truths]
-        if not valid_queries:
-            return {
-                "average_similarity": 0.0,
-                "average_rougeL": 0.0, # Initialize ROUGE-L
-                "average_f1": 0.0,     # Initialize F1 score
-                "evaluated_queries": 0,
-                "queries_with_truth": []
-            }
-        sim_scores, rouge_scores, f1_scores = [], [], [] # Initialize f1_scores list
-        for q in valid_queries:
-            gt = ground_truths[q]
-            pred = self.simplify_prediction(predictions[q]) # Reverted to using simplify_prediction
-            emb_gt = self.model.encode(gt, convert_to_tensor=True)
-            emb_pred = self.model.encode(pred, convert_to_tensor=True)
-            sim = util.cos_sim(emb_gt, emb_pred).item()
-            sim_scores.append(sim)
-            rouge_score = self.rouge.score(gt, pred)['rougeL'].fmeasure
-            rouge_scores.append(rouge_score)
-            f1 = self.f1_score(pred, gt) # Calculate F1 score
-            f1_scores.append(f1)        # Append F1 score to the list
+        Evaluate a dictionary of predictions against ground truths.
 
-        avg_similarity = np.mean(sim_scores)
-        avg_rouge = np.mean(rouge_scores)
-        avg_f1 = np.mean(f1_scores)      # Calculate average F1 score
+        predictions: {query: { 'result': <answer string> }}
+        or         : {query: <answer string>}
+        ground_truths: {query: <ground truth string>}
+        """
+        similarities = []
+        rougeL_scores = []
+        f1_scores = []
+
+        for query, pred_obj in predictions.items():
+            # If pred_obj is a dictionary with 'result', extract it:
+            if isinstance(pred_obj, dict) and 'result' in pred_obj:
+                pred_text = pred_obj['result']
+            else:
+                pred_text = pred_obj
+
+            gt_text = ground_truths.get(query, "")
+            sim = self.similarity_score(pred_text, gt_text)
+            rougeL = self.rougeL_score(pred_text, gt_text)
+            f1 = self.f1_score(pred_text, gt_text)
+
+            similarities.append(sim)
+            rougeL_scores.append(rougeL)
+            f1_scores.append(f1)
 
         return {
-            "average_similarity": avg_similarity,
-            "average_rougeL": avg_rouge,     # Return average ROUGE-L
-            "average_f1": avg_f1,         # Return average F1 score
-            "evaluated_queries": len(valid_queries),
-            "queries_with_truth": valid_queries
+            "average_similarity": float(np.mean(similarities)) if similarities else 0.0,
+            "average_rougeL": float(np.mean(rougeL_scores)) if rougeL_scores else 0.0,
+            "average_f1": float(np.mean(f1_scores)) if f1_scores else 0.0
         }
 
-    def f1_score(self, prediction, ground_truth):
-        """
-        Computes a simple token-level F1 score between prediction and ground truth.
-        """
-        pred_tokens = set(prediction.lower().split())
-        truth_tokens = set(ground_truth.lower().split())
-        if not pred_tokens or not truth_tokens:
+    def similarity_score(self, pred, gt):
+        pred_norm = self._normalize_text(pred)
+        gt_norm = self._normalize_text(gt)
+        if not pred_norm or not gt_norm:
             return 0.0
-        common = pred_tokens.intersection(truth_tokens)
-        precision = len(common) / len(pred_tokens)
-        recall = len(common) / len(truth_tokens)
-        if precision + recall == 0:
+        return SequenceMatcher(None, pred_norm, gt_norm).ratio()
+
+    def rougeL_score(self, pred, gt):
+        """
+        Compute a simple character-based ROUGE-L.
+        """
+        pred_norm = self._normalize_text(pred)
+        gt_norm = self._normalize_text(gt)
+        if not pred_norm or not gt_norm:
+            return 0.0
+
+        # Longest common subsequence approach:
+        lcs_length = self._lcs_length(pred_norm, gt_norm)
+        recall = lcs_length / len(gt_norm) if gt_norm else 0
+        precision = lcs_length / len(pred_norm) if pred_norm else 0
+        if (precision + recall) == 0:
+            return 0.0
+        f_score = 2 * (precision * recall) / (precision + recall)
+        return f_score
+
+    def _lcs_length(self, s1, s2):
+        # Dynamic programming approach
+        dp = [[0] * (len(s2)+1) for _ in range(len(s1)+1)]
+        for i in range(1, len(s1)+1):
+            for j in range(1, len(s2)+1):
+                if s1[i-1] == s2[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        return dp[len(s1)][len(s2)]
+
+    def f1_score(self, pred, gt):
+        pred_tokens = self._normalize_text(pred).split()
+        gt_tokens = self._normalize_text(gt).split()
+        common = set(pred_tokens).intersection(set(gt_tokens))
+        if (len(pred_tokens) + len(gt_tokens)) == 0:
+            return 0.0
+        precision = len(common) / len(pred_tokens) if pred_tokens else 0
+        recall = len(common) / len(gt_tokens) if gt_tokens else 0
+        if (precision + recall) == 0:
             return 0.0
         return 2 * precision * recall / (precision + recall)
 
-    def calculate_energy_metrics(self, resource_logs):
-        """
-        Calculates energy consumption (in Joules) from resource usage logs.
-        Each log should contain 'cpu', 'gpu', and 'time' (in seconds).
-        """
-        cpu_joules = sum(log['cpu'] * self.cpu_wattage * log['time'] for log in resource_logs)
-        gpu_joules = sum(log['gpu'] * self.gpu_wattage * log['time'] for log in resource_logs)
-        total_joules = cpu_joules + gpu_joules
-        return {
-            'cpu_joules': cpu_joules,
-            'gpu_joules': gpu_joules,
-            'total_joules': total_joules
-        }
-
-    def energy_per_query(self, resource_logs):
-        """
-        Computes average energy consumption per query.
-        """
-        if not resource_logs:
-            return 0.0
-        total_energy = sum(log.get('total_joules', 0.0) for log in resource_logs)
-        return total_energy / len(resource_logs)
-
-    def evaluate_advanced(self, predictions, ground_truths, extra_metrics):
-        """
-        Advanced evaluation merging semantic similarity, ROUGE, F1 score, energy metrics, and latency.
-        extra_metrics should include:
-          - "chain_depths": list of chain depth values (floats)
-          - "energy_logs": list of resource log dicts (each with 'cpu', 'gpu', 'time')
-          - "latency": overall average latency in seconds
-        """
-        base_eval = self.evaluate(predictions, ground_truths)
-        # Compute average F1 score for queries with ground truth.
-        f1_scores = []
-        for q in base_eval["queries_with_truth"]:
-            gt = ground_truths[q]
-            pred = self.simplify_prediction(predictions[q])
-            f1_scores.append(self.f1_score(pred, gt))
-        avg_f1 = np.mean(f1_scores) if f1_scores else 0.0
-
-        chain_depths = extra_metrics.get("chain_depths", [])
-        energy_logs = extra_metrics.get("energy_logs", [])
-        latency = extra_metrics.get("latency", 0)
-
-        energy_metrics = self.calculate_energy_metrics(energy_logs) if energy_logs else {'total_joules': 0}
-        avg_energy = energy_metrics.get('total_joules', 0) / max(1, len(energy_logs))
-        avg_chain_depth = np.mean(chain_depths) if chain_depths else 0.0
-
-        # Normalize latency and energy to a scale [0,1] based on expected upper bounds
-        norm_latency = min(latency / 10.0, 1.0)  # assuming 10s as a high-latency threshold
-        norm_energy = min(avg_energy / 1000.0, 1.0)  # assuming 1000J as an upper bound
-
-        # Composite score combining similarity, F1, latency, and energy consumption
-        composite_score = (
-                0.5 * base_eval["average_similarity"] +
-                0.2 * avg_f1 +
-                0.15 * (1 - norm_latency) +
-                0.15 * (1 - norm_energy)
-        )
-
-        base_eval["average_f1"] = avg_f1
-        base_eval["energy_metrics"] = energy_metrics
-        base_eval["average_chain_depth"] = avg_chain_depth
-        base_eval["composite_score"] = composite_score
-        base_eval["latency"] = latency
-        base_eval["avg_energy_per_query"] = avg_energy
-        return base_eval
+    # NOTE: For a thorough HotpotQA multi-hop evaluation,
+    # you'd typically check supporting-facts retrieval correctness, etc.
+    # That requires partial-labelling of which sentences were used in the final answer.
+    # HySym-RAG, by default, doesn't track these sentence-level retrievals.
+    # If you want that, you need to store and compare them here.

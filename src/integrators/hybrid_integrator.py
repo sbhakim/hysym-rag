@@ -7,17 +7,19 @@ from datetime import datetime, timedelta
 from sentence_transformers import util
 
 from src.knowledge_integrator import AlignmentLayer
-from src.utils.rule_extractor import extract_rules_from_neural_output
-from src.reasoners.rg_retriever import RuleGuidedRetriever # Import Advanced RG-Retriever
-
+#from src.utils.rule_extractor import extract_rules_from_neural_output
+from src.reasoners.rg_retriever import RuleGuidedRetriever  # Import Advanced RG-Retriever
 
 logger = logging.getLogger(__name__)
+
 
 class HybridIntegrator:
     """
     HySym-RAG's core integration system that combines symbolic and neural reasoning.
     """
-    def __init__(self, symbolic_reasoner, neural_retriever, resource_manager, query_expander=None, cache_ttl=3600, batch_size=4):
+
+    def __init__(self, symbolic_reasoner, neural_retriever, resource_manager, query_expander=None, cache_ttl=3600,
+                 batch_size=4):
         self.symbolic_reasoner = symbolic_reasoner
         self.neural = neural_retriever
         self.resource_manager = resource_manager
@@ -35,8 +37,8 @@ class HybridIntegrator:
         self.alignment_layer = AlignmentLayer(sym_dim=300, neural_dim=384, target_dim=768)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("HybridIntegrator initialized successfully with alignment layer")
-        # Initialize Advanced RG-Retriever and pass it to NeuralRetriever
-        self.advanced_rg_retriever = RuleGuidedRetriever() # Initialize Advanced RG-Retriever in HybridIntegrator as well, if needed here. Currently, NeuralRetriever has its own instance.
+        # Initialize Advanced RG-Retriever (if needed)
+        self.advanced_rg_retriever = RuleGuidedRetriever()
 
     @property
     def expander(self):
@@ -74,69 +76,41 @@ class HybridIntegrator:
             'timestamp': datetime.now()
         }
 
-    def process_query(self, query: str, context: str, query_complexity=0.5) -> Tuple[List[str], str]: # Added query_complexity parameter
-        """Process query (same as before, just calling neural retriever)."""
-        self.performance_stats['total_queries'] += 1
+    def process_query(self, query: str, context: str, query_complexity=0.5) -> Tuple[str, str]:
+        """
+        Process a query using hybrid reasoning.
 
-        cache_key = self._generate_cache_key(query)
-        cached_result = self._get_valid_cache(cache_key)
-        if cached_result:
-            return cached_result
-
+        Returns:
+            Tuple[str, str]: (response text, reasoning source)
+        """
         try:
-            if self.query_expander:
-                logger.info(f"Query complexity score: {query_complexity:.4f}") # Using passed query_complexity
-            else:
-                complexity = 0.5
+            # Get symbolic result
+            symbolic_result = self._process_symbolic(query)
 
-            if query_complexity < 0.4:
-                symbolic_result = self._process_symbolic(query)
-                if symbolic_result:
-                    return symbolic_result, "symbolic"
+            # Simple queries use symbolic path only
+            if query_complexity < 0.4 and symbolic_result:
+                response = " ".join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result
+                return response, "symbolic"
 
-            symbolic_emb = self.symbolic_reasoner.encode(query)
-            neural_emb = self.neural.encode(query)
-            symbolic_emb, neural_emb = self.ensure_device_consistency(symbolic_emb, neural_emb)
-            symbolic_emb = self._prepare_embedding(symbolic_emb, 300, "symbolic")
-            neural_emb = self._prepare_embedding(neural_emb, 384, "neural")
+            # For more complex queries, try hybrid approach
+            if symbolic_result:
+                neural_response = self.neural.retrieve_answer(
+                    context,
+                    query,
+                    symbolic_guidance=symbolic_result,
+                    query_complexity=query_complexity
+                )
+                # Combine responses
+                final_response = f"{' '.join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result}\n{neural_response}"
+                return final_response, "hybrid"
 
-            try:
-                aligned_emb, confidence, debug_info = self.alignment_layer(symbolic_emb, neural_emb)
-                logger.info(f"Alignment confidence: {confidence:.3f}")
-                if debug_info:
-                    logger.debug(f"Alignment debug info: {debug_info}")
-            except Exception as alignment_error:
-                logger.error(f"Alignment error: {str(alignment_error)}. Falling back to neural.")
-                confidence = 0.0
+            # Fallback to pure neural
+            neural_response = self.neural.retrieve_answer(context, query)
+            return neural_response, "neural"
 
-            symbolic_result_for_neural_guidance = None
-
-            if confidence > 0.6:
-                symbolic_result = self._process_symbolic(query)
-                if symbolic_result:
-                    symbolic_result_for_neural_guidance = symbolic_result
-                    try:
-                        neural_result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result, query_complexity=query_complexity) # Pass query_complexity
-                        combined_result = self._combine_results(symbolic_result, neural_result)
-                        self.performance_stats['hybrid_successes'] += 1
-                        self._update_cache(cache_key, (combined_result, "hybrid"))
-                        return combined_result, "hybrid"
-                    except Exception as hybrid_error:
-                        logger.warning(f"Hybrid processing failed: {str(hybrid_error)}")
-                        return symbolic_result, "symbolic"
-
-            result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result_for_neural_guidance, query_complexity=query_complexity) # Pass query_complexity
-            self._update_cache(cache_key, (result, "neural"))
-            return result, "neural"
-
-        except RuntimeError as runtime_error:
-            self._handle_runtime_error(runtime_error)
-            raise
-
-        except Exception as generic_error:
-            logger.error(f"Unexpected error: {str(generic_error)}")
-            return self._handle_fallback(query, context)
-
+        except Exception as e:
+            logger.error(f"Error in process_query: {str(e)}")
+            return "Error processing query.", "error"
 
     def _prepare_embedding(self, embedding: torch.Tensor, target_dim: int, name: str) -> torch.Tensor:
         """Prepare embedding (unchanged)."""
@@ -149,7 +123,7 @@ class HybridIntegrator:
         return embedding
 
     def _combine_results(self, symbolic_results: List[str], neural_result: List[str]) -> List[str]:
-        """Combine results (unchanged)."""
+        """Combine symbolic and neural results."""
         combined = []
         combined.extend(symbolic_results)
         for neural_resp in neural_result:
@@ -158,14 +132,14 @@ class HybridIntegrator:
         return combined
 
     def _high_overlap(self, text1: str, text2: str, threshold: float = 0.7) -> bool:
-        """Check high overlap (unchanged)."""
+        """Check for high overlap between two texts using cosine similarity."""
         emb1 = self.neural.encode(text1)
         emb2 = self.neural.encode(text2)
         similarity = util.cos_sim(emb1, emb2).item()
         return similarity > threshold
 
     def _process_symbolic(self, query: str) -> Optional[List[str]]:
-        """Process symbolic (unchanged)."""
+        """Process the query symbolically."""
         try:
             symbolic_results = self.symbolic_reasoner.process_query(query)
             if symbolic_results and "No symbolic match found." not in symbolic_results:
@@ -176,47 +150,68 @@ class HybridIntegrator:
             logger.error(f"Error in symbolic processing: {str(e)}")
             return None
 
-    def _process_neural_optimized(self, query: str, context: str, symbolic_guidance: Optional[List[str]] = None, query_complexity=0.5) -> List[str]: # Added query_complexity parameter
-        """Process neural (modified to use Advanced RG-Retriever)."""
+    def _process_neural_optimized(self, query: str, context: str, symbolic_guidance: Optional[List[str]] = None,
+                                  query_complexity=0.5) -> List[str]:
+        """Process the query neurally using advanced RG-Retriever."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         try:
             start_time = time.time()
-            # Use Advanced RG-Retriever for context filtering, pass query_complexity
-            filtered_context = self.neural.advanced_rg_retriever.filter_context_by_rules(context, symbolic_guidance, query_complexity=query_complexity)
-            # Pass filtered context to neural retriever, pass query_complexity
-            answer_text = self.neural.retrieve_answer(filtered_context, query, symbolic_guidance=symbolic_guidance, rule_guided_retrieval=False, query_complexity=query_complexity) # Pass query_complexity here as well, though RG-Retriever is already applied
-            result = [answer_text]
-            dynamic_rules = extract_rules_from_neural_output(answer_text)
+            # Use Advanced RG-Retriever for context filtering, passing query_complexity
+            filtered_context = self.neural.advanced_rg_retriever.filter_context_by_rules(
+                context, symbolic_guidance, query_complexity=query_complexity
+            )
+            # Retrieve neural answer and ensure the return is a 2-tuple
+            result = self.neural.retrieve_answer(
+                filtered_context,
+                query,
+                symbolic_guidance=symbolic_guidance,
+                rule_guided_retrieval=False,
+                query_complexity=query_complexity
+            )
+            if isinstance(result, tuple):
+                if len(result) != 2:
+                    logger.error(f"Unexpected tuple length from retrieve_answer: {result}")
+                    neural_answer = result[0]
+                else:
+                    neural_answer, neural_metadata = result
+            else:
+                neural_answer = result
+
+            result_list = [neural_answer]
+            dynamic_rules = extract_rules_from_neural_output(neural_answer)
             if dynamic_rules:
                 logger.info(f"Extracted {len(dynamic_rules)} dynamic rules from neural output.")
                 self.symbolic_reasoner.add_dynamic_rules(dynamic_rules)
             processing_time = time.time() - start_time
             self.resource_manager.neural_perf_times.append(processing_time)
             self.performance_stats['neural_hits'] += 1
-            return result
+            return result_list
         finally:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
     def get_performance_metrics(self) -> Dict[str, float]:
-        """Get performance metrics (unchanged)."""
+        """Return performance metrics."""
         total = max(1, self.performance_stats['total_queries'])
         return {
             'symbolic_ratio': self.performance_stats['symbolic_hits'] / total,
             'neural_ratio': self.performance_stats['neural_hits'] / total,
             'cache_hit_ratio': self.performance_stats['cache_hits'] / total,
             'hybrid_success_ratio': self.performance_stats['hybrid_successes'] / total,
-            'average_neural_time': (sum(self.resource_manager.neural_perf_times) / len(self.resource_manager.neural_perf_times)
-                                    if self.resource_manager.neural_perf_times else 0)
+            'average_neural_time': (
+                sum(self.resource_manager.neural_perf_times) / len(self.resource_manager.neural_perf_times)
+                if self.resource_manager.neural_perf_times else 0
+            )
         }
 
     def _handle_runtime_error(self, error: RuntimeError):
-        """Handle runtime error (unchanged)."""
+        """Handle runtime errors."""
         logger.error(f"Runtime error occurred: {str(error)}")
         # Additional handling if needed
 
     def _handle_fallback(self, query: str, context: str) -> Tuple[List[str], str]:
-        """Handle fallback (unchanged)."""
+        """Return a fallback response in case of failure."""
         fallback_response = ["Unable to process query. Please try again later."]
+        logger.info(f"_handle_fallback returning: {(fallback_response, 'fallback')}")
         return fallback_response, "fallback"

@@ -1,0 +1,19 @@
+# src/config/test_config.yaml
+evaluation:
+  batch_size: 16
+  num_samples: 100
+  max_context_length: 1024
+  metrics:
+    - exact_match
+    - f1_score
+    - success_rate
+
+model_settings:
+  use_quantization: true
+  max_memory: 0.9  # 90% of available GPU memory
+  batch_processing: true
+
+resource_thresholds:
+  cpu: 0.85
+  memory: 0.85
+  gpu: 0.95

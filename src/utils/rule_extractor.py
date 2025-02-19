@@ -29,6 +29,7 @@ except Exception as e:
     logger.error(f"Error initializing rule scorer: {str(e)}")
     raise
 
+
 class RuleExtractor:
     """
     Enhanced RuleExtractor with pattern matching, coreference resolution,
@@ -98,7 +99,8 @@ class RuleExtractor:
     @staticmethod
     def extract_keywords(text):
         doc = nlp(text.lower())
-        keywords = [token.lemma_ for token in doc if token.pos_ in ("NOUN", "VERB", "ADJ") and not token.is_stop and len(token.text) > 1]
+        keywords = [token.lemma_ for token in doc if token.pos_ in ("NOUN", "VERB", "ADJ")
+                    and not token.is_stop and len(token.text) > 1]
         return list(set(keywords))
 
     @staticmethod
@@ -136,8 +138,7 @@ class RuleExtractor:
     @staticmethod
     def extract_causal_rules(text, quality_threshold=0.8):
         """
-        Uses a pre-trained relation extraction model to extract causal rules.
-        Here we use 'Babelscape/rebel-large' as an example.
+        Example causal extraction (not always reliable).
         """
         causal_extractor = pipeline("relation-extraction", model="Babelscape/rebel-large")
         results = causal_extractor(text)
@@ -180,10 +181,8 @@ class RuleExtractor:
                 rules.extend(transformer_rules)
                 logger.info(f"Extracted {len(transformer_rules)} causal rules using transformer-based extraction")
 
-            if rules:  # Check if any rules were extracted before quality threshold
-                logger.info(f"Extracted {len(rules)} rules that passed quality threshold:")
-                for i, rule in enumerate(rules[:min(3, len(rules))]):  # Print top 3
-                    logger.info(f"Rule {i + 1}: {rule}")  # Print the rule
+            if rules:
+                logger.info(f"Extracted {len(rules)} rules that passed quality threshold")
             else:
                 logger.info("No rules passed quality threshold, adding default environmental rules")
                 default_rules = [
@@ -224,7 +223,6 @@ class RuleExtractor:
                     }
                 ]
                 rules.extend(default_rules)
-                logger.info(f"Added {len(default_rules)} default rules")
             if neural_data:
                 neural_embeddings, neural_responses = neural_data
                 distilled_rules = RuleExtractor.distill_neural_patterns(neural_embeddings, neural_responses)
@@ -252,34 +250,57 @@ class RuleExtractor:
                 logger.critical(f"Critical error: Could not save emergency rules: {str(write_error)}")
                 return 0
 
-# --- NEW: Helper method for dynamic rule extraction from neural output ---
-def extract_rules_from_neural_output(neural_text, threshold=0.4):
-    """
-    Parses neural outputs to find potential new rules.
-    Returns a list of new rule dicts in the same shape as the default rules.
-    Example shape: {
-        "keywords": [...],
-        "response": "...",
-        "confidence": 0.9,
-        "source": "dynamic_neural",
-        "type": "neural_extracted"
-    }
-    """
-    new_rules = []
-    # Simple example: looking for patterns "X leads to Y" or "X causes Y"
-    pattern = re.compile(r"(.*?) (?:leads to|causes) (.*?)(\.|$)", re.IGNORECASE)
-    matches = pattern.findall(neural_text)
-    for match in matches:
-        cause = match[0].strip()
-        effect = match[1].strip()
-        if cause and effect:
-            keywords = [kw.lower() for kw in cause.split() if len(kw) > 2]
-            response_text = f"{cause} leads to {effect}"
-            new_rules.append({
-                "keywords": keywords,
-                "response": response_text,
-                "confidence": 0.8,
-                "source": "dynamic_neural",
-                "type": "neural_extracted"
-            })
-    return new_rules
+    @staticmethod
+    def extract_rules_from_neural_output(neural_text, threshold=0.4):
+        """
+        Parses neural outputs to find potential new rules.
+        """
+        new_rules = []
+        pattern = re.compile(r"(.*?) (?:leads to|causes) (.*?)(\.|$)", re.IGNORECASE)
+        matches = pattern.findall(neural_text)
+        for match in matches:
+            cause = match[0].strip()
+            effect = match[1].strip()
+            if cause and effect:
+                keywords = [kw.lower() for kw in cause.split() if len(kw) > 2]
+                response_text = f"{cause} leads to {effect}"
+                new_rules.append({
+                    "keywords": keywords,
+                    "response": response_text,
+                    "confidence": 0.8,
+                    "source": "dynamic_neural",
+                    "type": "neural_extracted"
+                })
+        return new_rules
+
+    # === New: Simple Hotpot Fact Extraction ===
+    @staticmethod
+    def extract_hotpot_facts(context_text, min_confidence=0.5):
+        """
+        Parse the HotpotQA context text to find simple "X is a Y" or
+        "X (was|is) an American <something>" patterns, turning them into rules.
+        This is purely illustrative – real extraction would be more robust.
+        """
+        doc = nlp(context_text)
+        rules = []
+        for sent in doc.sents:
+            sent_str = sent.text.strip()
+            # Example pattern: "<Entity> is a(n) <desc>"
+            # You could get more fancy with NER or pattern matching.
+            match_pattern = re.search(r"([A-Z][a-zA-Z0-9_ ]+) (is|was) (an|a) ([A-Za-z ]+)", sent_str)
+            if match_pattern:
+                entity = match_pattern.group(1).strip()
+                desc = match_pattern.group(4).strip()
+                # Build a basic rule
+                # "keywords" might include entity's main words and the descriptor
+                keywords = RuleExtractor.extract_keywords(entity + " " + desc)
+                fact_response = f"{entity} is {desc}"
+                # We'll skip advanced scoring for brevity, just set confidence to min_conf
+                rules.append({
+                    "keywords": keywords,
+                    "response": fact_response,
+                    "confidence": min_confidence,
+                    "source": sent_str,
+                    "type": "hotpot_fact"
+                })
+        return rules
