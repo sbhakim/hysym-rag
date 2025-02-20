@@ -86,6 +86,18 @@ class NeuralRetriever:
             if not isinstance(context, str) or not isinstance(question, str):
                 raise ValueError("Context and question must be strings")
 
+            # === BEGIN: Type validation for symbolic_guidance ===
+            if isinstance(symbolic_guidance, str):
+                symbolic_guidance = [{"response": symbolic_guidance}]
+            elif symbolic_guidance and not isinstance(symbolic_guidance, list):
+                symbolic_guidance = [{"response": str(symbolic_guidance)}]
+            if symbolic_guidance:
+                symbolic_guidance = [
+                    rule if isinstance(rule, dict) else {"response": str(rule)}
+                    for rule in symbolic_guidance
+                ]
+            # === END: Type validation for symbolic_guidance ===
+
             # Process context into chunks
             context_chunks = self._chunk_context(context)
 

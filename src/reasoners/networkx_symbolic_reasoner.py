@@ -11,7 +11,6 @@ from typing import List, Dict, Set, Optional, Tuple, Any
 from collections import defaultdict
 from datetime import datetime
 
-
 class GraphSymbolicReasoner:
     """
     Enhanced graph-based symbolic reasoner for academic evaluation of HySym-RAG.
@@ -45,30 +44,35 @@ class GraphSymbolicReasoner:
         self.logger = logging.getLogger("GraphSymbolicReasoner")
         self.logger.setLevel(logging.INFO)
 
-        # Load and validate rules with enhanced versioning
-        self.rules = self.load_rules(rules_file)
+        # Initialize rules attribute and load rules from file.
+        self.rules: List[Dict] = []
+        loaded_rules = self.load_rules(rules_file)
+        self.rules.extend(loaded_rules)
 
         # Initialize NLP components with error handling
         try:
             self.nlp = spacy.load("en_core_web_sm")
             self.embedder = SentenceTransformer(embedding_model)
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # Ensure the embedder is on the correct device
+            self.embedder = self.embedder.to(self.device)
         except Exception as e:
             self.logger.error(f"Error initializing NLP components: {str(e)}")
             raise
 
-        # Initialize academic tracking
+        # Initialize academic tracking metrics
         self.reasoning_metrics = {
             'path_lengths': [],
             'confidence_scores': [],
             'rule_utilization': defaultdict(int),
-            'reasoning_times': []
+            'reasoning_times': [],
+            'rule_additions': []  # Added to track dynamic rule additions
         }
 
         # Initialize knowledge graph and related indexes
         self.graph = nx.DiGraph()  # The knowledge graph (DAG)
-        self.rule_index = {}  # Index rules by rule_id
-        self.rule_ids = []  # List of rule_ids
+        self.rule_index: Dict[str, Dict] = {}  # Index rules by rule_id
+        self.rule_ids: List[str] = []  # List of rule_ids
         self.keyword_index = defaultdict(list)  # Inverted index for keywords
         self.entity_index = defaultdict(set)
         self.relation_index = defaultdict(set)
@@ -94,7 +98,7 @@ class GraphSymbolicReasoner:
             with open(rules_file, 'r', encoding='utf-8') as f:
                 loaded_rules = json.load(f)
                 self.logger.info(f"Successfully loaded {len(loaded_rules)} rules from {rules_file}")
-                # Validate and add a version for each rule
+                # Validate and add version for each rule
                 valid_rules = []
                 for rule in loaded_rules:
                     if self._validate_rule_structure(rule):
@@ -117,8 +121,7 @@ class GraphSymbolicReasoner:
         """
         Get the next version number for a rule.
         """
-        # For simplicity, we use a counter based on existing rules.
-        # You could store persistent version numbers if needed.
+        # Count how many rules with the same id exist and add one.
         return sum(1 for rule in self.rules if rule.get('id', '') == rule_id) + 1
 
     def build_rule_index(self):
@@ -139,12 +142,12 @@ class GraphSymbolicReasoner:
                 for keyword in rule['keywords']:
                     self.keyword_index[keyword].append(rule_id)
 
-            # If rule already has an embedding and it's a tensor, store it
+            # If rule already has an embedding (as a tensor), store it
             if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
                 self.rule_embeddings.append(rule['embedding'])
 
         if self.rule_embeddings:
-            self.rule_embeddings = torch.stack(self.rule_embeddings).to(self.embedder.device)
+            self.rule_embeddings = torch.stack(self.rule_embeddings).to(self.device)
             self.logger.info(f"Rule embeddings tensor created with shape: {self.rule_embeddings.shape}")
 
         self.logger.info(f"Rule index built successfully with {len(self.rules)} rules.")
@@ -209,7 +212,6 @@ class GraphSymbolicReasoner:
                 rule['id'] = f"rule_{len(self.rules)}"
                 rule['version'] = self._get_next_version(rule['id'])
                 rule['added_timestamp'] = datetime.now().isoformat()
-                # Calculate confidence
                 rule['confidence'] = self._calculate_rule_confidence(rule)
                 valid_rules.append(rule)
             else:
@@ -220,33 +222,110 @@ class GraphSymbolicReasoner:
             self.build_rule_index()
             self.build_graph()
             self.logger.info(f"Added {len(valid_rules)} new rules. Total rules: {len(self.rules)}")
-            self._track_rule_addition(valid_rules)
+            try:
+                self._track_rule_addition(valid_rules)
+            except Exception as e:
+                self.logger.error(f"Error tracking rule addition (non-critical): {str(e)}")
+
+    def _track_rule_addition(self, valid_rules: List[Dict]):
+        """
+        Track metrics related to the addition of dynamic rules for academic evaluation.
+
+        Args:
+            valid_rules: List of validated rules being added to the system
+        """
+        try:
+            num_rules_added = len(valid_rules)
+            total_rules_now = len(self.rules)
+            avg_confidence = float(np.mean([rule.get('confidence', 0.0) for rule in valid_rules])) if valid_rules else 0.0
+
+            # Log the metrics
+            self.logger.info(
+                f"Added {num_rules_added} rules. Total rules: {total_rules_now}. "
+                f"Average confidence: {avg_confidence:.3f}"
+            )
+
+            # Update academic metrics
+            if 'rule_additions' in self.reasoning_metrics:
+                for rule in valid_rules:
+                    self.reasoning_metrics['rule_additions'].append({
+                        'timestamp': datetime.now().isoformat(),
+                        'confidence': rule.get('confidence', 0.0),
+                        'type': rule.get('type', 'unknown')
+                    })
+        except Exception as e:
+            self.logger.error(f"Error tracking rule addition: {str(e)}")
 
     def _validate_rule_structure(self, rule: Dict) -> bool:
         """
-        Validate if a rule dictionary has the basic required structure.
+        Enhanced rule validation with better support for different rule types.
+        For HotpotQA-style rules, accept if the rule contains 'supporting_fact' along with required fields.
+        For traditional rules, require both 'keywords' and 'response'.
         """
-        required_fields = {'keywords', 'response'}
-        return isinstance(rule, dict) and all(field in rule for field in required_fields)
+        try:
+            if not isinstance(rule, dict):
+                return False
+
+            # Case 1: HotpotQA-style rules
+            if "supporting_fact" in rule:
+                required_hotpot_fields = {"type", "source_text", "keywords"}
+                has_required = all(field in rule for field in required_hotpot_fields)
+                if has_required:
+                    if "confidence" not in rule:
+                        rule["confidence"] = self._calculate_rule_confidence(rule)
+                    return True
+                else:
+                    return False
+
+            # Case 2: Traditional rules
+            required_fields = {"keywords", "response"}
+            has_required = all(field in rule for field in required_fields)
+            if has_required:
+                if "confidence" not in rule:
+                    rule["confidence"] = self._calculate_rule_confidence(rule)
+                return True
+
+            return False
+        except Exception as e:
+            self.logger.error(f"Error in rule validation: {str(e)}")
+            return False
 
     def _calculate_rule_confidence(self, rule: Dict) -> float:
         """
-        Calculate a confidence score for a rule using multiple factors.
+        Calculate confidence score for a rule based on available information.
         """
-        confidence_factors = []
-        # Source reliability (default value)
-        if 'source' in rule:
-            confidence_factors.append(0.8)
-        # Structural completeness: Check for entities and relations (if available)
-        completeness = rule.get('entities') and rule.get('relations')
-        confidence_factors.append(0.9 if completeness else 0.6)
-        # Semantic coherence from rule text or response
-        text = rule.get('text', '') or rule.get('response', '')
-        if text:
-            doc = self.nlp(text)
-            coherence = sum(1 for sent in doc.sents if len(sent) > 3) / max(1, len(list(doc.sents)))
-            confidence_factors.append(coherence)
-        return float(np.mean(confidence_factors))
+        base_confidence = 0.7  # Default confidence
+        if "source_text" in rule:
+            base_confidence += 0.1
+        if "entity_types" in rule:
+            base_confidence += 0.1
+        if "type" in rule:
+            base_confidence += 0.1
+        return min(1.0, base_confidence)
+
+    def process_query(self, query: str) -> List[str]:
+        """
+        Public method to process a query using symbolic reasoning.
+        Encodes the query and traverses the knowledge graph to generate responses.
+
+        Args:
+            query: The input query string.
+
+        Returns:
+            List of response strings.
+        """
+        try:
+            query_embedding = self.embedder.encode(query, convert_to_tensor=True).to(self.device)
+            responses = self.traverse_graph(query_embedding)
+            self._update_reasoning_metrics(responses)
+            if not responses:
+                self.logger.info("No symbolic match found.")
+                return ["No symbolic match found."]
+            self.logger.info(f"Found {len(responses)} symbolic responses.")
+            return responses
+        except Exception as e:
+            self.logger.error(f"Error in process_query: {str(e)}")
+            return [f"Error processing query: {str(e)}"]
 
     def get_reasoning_metrics(self) -> Dict[str, Any]:
         """
@@ -266,7 +345,8 @@ class GraphSymbolicReasoner:
             'timing_analysis': {
                 'mean_time': float(np.mean(self.reasoning_metrics['reasoning_times'] or [0])),
                 'std_time': float(np.std(self.reasoning_metrics['reasoning_times'] or [0]))
-            }
+            },
+            'rule_additions': self.reasoning_metrics['rule_additions']
         }
 
     def _calculate_path_distribution(self) -> Dict[int, float]:
@@ -296,6 +376,7 @@ class GraphSymbolicReasoner:
         Calculate a confidence score for a response.
         """
         confidence_factors = []
+        # Length-based confidence
         length_score = min(len(response.split()) / 50, 1.0)
         confidence_factors.append(length_score)
         doc = self.nlp(response)
@@ -308,10 +389,10 @@ class GraphSymbolicReasoner:
         Identify which rules contributed to a response by comparing embeddings.
         """
         used_rules = set()
-        response_embedding = self.embedder.encode(response, convert_to_tensor=True)
+        response_embedding = self.embedder.encode(response, convert_to_tensor=True).to(self.device)
         for rule_id, rule in self.rule_index.items():
             if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
-                similarity = util.cos_sim(response_embedding, rule['embedding']).item()
+                similarity = util.cos_sim(response_embedding, rule['embedding'].to(self.device)).item()
                 if similarity > self.match_threshold:
                     used_rules.add(rule_id)
         return used_rules
@@ -344,7 +425,7 @@ class GraphSymbolicReasoner:
         """
         Process a rule to generate a response. This is a placeholder for more complex logic.
         """
-        # For now, simply return the response text
+        # For now, simply return the response text from the rule.
         return [rule.get('response', '')]
 
     def _is_comparison_question(self, query: str) -> bool:
@@ -363,39 +444,46 @@ class GraphSymbolicReasoner:
     def _handle_multi_hop_query(self, query: str) -> List[str]:
         """Placeholder for handling multi-hop queries."""
         self.logger.info("Multi-hop query detected, handling with basic logic.")
-        query_embedding = self.embedder.encode(query, convert_to_tensor=True)
+        query_embedding = self.embedder.encode(query, convert_to_tensor=True).to(self.device)
         responses = self.traverse_graph(query_embedding)
         if not responses:
             return ["No multi-hop symbolic match found."]
         return responses
 
-    def _validate_dynamic_rules(self, rules: List[Dict]) -> List[Dict]:
+    def _get_related_terms(self, term: str) -> List[str]:
         """
-        Validate dynamic rules with academic rigor.
+        Get semantically related terms using embeddings.
         """
-        valid_rules = []
-        for rule in rules:
-            if self._validate_rule_structure(rule):
-                rule['confidence'] = self._calculate_rule_confidence(rule)
-                valid_rules.append(rule)
-        return valid_rules
+        cache_key = hash(term)
+        if cache_key in getattr(self, 'embedding_cache', {}):
+            return self.embedding_cache[cache_key]
 
-    def _validate_rule_structure(self, rule: Dict) -> bool:
-        """
-        Validate if a rule dictionary has the basic required structure.
-        """
-        required_fields = {"keywords", "response"}
-        return isinstance(rule, dict) and all(field in rule for field in required_fields)
+        try:
+            term_emb = self.embedder.encode(term, convert_to_tensor=True).to(self.device)
+            related = []
+            for category, terms in self.expansion_rules.items():
+                terms_emb = self.embedder.encode(terms, convert_to_tensor=True).to(self.device)
+                similarities = util.cos_sim(term_emb, terms_emb)
+                for idx, sim in enumerate(similarities[0]):
+                    if sim > self.hop_threshold:
+                        related.append(terms[idx])
+            if not hasattr(self, 'embedding_cache'):
+                self.embedding_cache = {}
+            self.embedding_cache[cache_key] = related
+            return related
+        except Exception as e:
+            self.logger.error(f"Error getting related terms for {term}: {str(e)}")
+            return []
 
-    def _track_rule_addition(self, valid_rules: List[Dict]):
+    def _extract_comparison_pairs(self, doc) -> List[Tuple[str, str]]:
         """
-        Track metrics related to the addition of dynamic rules (for academic purposes).
+        Extract entity pairs for comparison queries.
         """
-        num_rules_added = len(valid_rules)
-        total_rules_now = len(self.rules)
-        avg_confidence = float(np.mean([rule.get('confidence', 0.0) for rule in valid_rules])) if valid_rules else 0.0
-        self.logger.info(
-            f"Tracked Rule Addition: Added {num_rules_added} rules. Total rules: {total_rules_now}. Avg confidence: {avg_confidence:.3f}")
-        # Optionally store these metrics in self.reasoning_metrics
-
-# End of file
+        pairs = []
+        entities = list(doc.ents)
+        for i in range(len(entities) - 1):
+            for j in range(i + 1, len(entities)):
+                between_tokens = doc[entities[i].end:entities[j].start]
+                if any(token.text.lower() in ['versus', 'vs', 'or', 'and'] for token in between_tokens):
+                    pairs.append((entities[i].text, entities[j].text))
+        return pairs

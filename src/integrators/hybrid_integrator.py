@@ -53,7 +53,7 @@ class HybridIntegrator:
         # Initialize integration components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.alignment_layer = AlignmentLayer(
-            sym_dim=300,   # Symbolic embedding dimension
+            sym_dim=300,    # Symbolic embedding dimension
             neural_dim=768,  # Neural embedding dimension
             target_dim=768   # Target integration dimension
         ).to(self.device)
@@ -117,7 +117,8 @@ class HybridIntegrator:
                 result = self._handle_single_hop_query(
                     query,
                     context,
-                    symbolic_result
+                    symbolic_result,
+                    supporting_facts  # Pass supporting facts even in single-hop mode if available
                 )
 
             # Cache result
@@ -136,7 +137,7 @@ class HybridIntegrator:
         try:
             # Process the query symbolically
             symbolic_result = self.symbolic_reasoner.process_query(query, context)
-            # Process the query neurally (using the correct attribute)
+            # Process the query neurally
             neural_result = self.neural.retrieve_answer(context, query)
             # Combine the two outputs. Here we simply concatenate them as a placeholder.
             fused_result = f"{symbolic_result} {neural_result}"
@@ -161,9 +162,10 @@ class HybridIntegrator:
         return self.symbolic_reasoner.process_query(query)
 
     def _handle_single_hop_query(self,
-                                     query: str,
-                                     context: str,
-                                     symbolic_result: List[str]) -> Tuple[str, str]:
+                                 query: str,
+                                 context: str,
+                                 symbolic_result: List[str],
+                                 supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
         """
         Handle single-hop query processing with enhanced integration.
         """
@@ -172,11 +174,18 @@ class HybridIntegrator:
             'question': query
         })
 
-        # Apply rule-guided retrieval
-        filtered_context = self.rg_retriever.filter_context_by_rules(
-            context,
-            symbolic_guidance
-        )
+        # Apply rule-guided retrieval; pass supporting_facts if available
+        if supporting_facts:
+            filtered_context = self.rg_retriever.filter_context_by_rules(
+                context,
+                symbolic_guidance,
+                supporting_facts=supporting_facts
+            )
+        else:
+            filtered_context = self.rg_retriever.filter_context_by_rules(
+                context,
+                symbolic_guidance
+            )
 
         # Get neural response
         neural_answer = self.neural.retrieve_answer(
@@ -186,7 +195,7 @@ class HybridIntegrator:
             query_complexity=0.7  # Pass query_complexity here if needed
         )
 
-        # Call _fuse_symbolic_neural for integration
+        # Fuse symbolic and neural outputs
         fused_answer, confidence, debug_info = self._fuse_symbolic_neural(query, symbolic_result, neural_answer)
 
         return (fused_answer, "hybrid")
@@ -196,16 +205,14 @@ class HybridIntegrator:
         Fuse symbolic and neural results using AlignmentLayer.
         """
         # **IMPORTANT: Implement actual fusion logic here using self.alignment_layer**
-        # This is a placeholder - replace with real fusion code
-
-        # For now, just return neural_answer as a placeholder fused answer
+        # For now, just return neural_answer as a placeholder fused answer.
         return neural_answer, 1.0, {}
 
     def _handle_multi_hop_query(self,
-                                    query: str,
-                                    context: str,
-                                    symbolic_result: List[str],
-                                    supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
+                                query: str,
+                                context: str,
+                                symbolic_result: List[str],
+                                supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
         """
         Handle multi-hop reasoning queries with enhanced academic tracking.
         """
@@ -225,7 +232,7 @@ class HybridIntegrator:
                     hop
                 )
 
-                # Apply rule-guided retrieval
+                # Apply rule-guided retrieval; support passing query_complexity for multi-hop
                 filtered_context = self.rg_retriever.filter_context_by_rules(
                     current_context,
                     symbolic_guidance,
@@ -237,7 +244,7 @@ class HybridIntegrator:
                     filtered_context,
                     hop['question'],
                     symbolic_guidance=symbolic_guidance,
-                    query_complexity=0.7  # Pass query_complexity here as well if needed
+                    query_complexity=0.7
                 )
 
                 intermediate_results.append(hop_response)
@@ -262,26 +269,26 @@ class HybridIntegrator:
             return ("Error processing multi-hop query.", "error")
 
     def _extract_reasoning_chain(self,
-                                     query: str,
-                                     context: str) -> List[Dict[str, str]]:
+                                  query: str,
+                                  context: str) -> List[Dict[str, str]]:
         """
         Extract multi-hop reasoning chain with academic tracking.
         """
-        # Basic multi-hop decomposition
+        # Basic multi-hop decomposition: split on "and"
         subqueries = [q.strip() for q in query.split("and") if q.strip()]
         return [{"question": subq} for subq in subqueries]
 
     def _get_symbolic_guidance(self,
-                                   symbolic_result: List[str],
-                                   hop: Dict[str, str]) -> List[str]:
+                               symbolic_result: List[str],
+                               hop: Dict[str, str]) -> List[str]:
         """
         Generate symbolic guidance for reasoning steps.
         """
         return symbolic_result
 
     def _combine_hop_results(self,
-                                 results: List[str],
-                                 reasoning_chain: List[Dict[str, str]]) -> str:
+                              results: List[str],
+                              reasoning_chain: List[Dict[str, str]]) -> str:
         """
         Combine multi-hop reasoning results with academic formatting.
         """

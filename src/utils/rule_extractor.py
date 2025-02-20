@@ -2,6 +2,8 @@
 
 import json
 import re
+
+import numpy as np
 import spacy
 from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict
@@ -81,6 +83,13 @@ class RuleExtractor:
             'location': 0.75
         }
 
+        # Add semantic rule types for enhanced semantic extraction
+        self.semantic_relation_types = {
+            'subject_object': ['nsubj', 'dobj'],
+            'modifier': ['amod', 'advmod'],
+            'compound': ['compound', 'nmod']
+        }
+
     def extract_hotpot_facts(self, context_text: str, min_confidence: float = 0.7) -> List[Dict]:
         """
         Extract facts from HotpotQA context with enhanced pattern matching and validation.
@@ -110,7 +119,6 @@ class RuleExtractor:
             for relation_type, patterns in self.relation_patterns.items():
                 for pattern in patterns:
                     matches = re.finditer(pattern, sent.text)
-
                     for match in matches:
                         # Create rule from match
                         rule = self._create_rule(
@@ -119,17 +127,15 @@ class RuleExtractor:
                             sentence=sent.text,
                             entities=entities
                         )
-
-                        # Validate and score the rule
                         if rule:
                             confidence = self._compute_rule_confidence(rule)
                             if confidence >= min_confidence:
                                 rule['confidence'] = confidence
+                                # Mark rule as extracted from HotpotQA supporting context
+                                rule['supporting_fact'] = True
                                 extracted_rules.append(rule)
 
-        # Post-process rules to establish connections
         processed_rules = self._establish_rule_connections(extracted_rules)
-
         logger.info(f"Extracted {len(processed_rules)} rules from context")
         return processed_rules
 
@@ -193,20 +199,12 @@ class RuleExtractor:
 
             # Adjust confidence based on various factors
             adjustments = [
-                # Entity presence adjustment
                 0.1 if rule.get('entity_types') else -0.1,
-
-                # Keyword richness adjustment
                 min(0.1, len(rule['keywords']) * 0.02),
-
-                # Relation type threshold
                 self.confidence_thresholds.get(rule['type'], 0.0) - 0.5
             ]
 
-            # Compute final confidence
             confidence = base_confidence + sum(adjustments)
-
-            # Ensure confidence is between 0 and 1
             return max(0.0, min(1.0, confidence))
 
         except Exception as e:
@@ -230,22 +228,17 @@ class RuleExtractor:
         """
         Establish connections between rules for multi-hop reasoning.
         """
-        # Create entity index
         entity_index = defaultdict(list)
         for i, rule in enumerate(rules):
             for entity in rule.get('entity_types', {}):
                 entity_index[entity].append(i)
 
-        # Establish connections
         for rule in rules:
             connected_rules = set()
             for entity in rule.get('entity_types', {}):
                 for connected_idx in entity_index[entity]:
                     connected_rules.add(connected_idx)
-
             rule['connected_rules'] = list(connected_rules)
-
-            # Compute path relevance scores
             rule['path_scores'] = self._compute_path_scores(
                 rule,
                 [rules[idx] for idx in connected_rules]
@@ -260,17 +253,89 @@ class RuleExtractor:
         Compute relevance scores for connected reasoning paths.
         """
         path_scores = {}
-
         source_emb = self.encoder.encode(source_rule['source_text'])
-
         for i, target_rule in enumerate(connected_rules):
             target_emb = self.encoder.encode(target_rule['source_text'])
             similarity = util.cos_sim(source_emb, target_emb).item()
-
-            # Adjust score based on relation types
             type_compatibility = 0.2 if source_rule['type'] == target_rule['type'] else 0.0
-
-            # Compute final path score
             path_scores[i] = (similarity + type_compatibility) / 2
-
         return path_scores
+
+    def _validate_rule_structure(self, rule: Dict) -> bool:
+        """
+        Validate if a rule dictionary has the basic required structure.
+        Allows rules with either 'keywords' and 'response' or, for HotpotQA facts, a 'text' field.
+        """
+        if rule.get('supporting_fact'):
+            return isinstance(rule, dict) and ("text" in rule or "source_text" in rule)
+        required_fields = {"keywords", "response"}
+        return isinstance(rule, dict) and all(field in rule for field in required_fields)
+
+    def _track_rule_addition(self, valid_rules: List[Dict]):
+        """
+        Track metrics related to the addition of dynamic rules (for academic purposes).
+        """
+        num_rules_added = len(valid_rules)
+        total_rules_now = len(self.rules)
+        avg_confidence = float(np.mean([rule.get('confidence', 0.0) for rule in valid_rules])) if valid_rules else 0.0
+        logger.info(
+            f"Tracked Rule Addition: Added {num_rules_added} rules. Total rules: {total_rules_now}. Avg confidence: {avg_confidence:.3f}"
+        )
+
+    # --- New Functions for Semantic Rule Extraction ---
+
+    def _create_semantic_rule(self, token, sentence) -> Optional[Dict]:
+        """
+        Create a rule from semantic relationships in the sentence.
+
+        Args:
+            token: The spaCy token representing subject or object.
+            sentence: The full sentence containing the relationship.
+
+        Returns:
+            Dict containing the extracted semantic rule or None if extraction fails.
+        """
+        try:
+            # Find the predicate (usually the root verb)
+            predicate = [t for t in token.ancestors if t.dep_ == 'ROOT']
+            if not predicate:
+                return None
+
+            rule = {
+                'type': 'semantic',
+                'subject': token.text if token.dep_ == 'nsubj' else None,
+                'predicate': predicate[0].text,
+                'object': token.text if token.dep_ == 'dobj' else None,
+                'sentence': sentence.text,
+                'keywords': [token.text, predicate[0].text],
+                'confidence': 0.8  # Initial confidence for semantic rules
+            }
+
+            return rule if rule['subject'] and (rule['object'] or rule['predicate']) else None
+
+        except Exception as e:
+            logger.error(f"Error creating semantic rule: {e}")
+            return None
+
+    def extract_semantic_rules(self, context: str) -> List[Dict]:
+        """
+        Extract rules based on semantic relationships rather than just patterns.
+
+        Args:
+            context: Input text to extract rules from.
+
+        Returns:
+            List of extracted semantic rules.
+        """
+        doc = nlp(context)
+        semantic_rules = []
+
+        for sent in doc.sents:
+            # Use dependency parsing to extract semantic relationships
+            for token in sent:
+                if token.dep_ in self.semantic_relation_types['subject_object']:
+                    rule = self._create_semantic_rule(token, sent)
+                    if rule:
+                        semantic_rules.append(rule)
+
+        return semantic_rules

@@ -21,10 +21,13 @@ import os
 import json
 import torch
 import warnings
+import logging
 
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def load_hotpotqa(hotpotqa_path, max_samples=None):
     """
@@ -35,11 +38,12 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
     dataset = []
     with open(hotpotqa_path, 'r', encoding='utf-8') as f:
         data = json.load(f)  # a single large JSON array
+
     count = 0
     for example in data:
         question = example['question']
         answer = example['answer']
-        supporting_facts = example['supporting_facts'] # Retrieve supporting facts
+        supporting_facts = example['supporting_facts']  # Retrieve supporting facts
 
         # Flatten the context
         context_str = []
@@ -54,7 +58,7 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
             "answer": answer,
             "context": context_str,
             "type": "ground_truth_available",
-            "supporting_facts": supporting_facts # Store supporting facts
+            "supporting_facts": supporting_facts  # Store supporting facts
         })
         count += 1
         if max_samples and count >= max_samples:
@@ -102,7 +106,8 @@ if __name__ == "__main__":
 
     # 6. Additional components
     print("Initializing support components...")
-    logger = QueryLogger()
+    logger = logging.getLogger(__name__)  # Standard logger for warnings
+    query_logger = QueryLogger()
     feedback_manager = FeedbackManager()
     print("Initializing QueryExpander...")
     expander = QueryExpander(
@@ -125,7 +130,11 @@ if __name__ == "__main__":
         for i, sample in enumerate(test_queries):
             new_rules = rule_extractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
             if new_rules:
-                symbolic.add_dynamic_rules(new_rules)
+                # Wrap in try-except to catch missing _track_rule_addition
+                try:
+                    symbolic.add_dynamic_rules(new_rules)
+                except AttributeError as e:
+                    logger.warning(f"Could not track new rules automatically (missing method?): {str(e)}")
             ground_truths[sample["query"]] = sample["answer"]
     else:
         print("Warning: HotpotQA not found, and no fallback dataset provided.")
@@ -179,7 +188,7 @@ if __name__ == "__main__":
         the_answer = q_info.get("answer", None)
         forced_path = q_info.get("forced_path", None)
         data_type = q_info.get("type", "ground_truth_available")
-        supporting_facts = q_info.get("supporting_facts", None) # Get supporting facts
+        supporting_facts = q_info.get("supporting_facts", None)  # Get supporting facts
 
         print(f"\nProcessing Query: {query}")
         print(f"Query Type: {data_type}")
@@ -224,14 +233,13 @@ if __name__ == "__main__":
                 eval_metrics = evaluator.evaluate(
                     predictions={query: final_answer[0]},
                     ground_truths={query: the_answer},
-                    supporting_facts={query: supporting_facts} # Pass supporting facts
+                    supporting_facts={query: supporting_facts}  # Pass supporting facts
                 )
                 print("\nEvaluation Metrics:")
                 print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
                 print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}")
-                print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}") # Print BLEU
+                print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}")  # Print BLEU
                 print(f"F1 Score: {eval_metrics['average_f1']:.2f}")
-
 
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")

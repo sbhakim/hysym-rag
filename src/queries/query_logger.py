@@ -1,5 +1,3 @@
-# src/queries/query_logger.py
-
 import json
 import os
 from datetime import datetime
@@ -8,7 +6,6 @@ import logging
 from pathlib import Path
 import jsonlines
 from collections import defaultdict
-
 
 class QueryLogger:
     """
@@ -65,6 +62,7 @@ class QueryLogger:
         if not self.main_log_path.exists():
             with open(self.main_log_path, 'w', encoding='utf-8') as f:
                 json.dump([], f)
+                f.flush()
 
         # Initialize performance log with header
         if not self.performance_log_path.exists():
@@ -82,6 +80,7 @@ class QueryLogger:
                     "error_counts": {},
                     "error_logs": []
                 }, f)
+                f.flush()
 
     def log_query(self,
                   query: str,
@@ -270,7 +269,7 @@ class QueryLogger:
 
             with open(self.main_log_path, 'w', encoding='utf-8') as f:
                 json.dump(current_logs, f, indent=4)
-
+                f.flush()
         except Exception as e:
             self.logger.error(f"Error writing to main log: {str(e)}")
             self._log_error("main_log_write_error", str(e))
