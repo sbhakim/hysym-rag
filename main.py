@@ -13,6 +13,7 @@ from src.queries.query_expander import QueryExpander
 from src.utils.evaluation import Evaluation
 from src.app import App
 from src.system.system_control_manager import SystemControlManager, UnifiedResponseAggregator
+from src.utils.metrics_collector import MetricsCollector
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
@@ -24,7 +25,13 @@ import warnings
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
 
+
 def load_hotpotqa(hotpotqa_path, max_samples=None):
+    """
+    Loads a portion of the HotpotQA dataset.
+    Each sample includes a query, ground-truth answer,
+    combined context, and a 'type' = 'ground_truth_available'.
+    """
     dataset = []
     with open(hotpotqa_path, 'r', encoding='utf-8') as f:
         data = json.load(f)  # a single large JSON array
@@ -32,6 +39,7 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
     for example in data:
         question = example['question']
         answer = example['answer']
+        supporting_facts = example['supporting_facts'] # Retrieve supporting facts
 
         # Flatten the context
         context_str = []
@@ -45,7 +53,8 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
             "query": question,
             "answer": answer,
             "context": context_str,
-            "type": "ground_truth_available"
+            "type": "ground_truth_available",
+            "supporting_facts": supporting_facts # Store supporting facts
         })
         count += 1
         if max_samples and count >= max_samples:
@@ -69,14 +78,20 @@ if __name__ == "__main__":
         history_window_size=100
     )
 
-    # 3. Extract symbolic rules from a local text (deforestation) into data/rules.json
-    print("Extracting rules from deforestation.txt...")
-    RuleExtractor.extract_rules("data/deforestation.txt", "data/rules.json")
+    # ----------------------------------------------------------------
+    # 3. (Optional) We skip extracting rules from deforestation.txt.
+    #    Instead, we ensure 'data/rules.json' exists but is empty or minimal.
+    # ----------------------------------------------------------------
+    rules_path = "data/rules.json"
+    if not os.path.exists(rules_path):
+        with open(rules_path, "w", encoding="utf-8") as f:
+            json.dump([], f)
+    print(f"Loading existing rules from {rules_path} (initially empty or minimal).")
 
     # 4. Initialize the Graph-Based Symbolic Reasoner
     print("Initializing Graph-Based Symbolic Reasoner...")
     symbolic = GraphSymbolicReasoner(
-        "data/rules.json",
+        rules_file=rules_path,
         match_threshold=0.25,
         max_hops=5
     )
@@ -93,32 +108,29 @@ if __name__ == "__main__":
     expander = QueryExpander(
         complexity_config="src/config/complexity_rules.yaml"
     )
+    print("Initializing RuleExtractor...")
+    rule_extractor = RuleExtractor()  # Instantiate RuleExtractor
     print("Loading evaluation dataset...")
 
     # Decide whether to load HotpotQA
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
-    max_hotpot_samples = 3
+    max_hotpot_samples = 20
 
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
         ground_truths = {}
-        # NEW STEP: parse each sample's context, auto-generate rules, add them to reasoner
+
+        # Build rules from HotpotQA contexts and store ground truths
         for i, sample in enumerate(test_queries):
-            # Extract simple facts from the context
-            new_rules = RuleExtractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
+            new_rules = rule_extractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
             if new_rules:
                 symbolic.add_dynamic_rules(new_rules)
-            # Build ground_truth dictionary
             ground_truths[sample["query"]] = sample["answer"]
-
     else:
-        # fallback to old data
-        with open("data/ground_truths.json", "r") as gt_file:
-            ground_truths = json.load(gt_file)
-        print("\nLoading query list from data/query_list.json...")
-        with open("data/query_list.json", "r") as q_file:
-            test_queries = json.load(q_file)
+        print("Warning: HotpotQA not found, and no fallback dataset provided.")
+        test_queries = []
+        ground_truths = {}
 
     evaluator = Evaluation()
 
@@ -126,13 +138,15 @@ if __name__ == "__main__":
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(symbolic, neural, resource_manager, expander)
 
-    # 8. System Control
+    # 8. System Control - Initialize MetricsCollector and pass it to SystemControlManager
     print("Initializing System Control Components...")
     aggregator = UnifiedResponseAggregator(include_explanations=True)
+    metrics_collector = MetricsCollector()
     system_manager = SystemControlManager(
         hybrid_integrator=integrator,
         resource_manager=resource_manager,
         aggregator=aggregator,
+        metrics_collector=metrics_collector,
         error_retry_limit=2,
         max_query_time=10
     )
@@ -164,7 +178,8 @@ if __name__ == "__main__":
         query = q_info["query"]
         the_answer = q_info.get("answer", None)
         forced_path = q_info.get("forced_path", None)
-        data_type = q_info.get("type", "exploratory")
+        data_type = q_info.get("type", "ground_truth_available")
+        supporting_facts = q_info.get("supporting_facts", None) # Get supporting facts
 
         print(f"\nProcessing Query: {query}")
         print(f"Query Type: {data_type}")
@@ -176,17 +191,17 @@ if __name__ == "__main__":
             print(f"Query Complexity Score: {complexity:.4f}")
 
             initial_metrics = resource_manager.check_resources()
-            # If from HotpotQA, we pass the sample context
             local_context = q_info.get("context", context)
-            final_answer = system_manager.process_query_with_fallback(query, local_context,
-                                                                      forced_path=forced_path)
+
+            final_answer = system_manager.process_query_with_fallback(
+                query, local_context, forced_path=forced_path, query_complexity=complexity
+            )
             final_metrics = resource_manager.check_resources()
             resource_delta = {
                 key: final_metrics[key] - initial_metrics[key]
                 for key in final_metrics
             }
 
-            # Log query
             logger.log_query(
                 query=query,
                 result=final_answer,
@@ -204,22 +219,28 @@ if __name__ == "__main__":
             print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
 
-            # Evaluate if ground truth
             if data_type == "ground_truth_available" and the_answer is not None:
-                eval_metrics = evaluator.evaluate({query: final_answer}, {query: the_answer})
+                # Pass supporting facts to evaluator.evaluate
+                eval_metrics = evaluator.evaluate(
+                    predictions={query: final_answer[0]},
+                    ground_truths={query: the_answer},
+                    supporting_facts={query: supporting_facts} # Pass supporting facts
+                )
                 print("\nEvaluation Metrics:")
-                print(f"Similarity Score: {eval_metrics['average_similarity']:.2f}")
+                print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
                 print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}")
+                print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}") # Print BLEU
                 print(f"F1 Score: {eval_metrics['average_f1']:.2f}")
+
 
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # 12. Optional Comparison
+    # 11. Optional Comparison Experiment
     print("\n=== Comparison Experiment (Sample) ===")
-    comparison_queries = ["Which city is known for deforestation?"]
+    comparison_queries = ["Compare and contrast the film adaptations of 'Pride and Prejudice'."]
     header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (%)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
     print(header)
     print("-" * len(header))
@@ -236,8 +257,16 @@ if __name__ == "__main__":
         final_metrics_neural = resource_manager.check_resources()
         neural_delta = {k: final_metrics_neural[k] - initial_metrics_neural[k] for k in final_metrics_neural}
 
-        row_hybrid = f"{query:<50} | {'Hyb.':<15} | {hybrid_delta['cpu'] * 100:>10.1f} | {hybrid_delta['memory'] * 100:>15.1f} | {hybrid_delta['gpu'] * 100:>10.1f} | {hybrid_answer}"
-        row_neural = f"{query:<50} | {'Neural':<15} | {neural_delta['cpu'] * 100:>10.1f} | {neural_delta['memory'] * 100:>15.1f} | {neural_delta['gpu'] * 100:>10.1f} | {str(neural_answer)[:150]}..."
+        row_hybrid = (
+            f"{query:<50} | {'Hyb.':<15} | {hybrid_delta['cpu'] * 100:>10.1f} "
+            f"| {hybrid_delta['memory'] * 100:>15.1f} | {hybrid_delta['gpu'] * 100:>10.1f} "
+            f"| {hybrid_answer}"
+        )
+        row_neural = (
+            f"{query:<50} | {'Neural':<15} | {neural_delta['cpu'] * 100:>10.1f} "
+            f"| {neural_delta['memory'] * 100:>15.1f} | {neural_delta['gpu'] * 100:>10.1f} "
+            f"| {str(neural_answer)[:150]}..."
+        )
         print(row_hybrid)
         print(row_neural)
         print("-" * len(header))
@@ -257,10 +286,18 @@ if __name__ == "__main__":
 
     print("\nReasoning Path Distribution:")
     path_stats = system_manager.get_reasoning_path_stats()
-    for path, percentage in path_stats.items():
+    total_queries = performance_stats['total_queries']
+    for path, stats in path_stats.items():
+        count = stats.get('count', 0)
+        percentage = (count / total_queries) * 100 if total_queries > 0 else 0
         print(f"- {path}: {percentage:.1f}%")
 
     print("\nSystem Information:")
     print(f"Model Path: {neural.model.config._name_or_path}")
     print(f"Cache Location: {os.getenv('HF_HOME', os.path.expanduser('~/.cache/huggingface'))}")
     print("=== End of Run ===")
+
+    # 12. Generate and print academic evaluation report
+    academic_report = metrics_collector.generate_academic_report()
+    print("\n=== Academic Evaluation Results ===")
+    print(json.dumps(academic_report, indent=2))

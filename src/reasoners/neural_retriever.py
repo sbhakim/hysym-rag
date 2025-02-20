@@ -4,169 +4,283 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer, util
 import torch
 import logging
-from src.reasoners.rg_retriever import RuleGuidedRetriever
+import numpy as np
+from typing import List, Dict, Optional, Tuple, Union
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
-def is_causal_query(question):
-    """
-    Determines if the question likely requires causal reasoning.
-    """
-    causal_keywords = ['cause', 'result', 'lead to', 'because']
-    return any(keyword in question.lower() for keyword in causal_keywords)
-
-
 class NeuralRetriever:
-    def __init__(self, model_name, use_quantization=False):
+    """Enhanced Neural Retriever with supporting facts awareness for HotpotQA."""
+
+    def __init__(self,
+                 model_name: str,
+                 use_quantization: bool = False,
+                 max_context_length: int = 2048,
+                 chunk_size: int = 512,
+                 overlap: int = 128):
+        """
+        Initialize the enhanced neural retriever.
+
+        Args:
+            model_name: Name of the language model
+            use_quantization: Whether to use 8-bit quantization
+            max_context_length: Maximum context length
+            chunk_size: Size of context chunks
+            overlap: Overlap between chunks
+        """
         print(f"Initializing Neural Retriever with model: {model_name}...")
+
+        # Initialize tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if use_quantization:
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, device_map="auto", torch_dtype="auto", load_in_8bit=True
+                model_name,
+                device_map="auto",
+                torch_dtype="auto",
+                load_in_8bit=True
             )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, device_map="auto", torch_dtype="auto"
+                model_name,
+                device_map="auto",
+                torch_dtype="auto"
             )
+
+        # Initialize sentence transformer for semantic search
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.max_input_length = 512
-        self.guidance_template = (
-            "Following these rules:\n{rules}\n\n"
-            "Based on the context and rules, provide a precise answer."
-        )
-        self.prompt_templates = {
-            'causal': {
-                'prefix': "Let's analyze this step by step, considering the following principles:\n",
-                'suffix': "\nBased on these principles and using step-by-step reasoning:\n"
-            },
-            'factual': {
-                'prefix': "Consider these key points:\n",
-                'suffix': "\nUsing the above information:\n"
-            },
-            'exploratory': {
-                'prefix': "Taking into account these relevant facts:\n",
-                'suffix': "\nLet's explore the answer:\n"
-            }
-        }
+
+        # Configuration parameters
+        self.max_context_length = max_context_length
+        self.chunk_size = chunk_size
+        self.overlap = overlap
+
+        # Performance tracking
+        self.stats = defaultdict(list)
+
         print(f"Model {model_name} loaded successfully!")
-        # Initialize Advanced RG-Retriever with adaptive threshold and paragraph filtering
-        self.rg_retriever = RuleGuidedRetriever(
-            encoder=self.encoder,
-            similarity_threshold=0.4,  # Base similarity threshold
-            adaptive_threshold=True,  # Enable adaptive threshold
-            context_granularity="paragraph"  # Use paragraph-level filtering
-        )
 
-    def format_rule_guidance(self, rules, query_type='factual'):
-        """Format rules for guidance."""
-        if not rules:
-            return ""
-        template = self.prompt_templates.get(query_type, self.prompt_templates['factual'])
-        formatted_rules = []
-        for rule in rules[:3]:
-            if isinstance(rule, dict):
-                rule_text = rule.get("response", str(rule))
-                confidence = rule.get("confidence", 1.0)
-                prefix = "Critical principle:" if confidence > 0.8 else "Related principle:"
-                formatted_rules.append(f"{prefix} {rule_text}")
-            else:
-                formatted_rules.append(f"- {str(rule)}")
-        return template['prefix'] + "\n".join(formatted_rules) + template['suffix']
-
-    def _determine_query_type(self, question):
-        """Determine query type based on keywords."""
-        question_lower = question.lower()
-        if any(word in question_lower for word in ['why', 'how', 'cause', 'effect', 'lead to']):
-            return 'causal'
-        elif any(word in question_lower for word in ['what is', 'define', 'explain']):
-            return 'exploratory'
-        return 'factual'
-
-    def _get_generation_params(self, query_type):
-        """Return generation parameters based on query type."""
-        params = {
-            'causal': {'max_new_tokens': 100, 'temperature': 0.7, 'num_beams': 2},
-            'factual': {'max_new_tokens': 80, 'temperature': 0.3, 'num_beams': 1},
-            'exploratory': {'max_new_tokens': 90, 'temperature': 0.5, 'num_beams': 2}
-        }
-        return params.get(query_type, params['factual'])
-
-    def retrieve_answer(self, context, question, symbolic_guidance=None, rule_guided_retrieval=True,
-                        query_complexity=0.5):
+    def retrieve_answer(self,
+                        context: str,
+                        question: str,
+                        symbolic_guidance: Optional[List[Dict]] = None,
+                        supporting_facts: Optional[List[Tuple[str, int]]] = None,
+                        query_complexity: Optional[float] = None
+                        ) -> str:
         """
-        Enhanced answer generation with consistent return format.
+        Retrieve answer with supporting facts awareness.
+
+        Args:
+            context: Input context
+            question: Question to answer
+            symbolic_guidance: Optional symbolic rules
+            supporting_facts: Optional supporting fact indices
+            query_complexity: Optional query complexity score
 
         Returns:
-            str: The generated answer text
+            Generated answer as a string.
         """
         try:
-            query_type = self._determine_query_type(question)
-            guidance_text = self.format_rule_guidance(symbolic_guidance,
-                                                      query_type=query_type) if symbolic_guidance else ""
+            # Validate inputs
+            if not isinstance(context, str) or not isinstance(question, str):
+                raise ValueError("Context and question must be strings")
 
-            if rule_guided_retrieval and symbolic_guidance and hasattr(self, 'rg_retriever'):
-                try:
-                    context = self.rg_retriever.filter_context_by_rules(
-                        context, symbolic_guidance, query_complexity=query_complexity
-                    )
-                except Exception as e:
-                    logger.warning(f"RG-Retriever failed: {str(e)}. Using original context.")
+            # Process context into chunks
+            context_chunks = self._chunk_context(context)
 
-            # Prepare input and generate response
-            input_text = f"{guidance_text}\nContext: {context}\nQuestion: {question}\nAnswer:"
-            generation_params = self._get_generation_params(query_type)
+            # Prioritize chunks with supporting facts if available
+            if supporting_facts:
+                context_chunks = self._prioritize_supporting_facts(
+                    context_chunks,
+                    supporting_facts
+                )
 
+            # Encode question safely
+            question_embedding = self._encode_safely(question)
+
+            # Get relevant chunks using semantic search and optional guidance
+            relevant_chunks = self._get_relevant_chunks(
+                question_embedding,
+                context_chunks,
+                symbolic_guidance
+            )
+
+            # Prepare prompt with enhanced context
+            prompt = self._create_prompt(
+                question,
+                relevant_chunks,
+                symbolic_guidance
+            )
+
+            # Generate answer with proper error handling
             inputs = self.tokenizer(
-                input_text,
+                prompt,
                 return_tensors="pt",
                 truncation=True,
-                max_length=self.max_input_length
+                max_length=self.max_context_length
             ).to(self.model.device)
 
-            outputs = self.model.generate(**inputs, **generation_params)
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=150,
+                num_return_sequences=1,
+                no_repeat_ngram_size=3
+            )
 
-            return response  # Return just the string response
+            response = self.tokenizer.decode(
+                outputs[0],
+                skip_special_tokens=True
+            )
+
+            return self._post_process_response(response)
 
         except Exception as e:
             logger.error(f"Error in retrieve_answer: {str(e)}")
+            return "Error retrieving answer."
+
+    def _encode_safely(self, text: str) -> torch.Tensor:
+        """Safely encode text with error handling."""
+        try:
+            return self.encoder.encode(text, convert_to_tensor=True)
+        except Exception as e:
+            logger.error(f"Error encoding text: {str(e)}")
+            raise
+
+    def _generate_response(self, prompt: str) -> str:
+        """Generate response with proper error handling."""
+        try:
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.max_context_length
+            ).to(self.model.device)
+
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=150,
+                num_return_sequences=1,
+                no_repeat_ngram_size=3
+            )
+
+            return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
             return "Error generating response."
 
-    def retrieve_answers_batched(self, contexts, questions, symbolic_guidances=None):
-        """Batch version of retrieve_answer."""
-        batch_inputs = []
-        for i in range(len(questions)):
-            guidance = symbolic_guidances[i] if symbolic_guidances and i < len(symbolic_guidances) else None
-            guidance_text = ""
-            if guidance:
-                guidance_text = self.format_rule_guidance(guidance)
-            if is_causal_query(questions[i]):
-                cot_prompt = "Step-by-step causal reasoning:"
-                input_text = f"{cot_prompt}\nContext: {contexts[i]}\nQuestion: {questions[i]}\nAnswer:"
-            else:
-                input_text = f"Context: {contexts[i]}\nQuestion: {questions[i]}\nAnswer:"
-            if guidance_text:
-                input_text = guidance_text + "\n" + input_text
-            batch_inputs.append(input_text)
-        inputs = self.tokenizer(
-            batch_inputs,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.max_input_length
-        ).to(self.model.device)
-        outputs = self.model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
-        decoded = [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
-        return decoded
+    def _post_process_response(self, response: str) -> str:
+        """Clean and validate the generated response."""
+        if "Question:" in response:
+            response = response.split("Answer:")[-1]
+        response = response.strip()
+        if not response.endswith(('.', '!', '?')):
+            response += '.'
+        return response
 
-    def encode(self, text):
-        """Encode text using SentenceTransformer."""
-        try:
-            emb = self.encoder.encode(text, convert_to_tensor=True)
-            if torch.cuda.is_available():
-                emb = emb.to('cuda')
-            return emb
-        except Exception as e:
-            print(f"Error encoding text: {str(e)}")
-            raise
+    def _chunk_context(self, context: str) -> List[Dict]:
+        """
+        Split context into overlapping chunks with metadata.
+        """
+        sentences = [s.strip() for s in context.split('.') if s.strip()]
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for idx, sentence in enumerate(sentences):
+            sentence_tokens = len(self.tokenizer.encode(sentence))
+            if current_length + sentence_tokens > self.chunk_size and current_chunk:
+                chunk_text = ' '.join(current_chunk)
+                chunk_data = {
+                    'text': chunk_text,
+                    'embedding': self.encoder.encode(chunk_text, convert_to_tensor=True),
+                    'sentences': current_chunk.copy(),
+                    'start_idx': idx - len(current_chunk),
+                    'end_idx': idx - 1
+                }
+                chunks.append(chunk_data)
+                overlap_sentences = current_chunk[-max(1, self.overlap // sentence_tokens):]
+                current_chunk = overlap_sentences
+                current_length = sum(len(self.tokenizer.encode(s)) for s in current_chunk)
+            current_chunk.append(sentence)
+            current_length += sentence_tokens
+
+        if current_chunk:
+            chunk_text = ' '.join(current_chunk)
+            chunk_data = {
+                'text': chunk_text,
+                'embedding': self.encoder.encode(chunk_text, convert_to_tensor=True),
+                'sentences': current_chunk,
+                'start_idx': len(sentences) - len(current_chunk),
+                'end_idx': len(sentences) - 1
+            }
+            chunks.append(chunk_data)
+        return chunks
+
+    def _prioritize_supporting_facts(self,
+                                     chunks: List[Dict],
+                                     supporting_facts: List[Tuple[str, int]]
+                                     ) -> List[Dict]:
+        """
+        Prioritize chunks containing supporting facts.
+        """
+        supporting_indices = {idx for _, idx in supporting_facts}
+        for chunk in chunks:
+            support_count = sum(
+                1 for idx in range(chunk['start_idx'], chunk['end_idx'] + 1)
+                if idx in supporting_indices
+            )
+            chunk['support_score'] = support_count / len(chunk['sentences'])
+        return sorted(chunks, key=lambda x: x['support_score'], reverse=True)
+
+    def _get_relevant_chunks(self,
+                             question_embedding: torch.Tensor,
+                             chunks: List[Dict],
+                             symbolic_guidance: Optional[List[Dict]] = None
+                             ) -> List[Dict]:
+        """
+        Get relevant chunks using semantic search and symbolic guidance.
+        """
+        similarities = []
+        for chunk in chunks:
+            sim = util.cos_sim(question_embedding, chunk['embedding']).item()
+            if 'support_score' in chunk:
+                sim += chunk['support_score'] * 0.3
+            if symbolic_guidance:
+                sim += self._calculate_guidance_boost(chunk, symbolic_guidance)
+            similarities.append(sim)
+        top_k = 3
+        top_indices = np.argsort(similarities)[-top_k:]
+        return [chunks[i] for i in top_indices]
+
+    def _calculate_guidance_boost(self,
+                                  chunk: Dict,
+                                  guidance: List[Dict]) -> float:
+        """
+        Calculate score boost based on symbolic guidance.
+        """
+        boost = 0.0
+        chunk_text = chunk['text'].lower()
+        for guide in guidance:
+            if guide['statement'].lower() in chunk_text:
+                boost += guide.get('confidence', 0.5) * 0.2
+        return min(boost, 0.3)
+
+    def _create_prompt(self,
+                       question: str,
+                       chunks: List[Dict],
+                       symbolic_guidance: Optional[List[Dict]] = None) -> str:
+        """
+        Create enhanced prompt with relevant context and guidance.
+        """
+        context_parts = [c['text'] for c in chunks]
+        context = "\n".join(context_parts)
+        guidance_text = ""
+        if symbolic_guidance:
+            guidance_statements = [g['statement'] for g in symbolic_guidance if g.get('confidence', 0) > 0.5]
+            if guidance_statements:
+                guidance_text = "\nRelevant information:\n- " + "\n- ".join(guidance_statements)
+        prompt = f"Context:{guidance_text}\n{context}\n\nQuestion: {question}\nAnswer:"
+        return prompt
+
+    # End of file

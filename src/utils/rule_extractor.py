@@ -3,14 +3,19 @@
 import json
 import re
 import spacy
-from transformers import pipeline
+from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict
-from spacy.tokens import Token
 import logging
+from transformers import pipeline
+from spacy.tokens import Token
+import torch
+from sentence_transformers import SentenceTransformer, util
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Load spaCy model for NLP tasks
 try:
     nlp = spacy.load("en_core_web_sm")
     logger.info("Successfully loaded spaCy model")
@@ -18,12 +23,15 @@ except Exception as e:
     logger.error(f"Error loading spaCy model: {str(e)}")
     raise
 
+# Ensure spaCy has custom extension for coreference
 if not Token.has_extension("coref_clusters"):
     Token.set_extension("coref_clusters", default=None)
 
+# Initialize BART for confidence scoring
 try:
-    # Updated to use top_k=None instead of return_all_scores=True
-    rule_scorer = pipeline("text-classification", model="facebook/bart-large-mnli", top_k=None)
+    rule_scorer = pipeline("text-classification",
+                           model="facebook/bart-large-mnli",
+                           top_k=None)
     logger.info("Successfully initialized rule scorer")
 except Exception as e:
     logger.error(f"Error initializing rule scorer: {str(e)}")
@@ -32,275 +40,237 @@ except Exception as e:
 
 class RuleExtractor:
     """
-    Enhanced RuleExtractor with pattern matching, coreference resolution,
-    transformer-based rule scoring, neural pattern distillation, and optional
-    transformer-based causal extraction.
+    Enhanced RuleExtractor for HotpotQA-style multi-hop reasoning.
+    Supports sophisticated pattern matching and relation extraction.
     """
-    CAUSAL_CUES = {
-        "cause", "caused by", "result in", "lead to", "leads to",
-        "affect", "impact", "influence", "due to", "because",
-        "therefore", "thus", "consequently", "hence", "so"
-    }
-    IMPLICIT_INDICATORS = {
-        "increase", "decrease", "reduce", "prevent", "promote",
-        "enhance", "diminish", "accelerate", "slow", "stop"
-    }
 
-    @staticmethod
-    def resolve_coreferences(text):
-        doc = nlp(text)
-        resolved_text = []
-        for token in doc:
-            if token._.coref_clusters:
-                resolved_text.append(token._.coref_clusters[0].main.text)
-            else:
-                resolved_text.append(token.text)
-        return " ".join(resolved_text)
+    def __init__(self):
+        # Define comprehensive patterns for various types of relations
+        self.relation_patterns = {
+            'biographical': [
+                r"([A-Z][a-zA-Z\s]+)\s*\(born\s+([^)]+)\)\s+is\s+an?\s+([A-Za-z\s]+)",
+                r"([A-Z][a-zA-Z\s]+)\s+was\s+born\s+in\s+([A-Za-z\s,]+)\s+on\s+([A-Za-z0-9\s,]+)"
+            ],
+            'professional': [
+                r"([A-Z][a-zA-Z\s]+)\s+(?:is|was)\s+(?:a|an)\s+([A-Za-z\s]+)",
+                r"([A-Z][a-zA-Z\s]+)\s+worked\s+as\s+(?:a|an)\s+([A-Za-z\s]+)"
+            ],
+            'creation': [
+                r"([A-Z][a-zA-Z0-9\s]+)\s+(?:directed|produced|wrote)\s+([A-Z][a-zA-Z0-9\s\"]+)",
+                r"([A-Z][a-zA-Z0-9\s\"]+)\s+was\s+(?:directed|produced|written)\s+by\s+([A-Z][a-zA-Z\s]+)"
+            ],
+            'temporal': [
+                r"(?:In|During|Around)\s+(\d{4}),\s+([A-Z][a-zA-Z\s]+)\s+([A-Za-z\s]+)",
+                r"([A-Z][a-zA-Z\s]+)\s+(?:began|started|commenced)\s+([A-Za-z\s]+)\s+in\s+(\d{4})"
+            ],
+            'location': [
+                r"([A-Z][a-zA-Z\s]+)\s+(?:is|was)\s+located\s+in\s+([A-Z][a-zA-Z\s,]+)",
+                r"([A-Z][a-zA-Z\s]+)\s+(?:moved|relocated)\s+to\s+([A-Z][a-zA-Z\s,]+)"
+            ]
+        }
 
-    @staticmethod
-    def build_causal_chains(doc):
-        chains = []
+        # Initialize SentenceTransformer for semantic similarity
+        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+
+        # Confidence thresholds for different relation types
+        self.confidence_thresholds = {
+            'biographical': 0.8,
+            'professional': 0.75,
+            'creation': 0.85,
+            'temporal': 0.7,
+            'location': 0.75
+        }
+
+    def extract_hotpot_facts(self, context_text: str, min_confidence: float = 0.7) -> List[Dict]:
+        """
+        Extract facts from HotpotQA context with enhanced pattern matching and validation.
+
+        Args:
+            context_text: The context text from HotpotQA
+            min_confidence: Minimum confidence threshold for extracted rules
+
+        Returns:
+            List of extracted rules with confidence scores
+        """
+        extracted_rules = []
+
+        # Process text with spaCy for enhanced NLP features
+        doc = nlp(context_text)
+
+        # Extract entities and their types
+        entities = {ent.text: ent.label_ for ent in doc.ents}
+
+        # Process each sentence for fact extraction
         for sent in doc.sents:
-            sent_text = sent.text.lower()
-            for cue in RuleExtractor.CAUSAL_CUES:
-                if cue in sent_text:
-                    parts = sent_text.split(cue)
-                    if len(parts) == 2:
-                        cause = parts[0].strip()
-                        effect = parts[1].strip()
-                        if cause and effect:
-                            chains.append({
-                                "cause": cause,
-                                "effect": effect,
-                                "source": sent.text,
-                                "type": "explicit"
-                            })
-            for token in sent:
-                if token.text.lower() in RuleExtractor.IMPLICIT_INDICATORS:
-                    subject = None
-                    obj = None
-                    for left in token.lefts:
-                        if left.dep_ in ("nsubj", "nsubjpass"):
-                            subject = left
-                            break
-                    for right in token.rights:
-                        if right.dep_ in ("dobj", "pobj"):
-                            obj = right
-                            break
-                    if subject and obj:
-                        chains.append({
-                            "cause": subject.text,
-                            "effect": f"{token.text} {obj.text}",
-                            "source": sent.text,
-                            "type": "implicit"
-                        })
-        return chains
+            # Skip short or incomplete sentences
+            if len(sent.text.split()) < 4:
+                continue
 
-    @staticmethod
-    def extract_keywords(text):
-        doc = nlp(text.lower())
-        keywords = [token.lemma_ for token in doc if token.pos_ in ("NOUN", "VERB", "ADJ")
-                    and not token.is_stop and len(token.text) > 1]
-        return list(set(keywords))
+            # Extract facts using different pattern types
+            for relation_type, patterns in self.relation_patterns.items():
+                for pattern in patterns:
+                    matches = re.finditer(pattern, sent.text)
 
-    @staticmethod
-    def score_rule(cause, effect):
+                    for match in matches:
+                        # Create rule from match
+                        rule = self._create_rule(
+                            match=match,
+                            relation_type=relation_type,
+                            sentence=sent.text,
+                            entities=entities
+                        )
+
+                        # Validate and score the rule
+                        if rule:
+                            confidence = self._compute_rule_confidence(rule)
+                            if confidence >= min_confidence:
+                                rule['confidence'] = confidence
+                                extracted_rules.append(rule)
+
+        # Post-process rules to establish connections
+        processed_rules = self._establish_rule_connections(extracted_rules)
+
+        logger.info(f"Extracted {len(processed_rules)} rules from context")
+        return processed_rules
+
+    def _create_rule(self, match: re.Match, relation_type: str,
+                     sentence: str, entities: Dict[str, str]) -> Optional[Dict]:
+        """
+        Create a structured rule from a regex match with enhanced metadata.
+        """
         try:
-            input_text = f"premise: {cause} hypothesis: {effect}"
-            result = rule_scorer(input_text)
-            entailment_score = next((score["score"] for score in result[0] if score["label"] == "ENTAILMENT"), 0.0)
-            return entailment_score
+            groups = match.groups()
+            if not groups:
+                return None
+
+            # Basic rule structure
+            rule = {
+                'type': relation_type,
+                'source_text': sentence,
+                'groups': groups,
+                'keywords': self._extract_keywords(sentence)
+            }
+
+            # Add relation-specific fields
+            if relation_type == 'biographical':
+                rule.update({
+                    'subject': groups[0],
+                    'birth_info': groups[1] if len(groups) > 1 else None,
+                    'profession': groups[2] if len(groups) > 2 else None
+                })
+            elif relation_type == 'creation':
+                rule.update({
+                    'creator': groups[0],
+                    'creation': groups[1],
+                    'year': groups[2] if len(groups) > 2 else None
+                })
+
+            # Add entity information if available
+            rule['entity_types'] = {
+                entity: type_
+                for entity, type_ in entities.items()
+                if entity in sentence
+            }
+
+            return rule
+
         except Exception as e:
-            logger.warning(f"Error scoring rule: {str(e)}")
+            logger.warning(f"Error creating rule: {str(e)}")
+            return None
+
+    def _compute_rule_confidence(self, rule: Dict) -> float:
+        """
+        Compute confidence score for a rule using multiple factors.
+        """
+        try:
+            # Get base confidence from transformer model
+            result = rule_scorer(rule['source_text'])
+            base_confidence = next(
+                (score['score'] for score in result[0]
+                 if score['label'] == 'ENTAILMENT'),
+                0.5
+            )
+
+            # Adjust confidence based on various factors
+            adjustments = [
+                # Entity presence adjustment
+                0.1 if rule.get('entity_types') else -0.1,
+
+                # Keyword richness adjustment
+                min(0.1, len(rule['keywords']) * 0.02),
+
+                # Relation type threshold
+                self.confidence_thresholds.get(rule['type'], 0.0) - 0.5
+            ]
+
+            # Compute final confidence
+            confidence = base_confidence + sum(adjustments)
+
+            # Ensure confidence is between 0 and 1
+            return max(0.0, min(1.0, confidence))
+
+        except Exception as e:
+            logger.warning(f"Error computing confidence: {str(e)}")
             return 0.5
 
-    @staticmethod
-    def distill_neural_patterns(neural_embeddings, neural_responses, threshold=0.7):
-        distilled_rules = []
-        pattern_counts = defaultdict(int)
-        for emb, resp in zip(neural_embeddings, neural_responses):
-            pattern_key = tuple(emb.detach().cpu().numpy().round(2))
-            pattern_counts[(pattern_key, resp)] += 1
-        total = len(neural_embeddings)
-        for (pattern_key, response), count in pattern_counts.items():
-            confidence = count / total
-            if confidence >= threshold:
-                keywords = RuleExtractor.extract_keywords(response)
-                distilled_rules.append({
-                    "keywords": keywords,
-                    "response": response,
-                    "confidence": float(confidence),
-                    "source": "neural_distillation",
-                    "type": "distilled"
-                })
-        return distilled_rules
+    def _extract_keywords(self, text: str) -> List[str]:
+        """
+        Extract relevant keywords from text using spaCy.
+        """
+        doc = nlp(text.lower())
+        return [
+            token.lemma_
+            for token in doc
+            if (token.pos_ in ('NOUN', 'VERB', 'ADJ') and
+                not token.is_stop and
+                len(token.text) > 2)
+        ]
 
-    @staticmethod
-    def extract_causal_rules(text, quality_threshold=0.8):
+    def _establish_rule_connections(self, rules: List[Dict]) -> List[Dict]:
         """
-        Example causal extraction (not always reliable).
+        Establish connections between rules for multi-hop reasoning.
         """
-        causal_extractor = pipeline("relation-extraction", model="Babelscape/rebel-large")
-        results = causal_extractor(text)
-        causal_rules = []
-        for res in results:
-            if res["score"] >= quality_threshold:
-                causal_rules.append({
-                    "keywords": RuleExtractor.extract_keywords(res["cause"]),
-                    "response": res["effect"],
-                    "confidence": res["score"],
-                    "source": "transformer_causal",
-                    "type": "causal_extracted"
-                })
-        return causal_rules
+        # Create entity index
+        entity_index = defaultdict(list)
+        for i, rule in enumerate(rules):
+            for entity in rule.get('entity_types', {}):
+                entity_index[entity].append(i)
 
-    @staticmethod
-    def extract_rules(input_file, output_file, quality_threshold=0.7, neural_data=None, use_transformer=False):
-        try:
-            logger.info(f"Starting rule extraction from {input_file}")
-            with open(input_file, 'r', encoding='utf-8') as file:
-                content = file.read()
-            resolved_content = RuleExtractor.resolve_coreferences(content)
-            doc = nlp(resolved_content)
-            causal_chains = RuleExtractor.build_causal_chains(doc)
-            logger.info(f"Found {len(causal_chains)} potential causal relationships")
-            rules = []
-            for chain in causal_chains:
-                score = RuleExtractor.score_rule(chain["cause"], chain["effect"])
-                if score >= quality_threshold:
-                    rule = {
-                        "keywords": RuleExtractor.extract_keywords(chain["cause"]),
-                        "response": chain["effect"],
-                        "confidence": float(score),
-                        "source": chain["source"],
-                        "type": chain.get("type", "extracted")
-                    }
-                    rules.append(rule)
-            if use_transformer:
-                transformer_rules = RuleExtractor.extract_causal_rules(resolved_content, quality_threshold)
-                rules.extend(transformer_rules)
-                logger.info(f"Extracted {len(transformer_rules)} causal rules using transformer-based extraction")
+        # Establish connections
+        for rule in rules:
+            connected_rules = set()
+            for entity in rule.get('entity_types', {}):
+                for connected_idx in entity_index[entity]:
+                    connected_rules.add(connected_idx)
 
-            if rules:
-                logger.info(f"Extracted {len(rules)} rules that passed quality threshold")
-            else:
-                logger.info("No rules passed quality threshold, adding default environmental rules")
-                default_rules = [
-                    {
-                        "keywords": ["deforestation", "environmental", "effects"],
-                        "response": "there is a loss of biodiversity",
-                        "confidence": 0.9,
-                        "source": "default",
-                        "type": "basic"
-                    },
-                    {
-                        "keywords": ["deforestation", "soil"],
-                        "response": "the soil becomes more prone to erosion",
-                        "confidence": 0.9,
-                        "source": "default",
-                        "type": "basic"
-                    },
-                    {
-                        "keywords": ["deforestation", "climate"],
-                        "response": "an increase in carbon dioxide (CO2) levels.",
-                        "confidence": 0.9,
-                        "source": "default",
-                        "type": "basic"
-                    },
-                    {
-                        "keywords": ["deforestation", "water"],
-                        "response": "disruption of the natural water cycle",
-                        "confidence": 0.9,
-                        "source": "default",
-                        "type": "basic"
-                    },
-                    {
-                        "keywords": ["deforestation", "wildlife"],
-                        "response": "loss of habitat for native species",
-                        "confidence": 0.9,
-                        "source": "default",
-                        "type": "basic"
-                    }
-                ]
-                rules.extend(default_rules)
-            if neural_data:
-                neural_embeddings, neural_responses = neural_data
-                distilled_rules = RuleExtractor.distill_neural_patterns(neural_embeddings, neural_responses)
-                rules.extend(distilled_rules)
-            rules.sort(key=lambda x: x["confidence"], reverse=True)
-            with open(output_file, 'w', encoding='utf-8') as out_file:
-                json.dump(rules, out_file, indent=4, ensure_ascii=False)
-            logger.info(f"Successfully saved {len(rules)} rules to {output_file}")
-            return len(rules)
-        except Exception as e:
-            logger.error(f"Error during rule extraction: {str(e)}")
-            emergency_rules = [{
-                "keywords": ["deforestation"],
-                "response": "has negative environmental impacts including biodiversity loss",
-                "confidence": 1.0,
-                "source": "emergency_fallback",
-                "type": "basic"
-            }]
-            try:
-                with open(output_file, 'w', encoding='utf-8') as out_file:
-                    json.dump(emergency_rules, out_file, indent=4)
-                logger.info("Saved emergency fallback rule due to extraction error")
-                return len(emergency_rules)
-            except Exception as write_error:
-                logger.critical(f"Critical error: Could not save emergency rules: {str(write_error)}")
-                return 0
+            rule['connected_rules'] = list(connected_rules)
 
-    @staticmethod
-    def extract_rules_from_neural_output(neural_text, threshold=0.4):
-        """
-        Parses neural outputs to find potential new rules.
-        """
-        new_rules = []
-        pattern = re.compile(r"(.*?) (?:leads to|causes) (.*?)(\.|$)", re.IGNORECASE)
-        matches = pattern.findall(neural_text)
-        for match in matches:
-            cause = match[0].strip()
-            effect = match[1].strip()
-            if cause and effect:
-                keywords = [kw.lower() for kw in cause.split() if len(kw) > 2]
-                response_text = f"{cause} leads to {effect}"
-                new_rules.append({
-                    "keywords": keywords,
-                    "response": response_text,
-                    "confidence": 0.8,
-                    "source": "dynamic_neural",
-                    "type": "neural_extracted"
-                })
-        return new_rules
+            # Compute path relevance scores
+            rule['path_scores'] = self._compute_path_scores(
+                rule,
+                [rules[idx] for idx in connected_rules]
+            )
 
-    # === New: Simple Hotpot Fact Extraction ===
-    @staticmethod
-    def extract_hotpot_facts(context_text, min_confidence=0.5):
-        """
-        Parse the HotpotQA context text to find simple "X is a Y" or
-        "X (was|is) an American <something>" patterns, turning them into rules.
-        This is purely illustrative – real extraction would be more robust.
-        """
-        doc = nlp(context_text)
-        rules = []
-        for sent in doc.sents:
-            sent_str = sent.text.strip()
-            # Example pattern: "<Entity> is a(n) <desc>"
-            # You could get more fancy with NER or pattern matching.
-            match_pattern = re.search(r"([A-Z][a-zA-Z0-9_ ]+) (is|was) (an|a) ([A-Za-z ]+)", sent_str)
-            if match_pattern:
-                entity = match_pattern.group(1).strip()
-                desc = match_pattern.group(4).strip()
-                # Build a basic rule
-                # "keywords" might include entity's main words and the descriptor
-                keywords = RuleExtractor.extract_keywords(entity + " " + desc)
-                fact_response = f"{entity} is {desc}"
-                # We'll skip advanced scoring for brevity, just set confidence to min_conf
-                rules.append({
-                    "keywords": keywords,
-                    "response": fact_response,
-                    "confidence": min_confidence,
-                    "source": sent_str,
-                    "type": "hotpot_fact"
-                })
         return rules
+
+    def _compute_path_scores(self,
+                             source_rule: Dict,
+                             connected_rules: List[Dict]) -> Dict[int, float]:
+        """
+        Compute relevance scores for connected reasoning paths.
+        """
+        path_scores = {}
+
+        source_emb = self.encoder.encode(source_rule['source_text'])
+
+        for i, target_rule in enumerate(connected_rules):
+            target_emb = self.encoder.encode(target_rule['source_text'])
+            similarity = util.cos_sim(source_emb, target_emb).item()
+
+            # Adjust score based on relation types
+            type_compatibility = 0.2 if source_rule['type'] == target_rule['type'] else 0.0
+
+            # Compute final path score
+            path_scores[i] = (similarity + type_compatibility) / 2
+
+        return path_scores
