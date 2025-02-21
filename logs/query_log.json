@@ -1,0 +1,266 @@
+[
+    {
+        "timestamp": "2025-02-21T01:49:30.044339",
+        "query": "Were Scott Derrickson and Ed Wood of the same nationality?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.005301237106323242,
+            "resource_usage": {
+                "cpu": 0.125,
+                "memory": 0.0,
+                "gpu": 0.0002442598925256334
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 12.5% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8571428060531616,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -3.8,
+            "memory": 0.0,
+            "gpu": 0.02,
+            "efficiency_score": 1.0113
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 2.132
+        }
+    },
+    {
+        "timestamp": "2025-02-21T01:49:30.059346",
+        "query": "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.00774073600769043,
+            "resource_usage": {
+                "cpu": 0.125,
+                "memory": 0.0,
+                "gpu": 0.0
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.008s | Resource Utilization: | - cpu: 12.5% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.9391304522752761,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -36.4,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.1092
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 11.92
+        }
+    },
+    {
+        "timestamp": "2025-02-21T01:49:30.077292",
+        "query": "What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.004350185394287109,
+            "resource_usage": {
+                "cpu": 0.133,
+                "memory": 0.0,
+                "gpu": 0.0
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.004s | Resource Utilization: | - cpu: 13.3% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8984374464489518,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -34.1,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.1023
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 11.23
+        }
+    },
+    {
+        "timestamp": "2025-02-21T01:49:30.087771",
+        "query": "Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.004808664321899414,
+            "resource_usage": {
+                "cpu": 0.2,
+                "memory": 0.0,
+                "gpu": 0.0
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 20.0% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8666665568947792,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -27.8,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.0834
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 9.34
+        }
+    },
+    {
+        "timestamp": "2025-02-21T02:01:25.991542",
+        "query": "Who scored the first touchdown of the game?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.13135099411010742,
+            "resource_usage": {
+                "cpu": 0.055,
+                "memory": 0.010000000000000009,
+                "gpu": 0.003663898387884723
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.131s | Resource Utilization: | - cpu: 5.5% | - memory: 1.0% | - gpu: 0.4%"
+        },
+        "source": "hybrid",
+        "complexity": 0.7636363863945007,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -4.0,
+            "memory": 1.0,
+            "gpu": 0.37,
+            "efficiency_score": 1.0075
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 1.752
+        }
+    },
+    {
+        "timestamp": "2025-02-21T02:01:26.007502",
+        "query": "How many field goals did Kris Brown kick?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.005845785140991211,
+            "resource_usage": {
+                "cpu": 0.11800000000000001,
+                "memory": 0.0,
+                "gpu": 0.0
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: 11.8% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.7636363863945007,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -29.0,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.087
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 9.7
+        }
+    },
+    {
+        "timestamp": "2025-02-21T02:01:26.021588",
+        "query": "Which team won the game?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.007930517196655273,
+            "resource_usage": {
+                "cpu": -0.15899999999999997,
+                "memory": 0.0,
+                "gpu": 0.0
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.008s | Resource Utilization: | - cpu: -15.9% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.625,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -26.7,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.0801
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 9.01
+        }
+    },
+    {
+        "timestamp": "2025-02-21T02:01:26.035231",
+        "query": "How many field goals did both teams kick in the first half?",
+        "result": {
+            "result": [
+                "No symbolic match found."
+            ],
+            "processing_time": 0.0041310787200927734,
+            "resource_usage": {
+                "cpu": 0.16699999999999998,
+                "memory": 0.0,
+                "gpu": 0.0
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.004s | Resource Utilization: | - cpu: 16.7% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8399999499320985,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -40.7,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.1221
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 13.21
+        }
+    }
+]
