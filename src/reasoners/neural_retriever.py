@@ -8,6 +8,8 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple, Union
 from collections import defaultdict
 
+from src.utils.device_manager import DeviceManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +21,8 @@ class NeuralRetriever:
                  use_quantization: bool = False,
                  max_context_length: int = 2048,
                  chunk_size: int = 512,
-                 overlap: int = 128):
+                 overlap: int = 128,
+                 device: Optional[torch.device] = None):
         """
         Initialize the enhanced neural retriever.
 
@@ -29,11 +32,18 @@ class NeuralRetriever:
             max_context_length: Maximum context length
             chunk_size: Size of context chunks
             overlap: Overlap between chunks
+            device: Optional torch.device or None to auto-detect
         """
         print(f"Initializing Neural Retriever with model: {model_name}...")
 
+        # Determine the device
+        if device is None:
+            device = DeviceManager.get_device()
+        self.device = device
+
         # Initialize tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
         if use_quantization:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
@@ -48,8 +58,8 @@ class NeuralRetriever:
                 torch_dtype="auto"
             )
 
-        # Initialize sentence transformer for semantic search
-        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+        # Initialize sentence transformer for semantic search on the chosen device
+        self.encoder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
 
         # Configuration parameters
         self.max_context_length = max_context_length
@@ -274,7 +284,8 @@ class NeuralRetriever:
         boost = 0.0
         chunk_text = chunk['text'].lower()
         for guide in guidance:
-            if guide['statement'].lower() in chunk_text:
+            # Here, if we expect 'statement' to be the key, adapt accordingly
+            if guide.get('statement', '').lower() in chunk_text:
                 boost += guide.get('confidence', 0.5) * 0.2
         return min(boost, 0.3)
 
@@ -289,10 +300,8 @@ class NeuralRetriever:
         context = "\n".join(context_parts)
         guidance_text = ""
         if symbolic_guidance:
-            guidance_statements = [g['statement'] for g in symbolic_guidance if g.get('confidence', 0) > 0.5]
+            guidance_statements = [g['statement'] for g in symbolic_guidance if g.get('confidence', 0) > 0.5 and 'statement' in g]
             if guidance_statements:
                 guidance_text = "\nRelevant information:\n- " + "\n- ".join(guidance_statements)
         prompt = f"Context:{guidance_text}\n{context}\n\nQuestion: {question}\nAnswer:"
         return prompt
-
-    # End of file

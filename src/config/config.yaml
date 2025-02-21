@@ -5,7 +5,7 @@ rules_file: "rules.json"
 knowledge_base: "small_knowledge_base.txt"
 
 embeddings:
-  symbolic_dim: 300
+  symbolic_dim: 384
   neural_dim: 384
   target_dim: 768
   model_name: "all-MiniLM-L6-v2"

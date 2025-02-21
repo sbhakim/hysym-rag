@@ -10,6 +10,7 @@ import numpy as np
 from typing import List, Dict, Set, Optional, Tuple, Any
 from collections import defaultdict
 from datetime import datetime
+from src.utils.device_manager import DeviceManager
 
 
 class GraphSymbolicReasoner:
@@ -28,7 +29,8 @@ class GraphSymbolicReasoner:
                  rules_file: str,
                  match_threshold: float = 0.25,
                  max_hops: int = 5,
-                 embedding_model: str = 'all-MiniLM-L6-v2'):
+                 embedding_model: str = 'all-MiniLM-L6-v2',
+                 device=None):
         """
         Initialize enhanced symbolic reasoner with academic tracking.
 
@@ -37,6 +39,7 @@ class GraphSymbolicReasoner:
             match_threshold: Threshold for rule matching.
             max_hops: Maximum reasoning hops.
             embedding_model: Model for semantic matching.
+            device: Optional torch.device to unify CPU/GPU usage.
         """
         # Set core parameters
         self.match_threshold = match_threshold
@@ -55,8 +58,9 @@ class GraphSymbolicReasoner:
         try:
             self.nlp = spacy.load("en_core_web_sm")
             self.embedder = SentenceTransformer(embedding_model)
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            # Ensure the embedder is on the correct device
+            # Determine device
+            self.device = device or DeviceManager.get_device()
+            # Move the SentenceTransformer to that device
             self.embedder = self.embedder.to(self.device)
         except Exception as e:
             self.logger.error(f"Error initializing NLP components: {str(e)}")
@@ -76,16 +80,16 @@ class GraphSymbolicReasoner:
 
         # Initialize knowledge graph and related indexes
         self.graph = nx.DiGraph()  # The knowledge graph (DAG)
-        self.rule_index: Dict[str, Dict] = {}  # Index rules by rule_id
-        self.rule_ids: List[str] = []  # List of rule_ids
-        self.keyword_index = defaultdict(list)  # Inverted index for keywords
+        self.rule_index: Dict[str, Dict] = {}
+        self.rule_ids: List[str] = []
+        self.keyword_index = defaultdict(list)
         self.entity_index = defaultdict(set)
         self.relation_index = defaultdict(set)
         self.rule_embeddings = None
 
         # Build indexes and graph
         self.build_rule_index()
-        self.build_graph()  # Build the graph immediately
+        self.build_graph()
 
         self.logger.info("GraphSymbolicReasoner initialized successfully")
 
@@ -140,10 +144,16 @@ class GraphSymbolicReasoner:
             rule_id = f"rule_{i}"
             self.rule_ids.append(rule_id)
             self.rule_index[rule_id] = rule
+
+            # Index keywords
             if 'keywords' in rule:
                 for keyword in rule['keywords']:
                     self.keyword_index[keyword].append(rule_id)
+
+            # If rule has an embedding, ensure it's on self.device
             if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
+                # Move to device
+                rule['embedding'] = rule['embedding'].to(self.device)
                 self.rule_embeddings.append(rule['embedding'])
 
         if self.rule_embeddings:
@@ -198,6 +208,7 @@ class GraphSymbolicReasoner:
     def add_dynamic_rules(self, new_rules: List[Dict]) -> None:
         """
         Add new rules dynamically with improved validation and tracking.
+        Ensures any rule embeddings are moved to the correct device.
         """
         if not new_rules:
             self.logger.info("No new rules to add.")
@@ -210,6 +221,11 @@ class GraphSymbolicReasoner:
                 rule['version'] = self._get_next_version(rule['id'])
                 rule['added_timestamp'] = datetime.now().isoformat()
                 rule['confidence'] = self._calculate_rule_confidence(rule)
+
+                # If rule has an embedding, move it to self.device
+                if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
+                    rule['embedding'] = rule['embedding'].to(self.device)
+
                 valid_rules.append(rule)
             else:
                 self.logger.warning(f"Invalid rule structure: {rule}")
@@ -232,7 +248,9 @@ class GraphSymbolicReasoner:
             num_rules_added = len(valid_rules)
             total_rules_now = len(self.rules)
             avg_confidence = float(
-                np.mean([rule.get('confidence', 0.0) for rule in valid_rules])) if valid_rules else 0.0
+                np.mean([rule.get('confidence', 0.0) for rule in valid_rules])
+            ) if valid_rules else 0.0
+
             self.logger.info(
                 f"Added {num_rules_added} rules. Total rules: {total_rules_now}. "
                 f"Average confidence: {avg_confidence:.3f}"
@@ -263,6 +281,7 @@ class GraphSymbolicReasoner:
                     return True
                 else:
                     return False
+
             required_fields = {"keywords", "response"}
             has_required = all(field in rule for field in required_fields)
             if has_required:
@@ -334,7 +353,7 @@ class GraphSymbolicReasoner:
         for length in self.reasoning_metrics['path_lengths']:
             path_counts[length] += 1
         total = len(self.reasoning_metrics['path_lengths'])
-        return {length: count / total for length, count in path_counts.items()}
+        return {length: count / total for length, count in path_counts.items()} if total else {}
 
     def _update_reasoning_metrics(self, responses: List[str]):
         """
@@ -368,7 +387,9 @@ class GraphSymbolicReasoner:
         response_embedding = self.embedder.encode(response, convert_to_tensor=True).to(self.device)
         for rule_id, rule in self.rule_index.items():
             if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
-                similarity = util.cos_sim(response_embedding, rule['embedding'].to(self.device)).item()
+                # Ensure rule's embedding is on the same device
+                rule_embedding = rule['embedding'].to(self.device)
+                similarity = util.cos_sim(response_embedding, rule_embedding).item()
                 if similarity > self.match_threshold:
                     used_rules.add(rule_id)
         return used_rules
@@ -388,6 +409,9 @@ class GraphSymbolicReasoner:
         """
         Find initial rules that match the query embedding based on cosine similarity.
         """
+        if not self.rule_embeddings or not len(self.rule_embeddings):
+            return []
+
         similarities = util.cos_sim(query_embedding, self.rule_embeddings).squeeze(0)
         rule_matches = []
         for index, similarity_score in enumerate(similarities):
@@ -498,6 +522,7 @@ class GraphSymbolicReasoner:
             })
             if idx > 0:
                 dependencies.add_edge(idx - 1, idx, weight=step_conf)
+
         chain_metrics = self._calculate_chain_metrics(reasoning_steps, dependencies)
         if query_id:
             # Optionally store the chain for further analysis
@@ -508,7 +533,8 @@ class GraphSymbolicReasoner:
             })
             # Also store the pattern type for academic tracking
             self.reasoning_metrics['pattern_types'].append(
-                self.extract_reasoning_pattern("", path).get('pattern_type', 'unknown'))
+                self.extract_reasoning_pattern("", path).get('pattern_type', 'unknown')
+            )
         return {
             'steps': reasoning_steps,
             'overall_confidence': float(np.mean(confidence_scores)) if confidence_scores else 0.0,
@@ -616,14 +642,14 @@ class GraphSymbolicReasoner:
         """
         Calculate pattern complexity based on the structure of the dependency graph.
         """
-        return float(
-            dependencies.number_of_edges()) / dependencies.number_of_nodes() if dependencies.number_of_nodes() else 0.0
+        if dependencies.number_of_nodes() == 0:
+            return 0.0
+        return float(dependencies.number_of_edges()) / dependencies.number_of_nodes()
 
     def _update_academic_metrics(self, metrics: Dict):
         """
         Update academic metrics tracking (placeholder implementation).
         """
-        # Here you could update a dedicated academic metrics store; for now, we log them.
         self.logger.info(f"Updated academic chain metrics: {metrics}")
 
     def get_academic_analysis(self) -> Dict[str, Any]:
@@ -652,7 +678,9 @@ class GraphSymbolicReasoner:
         total = len(self.reasoning_metrics['pattern_types'])
         for p in self.reasoning_metrics['pattern_types']:
             counts[p] += 1
-        return {ptype: count / total for ptype, count in counts.items()} if total > 0 else {}
+        if total == 0:
+            return {}
+        return {ptype: counts[ptype] / total for ptype in counts}
 
     def _calculate_complexity_correlation(self) -> float:
         """
@@ -668,7 +696,6 @@ class GraphSymbolicReasoner:
         """
         Placeholder: Calculate success rates for different reasoning patterns.
         """
-        # Assuming each chain in self.reasoning_metrics['chains'] has a 'success' field.
         success_counts = defaultdict(int)
         total_counts = defaultdict(int)
         for chain in self.reasoning_metrics['chains']:
@@ -676,8 +703,11 @@ class GraphSymbolicReasoner:
             total_counts[ptype] += 1
             if chain.get('success', 0):
                 success_counts[ptype] += 1
-        return {ptype: (success_counts[ptype] / total_counts[ptype]) if total_counts[ptype] > 0 else 0.0
-                for ptype in total_counts}
+
+        return {
+            ptype: (success_counts[ptype] / total_counts[ptype]) if total_counts[ptype] else 0.0
+            for ptype in total_counts
+        }
 
     def _get_complexity_metrics(self) -> Dict[str, float]:
         """
@@ -688,7 +718,7 @@ class GraphSymbolicReasoner:
             'std_chain_length': float(np.std(self.reasoning_metrics['path_lengths']))
         }
 
-    def _analyze_pattern_effectiveness(self) -> Dict[str, float]:
+    def _analyze_pattern_effectiveness(self) -> Dict[str, Dict[str, Any]]:
         """
         Analyze effectiveness of different reasoning patterns.
         """
@@ -721,5 +751,57 @@ class GraphSymbolicReasoner:
         """
         serialized = {}
         for u, v, data in dependencies.edges(data=True):
-            serialized.setdefault(u, []).append({'to': v, 'weight': data.get('weight', 0.0)})
+            serialized.setdefault(u, []).append({
+                'to': v,
+                'weight': data.get('weight', 0.0)
+            })
         return serialized
+
+    # ------------------- Utility / Placeholder methods for chain calculations -------------------
+
+    def _get_prerequisites(self, node_id: str) -> List[str]:
+        """
+        Placeholder: Return prerequisite nodes for a rule (dummy implementation).
+        """
+        return []
+
+    def _get_conclusions(self, node_id: str) -> List[str]:
+        """
+        Placeholder: Return conclusion nodes for a rule (dummy implementation).
+        """
+        return []
+
+    def _calculate_step_confidence(self, rule: Dict, prereqs: List[str], base_conf: float) -> float:
+        """
+        Placeholder for more advanced step-by-step confidence calculation.
+        """
+        return base_conf
+
+    def _calculate_step_coherence(self, steps: List[Dict]) -> float:
+        """
+        Placeholder: Evaluate how coherent each step is with the others.
+        """
+        return 1.0
+
+    def _calculate_branching(self, dependencies: nx.DiGraph) -> float:
+        """
+        Placeholder: Evaluate branching factor of the dependency graph.
+        """
+        if dependencies.number_of_nodes() <= 1:
+            return 0.0
+        edges = dependencies.number_of_edges()
+        nodes = dependencies.number_of_nodes()
+        return float(edges) / nodes
+
+    def _calculate_linearity(self, dependencies: nx.DiGraph) -> float:
+        """
+        Placeholder: Evaluate how linear the path is.
+        """
+        if dependencies.number_of_nodes() <= 1:
+            return 1.0
+        # A simplistic measure: ratio of edges to nodes for linear chain
+        edges = dependencies.number_of_edges()
+        nodes = dependencies.number_of_nodes()
+        # For a perfectly linear chain, edges == nodes - 1
+        linear_ratio = float(edges) / (nodes - 1) if nodes > 1 else 1.0
+        return min(1.0, linear_ratio)

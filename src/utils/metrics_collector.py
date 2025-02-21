@@ -6,10 +6,10 @@ from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
 import logging
 import json
-import pandas as pd
 from pathlib import Path
 import torch
-
+import pandas as pd
+from scipy import stats
 
 class MetricsCollector:
     """
@@ -25,9 +25,9 @@ class MetricsCollector:
         Initialize metrics collector with academic focus.
 
         Args:
-            metrics_dir: Directory for storing metrics data
-            experiment_name: Name of current experiment run
-            save_frequency: Frequency of metrics persistence
+            metrics_dir: Directory for storing metrics data.
+            experiment_name: Name of current experiment run.
+            save_frequency: Frequency of metrics persistence.
         """
         self.metrics_dir = Path(metrics_dir)
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -43,33 +43,46 @@ class MetricsCollector:
         self.metrics = {
             # Query-specific metrics (stored as a dictionary keyed by query count)
             'query_metrics': defaultdict(dict),
-
             # Reasoning path analysis
             'reasoning_paths': defaultdict(list),
-
             # Resource utilization tracking
             'resource_usage': defaultdict(list),
-
             # Performance metrics
             'performance': defaultdict(list),
-
             # Timing analysis
             'timing': defaultdict(list),
-
             # Error tracking
             'errors': defaultdict(list)
         }
 
-        # Statistical aggregates
-        self.statistical_metrics = {
-            'confidence_intervals': {},
-            'correlations': {},
-            'distributions': {}
-        }
+        # Statistical aggregates (for various metrics)
+        self.statistical_data = defaultdict(list)
 
         # Initialize counters
         self.query_count = 0
         self.start_time = datetime.now()
+
+        # --- Enhanced Academic Metrics Tracking ---
+        # Detailed reasoning metrics
+        self.reasoning_metrics = {
+            'chain_length': [],
+            'confidence_scores': [],
+            'path_choices': [],
+            'step_accuracy': [],
+            'inference_depth': [],
+            'fact_coverage': []
+        }
+        # Component performance tracking (per component: execution_time, success_rate, error_rate, resource_usage)
+        self.component_metrics = defaultdict(lambda: {
+            'execution_time': [],
+            'success_rate': [],
+            'error_rate': [],
+            'resource_usage': []
+        })
+        # Ablation study results
+        self.ablation_results = defaultdict(list)
+        # Path complexity tracking
+        self.path_complexities = defaultdict(list)
 
     def collect_query_metrics(self,
                               query: str,
@@ -83,13 +96,13 @@ class MetricsCollector:
         Collect comprehensive metrics for a single query execution.
 
         Args:
-            query: Input query
-            prediction: System's prediction
-            ground_truth: Optional ground truth
-            reasoning_path: Path taken (symbolic/hybrid/neural)
-            processing_time: Query processing time
-            resource_usage: Resource utilization metrics
-            complexity_score: Query complexity score
+            query: Input query.
+            prediction: System's prediction.
+            ground_truth: Optional ground truth.
+            reasoning_path: Path taken (symbolic/hybrid/neural).
+            processing_time: Query processing time.
+            resource_usage: Resource utilization metrics.
+            complexity_score: Query complexity score.
         """
         timestamp = datetime.now()
 
@@ -125,6 +138,10 @@ class MetricsCollector:
         # Update timing metrics
         self.metrics['timing']['processing_times'].append(processing_time)
 
+        # Update statistical data for later analysis
+        self.statistical_data['complexity'].append(complexity_score)
+        self.statistical_data['processing_time'].append(processing_time)
+
         # Increment query counter
         self.query_count += 1
 
@@ -132,43 +149,61 @@ class MetricsCollector:
         if self.query_count % self.save_frequency == 0:
             self._save_metrics()
 
+    def _calculate_metrics(self, values: List[float]) -> Dict[str, float]:
+        if not values:
+            return {
+                'mean': 0.0,
+                'std': 0.0,
+                'count': 0,
+                'valid': False  # Add flag to indicate empty metrics
+            }
+        return {
+            'mean': float(np.mean(values)),
+            'std': float(np.std(values)),
+            'count': len(values),
+            'valid': True
+        }
+
     def generate_academic_report(self) -> Dict[str, Any]:
         """
         Generate comprehensive metrics report for academic paper.
         Includes statistical analysis and confidence intervals.
         """
-        # Calculate overall statistics
-        overall_stats = self._calculate_overall_statistics()
+        try:
+            overall_stats = self._calculate_overall_statistics()
+            reasoning_analysis = self._analyze_reasoning_patterns()
+            efficiency_analysis = self._analyze_resource_efficiency()
+            statistical_tests = self._run_statistical_tests()
+            component_performance = self._analyze_component_performance()
+            adaptability_metrics = self._analyze_system_adaptability()
+            ablation_analysis = self._compile_ablation_results()
+            confidence_intervals = self._calculate_confidence_intervals()
 
-        # Analyze reasoning paths
-        reasoning_analysis = self._analyze_reasoning_paths()
-
-        # Calculate resource efficiency
-        efficiency_analysis = self._analyze_resource_efficiency()
-
-        # Generate statistical significance tests
-        statistical_tests = self._perform_statistical_tests()
-
-        return {
-            'experiment_summary': {
-                'total_queries': self.query_count,
-                'duration': (datetime.now() - self.start_time).total_seconds(),
-                'timestamp': datetime.now().isoformat()
-            },
-            'performance_metrics': overall_stats,
-            'reasoning_analysis': reasoning_analysis,
-            'efficiency_metrics': efficiency_analysis,
-            'statistical_analysis': statistical_tests,
-            'confidence_intervals': self.statistical_metrics['confidence_intervals']
-        }
+            report = {
+                'experiment_summary': {
+                    'total_queries': self.query_count,
+                    'duration': (datetime.now() - self.start_time).total_seconds(),
+                    'timestamp': datetime.now().isoformat()
+                },
+                'performance_metrics': overall_stats,
+                'reasoning_analysis': reasoning_analysis,
+                'efficiency_metrics': efficiency_analysis,
+                'component_performance': component_performance,
+                'adaptability_metrics': adaptability_metrics,
+                'ablation_results': ablation_analysis,
+                'statistical_analysis': statistical_tests,
+                'confidence_intervals': confidence_intervals
+            }
+            return report
+        except Exception as e:
+            self.logger.error(f"Error generating academic report: {str(e)}")
+            return {'error': str(e)}
 
     def _calculate_overall_statistics(self) -> Dict[str, Any]:
         """
         Calculate comprehensive statistics for all collected metrics.
         """
         stats = {}
-
-        # Processing time statistics
         processing_times = self.metrics['timing']['processing_times']
         stats['processing_time'] = {
             'mean': float(np.mean(processing_times)),
@@ -176,16 +211,12 @@ class MetricsCollector:
             'median': float(np.median(processing_times)),
             'percentile_95': float(np.percentile(processing_times, 95))
         }
-
-        # Resource usage statistics
         for resource, values in self.metrics['resource_usage'].items():
             stats[f'resource_{resource}'] = {
                 'mean': float(np.mean(values)),
                 'std': float(np.std(values)),
                 'peak': float(np.max(values))
             }
-
-        # Query complexity statistics
         complexities = [m['complexity_score'] for m in self.metrics['query_metrics'].values()]
         hist, bin_edges = np.histogram(complexities, bins=10)
         stats['query_complexity'] = {
@@ -196,7 +227,6 @@ class MetricsCollector:
                 'bin_edges': bin_edges.tolist()
             }
         }
-
         return stats
 
     def _calculate_success_rate(self, path_metrics: List[Dict[str, Any]]) -> float:
@@ -209,93 +239,206 @@ class MetricsCollector:
                         m.get('performance_metrics', {}).get('success', False))
         return (successes / len(path_metrics)) * 100 if path_metrics else 0.0
 
-    def _analyze_reasoning_paths(self) -> Dict[str, Any]:
-        """
-        Analyze effectiveness of different reasoning paths.
-        """
-        path_analysis = {}
-
-        for path, metrics in self.metrics['reasoning_paths'].items():
-            path_analysis[path] = {
-                'usage_count': len(metrics),
-                'usage_percentage': (len(metrics) / self.query_count) * 100,
-                'avg_processing_time': float(np.mean([m['processing_time'] for m in metrics])),
-                'avg_complexity': float(np.mean([m['complexity_score'] for m in metrics])),
-                'success_rate': self._calculate_success_rate(metrics)
-            }
-
-            # Add resource efficiency for each path
-            path_analysis[path]['resource_efficiency'] = self._calculate_path_efficiency(metrics)
-
-        return path_analysis
-
-    def _analyze_resource_efficiency(self) -> Dict[str, Any]:
-        """
-        Analyze resource utilization and efficiency metrics.
-        """
-        efficiency_metrics = {}
-
-        # Calculate overall resource efficiency
-        for resource, values in self.metrics['resource_usage'].items():
-            efficiency_metrics[resource] = {
-                'mean_usage': float(np.mean(values)),
-                'peak_usage': float(np.max(values)),
-                'efficiency_score': float(1 - (np.mean(values) / np.max(values))) if np.max(values) != 0 else None
-            }
-
-        # Calculate efficiency trends
-        efficiency_metrics['trends'] = self._calculate_efficiency_trends()
-
-        return efficiency_metrics
-
-    def _perform_statistical_tests(self) -> Dict[str, Any]:
-        """
-        Perform statistical significance tests on collected metrics.
-        """
-        tests = {}
-
-        # Perform t-tests between reasoning paths (placeholder implementation)
-        paths = list(self.metrics['reasoning_paths'].keys())
-        for i in range(len(paths)):
-            for j in range(i + 1, len(paths)):
-                test_name = f'{paths[i]}_vs_{paths[j]}'
-                tests[test_name] = self._compare_paths(paths[i], paths[j])
-
-        # Calculate correlations
-        tests['correlations'] = self._calculate_correlations()
-
-        return tests
-
-    def _calculate_performance_metrics(self,
-                                       prediction: str,
-                                       ground_truth: str) -> Dict[str, float]:
-        """
-        Calculate detailed performance metrics for a prediction.
-        """
+    def _analyze_reasoning_patterns(self) -> Dict[str, Any]:
+        """Analyze reasoning chain patterns and quality."""
         return {
-            'exact_match': float(prediction == ground_truth),
-            'char_error_rate': self._calculate_char_error_rate(prediction, ground_truth),
-            'prediction_length_ratio': float(len(prediction) / len(ground_truth))
+            'chain_characteristics': {
+                'avg_length': float(np.mean(self.reasoning_metrics['chain_length'])) if self.reasoning_metrics['chain_length'] else 0.0,
+                'avg_confidence': float(np.mean(self.reasoning_metrics['confidence_scores'])) if self.reasoning_metrics['confidence_scores'] else 0.0,
+                'avg_inference_depth': float(np.mean(self.reasoning_metrics['inference_depth'])) if self.reasoning_metrics['inference_depth'] else 0.0
+            },
+            'path_distribution': self._analyze_path_distribution(),
+            'step_accuracy': {
+                'mean': float(np.mean(self.reasoning_metrics['step_accuracy'])) if self.reasoning_metrics['step_accuracy'] else 0.0,
+                'std': float(np.std(self.reasoning_metrics['step_accuracy'])) if self.reasoning_metrics['step_accuracy'] else 0.0,
+                'distribution': self._analyze_accuracy_distribution()
+            },
+            'fact_coverage': {
+                'mean': float(np.mean(self.reasoning_metrics['fact_coverage'])) if self.reasoning_metrics['fact_coverage'] else 0.0,
+                'by_complexity': self._analyze_coverage_by_complexity()
+            }
         }
 
-    def _calculate_path_efficiency(self,
-                                   path_metrics: List[Dict[str, Any]]) -> float:
+    def _analyze_path_distribution(self) -> Dict[str, float]:
+        """Analyze distribution of reasoning paths."""
+        total_paths = len(self.reasoning_metrics['path_choices'])
+        if total_paths == 0:
+            return {}
+        path_counts = defaultdict(int)
+        for path in self.reasoning_metrics['path_choices']:
+            path_counts[path] += 1
+        return {path: count / total_paths for path, count in path_counts.items()}
+
+    def _analyze_accuracy_distribution(self) -> Dict[str, float]:
+        """Analyze distribution of step accuracy values."""
+        if not self.reasoning_metrics['step_accuracy']:
+            return {}
+        hist, bin_edges = np.histogram(self.reasoning_metrics['step_accuracy'], bins=10)
+        return {
+            'histogram': hist.tolist(),
+            'bin_edges': bin_edges.tolist()
+        }
+
+    def _analyze_coverage_by_complexity(self) -> Dict[str, float]:
+        """Analyze fact coverage relative to query complexity."""
+        complexity_bins = ['low', 'medium', 'high']
+        coverage_by_complexity = defaultdict(list)
+        # Assuming self.path_complexities['query_complexity'] is populated
+        if 'query_complexity' not in self.path_complexities or not self.path_complexities['query_complexity']:
+            return {}
+        for complexity, coverage in zip(
+            self.path_complexities['query_complexity'],
+            self.reasoning_metrics['fact_coverage']
+        ):
+            bin_idx = int(complexity * 3)
+            bin_idx = min(2, max(0, bin_idx))
+            coverage_by_complexity[complexity_bins[bin_idx]].append(coverage)
+        return {bin_name: float(np.mean(covers)) if covers else 0.0 for bin_name, covers in coverage_by_complexity.items()}
+
+    def _analyze_performance_metrics(self) -> Dict[str, Any]:
+        """Analyze system performance metrics."""
+        return {
+            'component_performance': self._analyze_component_performance(),
+            'resource_efficiency': self._analyze_resource_efficiency(),
+            'execution_statistics': self._analyze_execution_statistics()
+        }
+
+    def _analyze_component_performance(self) -> Dict[str, Dict[str, float]]:
+        """Analyze individual component performance."""
+        component_analysis = {}
+        for component, metrics in self.component_metrics.items():
+            component_analysis[component] = {
+                'avg_execution_time': float(np.mean(metrics['execution_time'])) if metrics['execution_time'] else 0.0,
+                'success_rate': float(np.mean(metrics['success_rate'])) if metrics['success_rate'] else 0.0,
+                'error_rate': float(np.mean(metrics['error_rate'])) if metrics['error_rate'] else 0.0,
+                'avg_resource_usage': float(np.mean(metrics['resource_usage'])) if metrics['resource_usage'] else 0.0
+            }
+        return component_analysis
+
+    def _analyze_resource_efficiency(self) -> Dict[str, Any]:
+        """Analyze resource utilization and efficiency metrics."""
+        efficiency_metrics = {}
+        for resource, values in self.metrics['resource_usage'].items():
+            if values:
+                efficiency_metrics[resource] = {
+                    'mean_usage': float(np.mean(values)),
+                    'peak_usage': float(np.max(values)),
+                    'efficiency_score': float(1 - (np.mean(values) / np.max(values))) if np.max(values) != 0 else None
+                }
+        efficiency_metrics['trends'] = self._calculate_efficiency_trends()
+        return efficiency_metrics
+
+    def _analyze_execution_statistics(self) -> Dict[str, Any]:
+        """Analyze overall execution statistics."""
+        return {
+            'total_queries': self.query_count,
+            'average_processing_time': float(np.mean(self.metrics['timing']['processing_times'])) if self.metrics['timing']['processing_times'] else 0.0
+        }
+
+    def _analyze_system_adaptability(self) -> Dict[str, Any]:
+        """Analyze system's adaptive behavior."""
+        return {
+            'path_selection_accuracy': self._analyze_path_selection(),
+            'complexity_adaptation': self._analyze_complexity_adaptation(),
+            'resource_adaptation': self._analyze_resource_adaptation()
+        }
+
+    def _analyze_path_selection(self) -> float:
+        """Placeholder: Analyze accuracy of path selection decisions."""
+        # Replace with actual implementation
+        return 0.8
+
+    def _analyze_complexity_adaptation(self) -> float:
+        """Placeholder: Analyze system adaptation to varying query complexities."""
+        # Replace with actual implementation
+        return 0.75
+
+    def _analyze_resource_adaptation(self) -> float:
+        """Placeholder: Analyze system adaptation to resource availability."""
+        # Replace with actual implementation
+        return 0.85
+
+    def _compile_ablation_results(self) -> Dict[str, Any]:
+        """Compile and analyze ablation study results."""
+        ablation_analysis = {}
+        for component, results in self.ablation_results.items():
+            baseline = np.mean([r['baseline'] for r in results]) if results else 0.0
+            ablated = np.mean([r['ablated'] for r in results]) if results else 0.0
+            ablation_analysis[component] = {
+                'performance_impact': float((baseline - ablated) / baseline) if baseline != 0 else 0.0,
+                'significance': self._calculate_significance(
+                    [r['baseline'] for r in results],
+                    [r['ablated'] for r in results]
+                ) if results else {}
+            }
+        return ablation_analysis
+
+    def _calculate_significance(self, baseline_vals: List[float], ablated_vals: List[float]) -> Dict[str, float]:
+        """Calculate significance between baseline and ablated metrics."""
+        if len(baseline_vals) < 2 or len(ablated_vals) < 2:
+            return {}
+        t_stat, p_value = stats.ttest_rel(baseline_vals, ablated_vals)
+        return {'t_statistic': float(t_stat), 'p_value': float(p_value)}
+
+    def _run_statistical_tests(self) -> Dict[str, Any]:
+        """Run comprehensive statistical analysis."""
+        tests = {}
+        for metric, values in self.statistical_data.items():
+            if len(values) >= 2:
+                t_stat, p_value = stats.ttest_1samp(values, 0)
+                tests[metric] = {
+                    't_statistic': float(t_stat),
+                    'p_value': float(p_value),
+                    'effect_size': float(np.mean(values) / np.std(values)) if np.std(values) != 0 else 0.0
+                }
+        tests['correlations'] = self._calculate_correlations()
+        tests['regression_analysis'] = self._perform_regression_analysis()
+        return tests
+
+    def _calculate_correlations(self) -> Dict[str, float]:
+        """Calculate correlations among different metrics."""
+        # Placeholder implementation
+        return {"correlation_coefficient": 0.5}
+
+    def _perform_regression_analysis(self) -> Dict[str, Any]:
+        """Perform regression analysis on selected metrics."""
+        # Placeholder implementation
+        return {"slope": 0.1, "intercept": 0.0, "r_squared": 0.6}
+
+    def _calculate_confidence_intervals(self) -> Dict[str, Dict[str, float]]:
+        """Calculate confidence intervals for key metrics."""
+        confidence_intervals = {}
+        for metric, values in self.statistical_data.items():
+            if len(values) >= 2:
+                ci = stats.t.interval(
+                    0.95,
+                    len(values) - 1,
+                    loc=np.mean(values),
+                    scale=stats.sem(values)
+                )
+                confidence_intervals[metric] = {
+                    'lower': float(ci[0]),
+                    'upper': float(ci[1]),
+                    'mean': float(np.mean(values))
+                }
+        return confidence_intervals
+
+    def _calculate_efficiency_trends(self):
         """
-        Calculate efficiency score for a reasoning path.
+        Calculate resource usage trends across queries.
+        This computes the difference between the last and first recorded usage.
         """
-        if not path_metrics:
-            return 0.0
-
-        processing_times = [m['processing_time'] for m in path_metrics]
-        resource_usage = [sum(m[f'resource_{r}'] for r in ['cpu', 'memory', 'gpu'])
-                          for m in path_metrics]
-
-        # Normalize metrics
-        norm_time = np.mean(processing_times) / np.max(processing_times) if np.max(processing_times) != 0 else 0
-        norm_resource = np.mean(resource_usage) / np.max(resource_usage) if np.max(resource_usage) != 0 else 0
-
-        # Calculate efficiency score (lower is better)
-        return 1 - (0.5 * norm_time + 0.5 * norm_resource)
+        trends = {"cpu": 0.0, "memory": 0.0, "gpu": 0.0}
+        query_metrics_list = list(self.metrics['query_metrics'].values())
+        if len(query_metrics_list) < 2:
+            return trends
+        first = query_metrics_list[0]
+        last = query_metrics_list[-1]
+        for resource in trends.keys():
+            key = f"resource_{resource}"
+            if key in first and key in last:
+                trends[resource] = float(last[key] - first[key])
+        return trends
 
     def _save_metrics(self) -> None:
         """
@@ -303,7 +446,6 @@ class MetricsCollector:
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         metrics_file = self.metrics_dir / f"metrics_{self.experiment_name}_{timestamp}.json"
-
         try:
             with open(metrics_file, 'w') as f:
                 json.dump(self.metrics, f, default=str, indent=2)
@@ -317,7 +459,7 @@ class MetricsCollector:
         """
         return {
             'current_query_count': self.query_count,
-            'average_processing_time': float(np.mean(self.metrics['timing']['processing_times'])),
+            'average_processing_time': float(np.mean(self.metrics['timing']['processing_times'])) if self.metrics['timing']['processing_times'] else 0.0,
             'current_resource_usage': {
                 resource: values[-1] if values else 0
                 for resource, values in self.metrics['resource_usage'].items()
@@ -328,46 +470,22 @@ class MetricsCollector:
             }
         }
 
-    def _calculate_efficiency_trends(self):
+    def _calculate_performance_metrics(self,
+                                       prediction: str,
+                                       ground_truth: str) -> Dict[str, float]:
         """
-        Calculate resource usage trends across queries.
-        This implementation computes the difference between the last and the first recorded usage.
+        Calculate detailed performance metrics for a prediction.
         """
-        trends = {"cpu": 0.0, "memory": 0.0, "gpu": 0.0}
-        # Retrieve query metrics from the metrics dictionary
-        query_metrics_list = list(self.metrics['query_metrics'].values())
-        if len(query_metrics_list) < 2:
-            return trends
-        first = query_metrics_list[0]
-        last = query_metrics_list[-1]
-        for resource in trends.keys():
-            key = f"resource_{resource}"
-            if key in first and key in last:
-                trends[resource] = float(last[key] - first[key])
-        return trends
-
-    # Placeholder implementations for statistical tests and helper functions
-
-    def _compare_paths(self, path1: str, path2: str) -> Dict[str, float]:
-        """
-        Compare two reasoning paths using a t-test.
-        (Placeholder implementation)
-        """
-        # This is a placeholder. Replace with actual statistical test.
-        return {"p_value": 0.05, "difference": 0.1}
-
-    def _calculate_correlations(self) -> Dict[str, float]:
-        """
-        Calculate correlations among different metrics.
-        (Placeholder implementation)
-        """
-        # This is a placeholder. Replace with actual correlation calculations.
-        return {"correlation_coefficient": 0.5}
+        return {
+            'exact_match': float(prediction == ground_truth),
+            'char_error_rate': self._calculate_char_error_rate(prediction, ground_truth),
+            'prediction_length_ratio': float(len(prediction) / len(ground_truth))
+        }
 
     def _calculate_char_error_rate(self, prediction: str, ground_truth: str) -> float:
         """
         Calculate character error rate between prediction and ground truth.
-        (Placeholder implementation using simple Levenshtein distance)
+        (Simple implementation using Levenshtein distance)
         """
         def levenshtein(s1, s2):
             if len(s1) < len(s2):

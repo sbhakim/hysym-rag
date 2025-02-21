@@ -14,6 +14,7 @@ from src.utils.evaluation import Evaluation
 from src.app import App
 from src.system.system_control_manager import SystemControlManager, UnifiedResponseAggregator
 from src.utils.metrics_collector import MetricsCollector
+from src.utils.device_manager import DeviceManager
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
@@ -22,6 +23,8 @@ import json
 import torch
 import warnings
 import logging
+import time
+from collections import defaultdict
 
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
@@ -74,7 +77,10 @@ if __name__ == "__main__":
     config = ConfigLoader.load_config("src/config/config.yaml")
     model_name = config["model_name"]
 
-    # 2. Initialize Resource Manager
+    # 2. Acquire a unified device from DeviceManager (optional, but recommended for consistency)
+    device = DeviceManager.get_device()
+
+    # 3. Initialize Resource Manager
     print("Initializing Resource Manager...")
     resource_manager = ResourceManager(
         config_path="src/config/resource_config.yaml",
@@ -83,8 +89,8 @@ if __name__ == "__main__":
     )
 
     # ----------------------------------------------------------------
-    # 3. (Optional) We skip extracting rules from deforestation.txt.
-    #    Instead, we ensure 'data/rules.json' exists but is empty or minimal.
+    # 4. (Optional) We skip extracting rules from deforestation.txt.
+    #    Instead, ensure 'data/rules.json' exists but is empty or minimal.
     # ----------------------------------------------------------------
     rules_path = "data/rules.json"
     if not os.path.exists(rules_path):
@@ -92,20 +98,25 @@ if __name__ == "__main__":
             json.dump([], f)
     print(f"Loading existing rules from {rules_path} (initially empty or minimal).")
 
-    # 4. Initialize the Graph-Based Symbolic Reasoner
+    # 5. Initialize the Graph-Based Symbolic Reasoner
     print("Initializing Graph-Based Symbolic Reasoner...")
     symbolic = GraphSymbolicReasoner(
         rules_file=rules_path,
         match_threshold=0.25,
         max_hops=5,
-        embedding_model='all-MiniLM-L6-v2'  # Explicit embedding model specification
+        embedding_model='all-MiniLM-L6-v2',
+        device=device  # <-- Only if your GraphSymbolicReasoner supports a 'device' param
     )
 
-    # 5. Initialize the Neural Retriever
+    # 6. Initialize the Neural Retriever
     print("Initializing Neural Retriever...")
-    neural = NeuralRetriever(model_name, use_quantization=False)
+    neural = NeuralRetriever(
+        model_name,
+        use_quantization=False,
+        device=device  # <-- Only if your NeuralRetriever supports a 'device' param
+    )
 
-    # 6. Additional components
+    # 7. Additional components
     print("Initializing support components...")
     logger = logging.getLogger(__name__)  # Standard logger for warnings
     query_logger = QueryLogger()
@@ -121,7 +132,7 @@ if __name__ == "__main__":
     # Decide whether to load HotpotQA
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
-    max_hotpot_samples = 20
+    max_hotpot_samples = 4
 
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
@@ -143,11 +154,17 @@ if __name__ == "__main__":
 
     evaluator = Evaluation()
 
-    # 7. Create Hybrid Integrator
+    # 8. Create Hybrid Integrator
     print("Creating Hybrid Integrator...")
-    integrator = HybridIntegrator(symbolic, neural, resource_manager, expander)
+    integrator = HybridIntegrator(
+        symbolic,
+        neural,
+        resource_manager,
+        expander,
+        # device=device  # <-- Only if your HybridIntegrator supports a 'device' param
+    )
 
-    # 8. System Control - Initialize MetricsCollector and pass it to SystemControlManager
+    # 9. System Control - Initialize MetricsCollector and pass it to SystemControlManager
     print("Initializing System Control Components...")
     aggregator = UnifiedResponseAggregator(include_explanations=True)
     metrics_collector = MetricsCollector()
@@ -160,7 +177,7 @@ if __name__ == "__main__":
         max_query_time=10
     )
 
-    # 9. Initialize Application
+    # 10. Initialize Application
     print("Initializing Application...")
     feedback_handler = FeedbackHandler(feedback_manager)
     app = App(
@@ -174,7 +191,7 @@ if __name__ == "__main__":
         system_manager=system_manager
     )
 
-    # 10. Possibly load a knowledge base for neural context
+    # 11. Possibly load a knowledge base for neural context
     kb_path = "data/small_knowledge_base.txt"
     if os.path.exists(kb_path):
         with open(kb_path, "r") as kb_file:
@@ -196,6 +213,7 @@ if __name__ == "__main__":
             print(f"Forced Path: {forced_path}")
         print("-" * 50)
         try:
+            initial_time = time.time()
             complexity = expander.get_query_complexity(query)
             print(f"Query Complexity Score: {complexity:.4f}")
 
@@ -211,7 +229,28 @@ if __name__ == "__main__":
                 for key in final_metrics
             }
 
-            logger.log_query(
+            # Collect enhanced query metrics
+            metrics_collector.collect_query_metrics(
+                query=query,
+                prediction=final_answer[0] if isinstance(final_answer, tuple) else final_answer,
+                ground_truth=the_answer,
+                reasoning_path=(symbolic.extract_reasoning_pattern(query, final_answer.get('reasoning_path', []))
+                                .get('pattern_type', 'unknown') if hasattr(symbolic, "extract_reasoning_pattern") else 'unknown'),
+                processing_time=time.time() - initial_time,
+                resource_usage=resource_delta,
+                complexity_score=complexity
+            )
+
+            # Track component performance (if available)
+            if isinstance(final_answer, dict):
+                metrics_collector.component_metrics['symbolic']['execution_time'].append(
+                    final_answer.get('symbolic_time', 0.0)
+                )
+                metrics_collector.component_metrics['neural']['execution_time'].append(
+                    final_answer.get('neural_time', 0.0)
+                )
+
+            query_logger.log_query(
                 query=query,
                 result=final_answer,
                 source="hybrid",
@@ -229,12 +268,10 @@ if __name__ == "__main__":
             print("-" * 20)
 
             if data_type == "ground_truth_available" and the_answer is not None:
-                # Get reasoning chain information from symbolic reasoner
                 reasoning_chain = symbolic.extract_reasoning_pattern(
                     query,
                     final_answer.get('reasoning_path', [])
                 )
-                # Enhanced evaluation with reasoning chain analysis
                 eval_metrics = evaluator.evaluate(
                     predictions={query: final_answer[0]},
                     ground_truths={query: the_answer},
@@ -246,7 +283,6 @@ if __name__ == "__main__":
                 print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}")
                 print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}")
                 print(f"F1 Score: {eval_metrics['average_f1']:.2f}")
-                # Add pattern analysis metrics
                 if 'reasoning_analysis' in eval_metrics:
                     print("\nReasoning Analysis:")
                     print(f"Pattern Type: {eval_metrics['reasoning_analysis'].get('pattern_type', 'unknown')}")
@@ -258,7 +294,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # 11. Optional Comparison Experiment
+    # 12. Optional Comparison Experiment
     print("\n=== Comparison Experiment (Sample) ===")
     comparison_queries = ["Compare and contrast the film adaptations of 'Pride and Prejudice'."]
     header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (%)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
@@ -312,24 +348,83 @@ if __name__ == "__main__":
         percentage = (count / total_queries) * 100 if total_queries > 0 else 0
         print(f"- {path}: {percentage:.1f}%")
 
-    # Add Academic Analysis Section
-    print("\n=== Reasoning Pattern Analysis ===")
-    reasoning_analysis = symbolic.get_academic_analysis()
-    print("\nPattern Distribution:")
-    for pattern, frequency in reasoning_analysis['reasoning_patterns']['distribution'].items():
-        print(f"- {pattern}: {frequency * 100:.1f}%")
-    print("\nEffectiveness by Pattern:")
-    for pattern, metrics in reasoning_analysis['reasoning_patterns']['success_rates'].items():
-        print(f"\n{pattern}:")
-        print(f"- Success Rate: {metrics.get('success_rate', 0.0) * 100:.1f}%")
-        print(f"- Average Confidence: {metrics.get('avg_confidence', 0.0):.2f}")
-        print(f"- Sample Size: {metrics.get('sample_size', 0)}")
+    # Enhanced Academic Analysis Display
+    print("\n=== Comprehensive Academic Analysis ===")
+    academic_report = metrics_collector.generate_academic_report()
 
-    # Enhanced Academic Report Generation
-    academic_report = {
-        **metrics_collector.generate_academic_report(),
-        'reasoning_patterns': reasoning_analysis
-    }
+    print("\nPerformance Analysis:")
+    print(f"- Average Processing Time: {academic_report['performance_metrics']['processing_time']['mean']:.2f}s")
+    print(f"- 95th Percentile Time: {academic_report['performance_metrics']['processing_time']['percentile_95']:.2f}s")
+
+    print("\nReasoning Analysis:")
+    if 'reasoning_analysis' in academic_report:
+        ra = academic_report['reasoning_analysis']
+        print(f"- Average Chain Length: {ra.get('chain_characteristics', {}).get('avg_length', 0.0):.2f}")
+        print(f"- Average Confidence: {ra.get('chain_characteristics', {}).get('avg_confidence', 0.0):.2f}")
+        print(f"- Average Inference Depth: {ra.get('chain_characteristics', {}).get('avg_inference_depth', 0.0):.2f}")
+
+    print("\nResource Efficiency:")
+    if 'efficiency_metrics' in academic_report:
+        em = academic_report['efficiency_metrics']
+        for resource, metrics in em.items():
+            if resource != 'trends':
+                print(f"- {resource.capitalize()}:")
+                print(f"  * Mean Usage: {metrics.get('mean_usage', 0.0)*100:.1f}%")
+                print(f"  * Peak Usage: {metrics.get('peak_usage', 0.0)*100:.1f}%")
+                print(f"  * Efficiency Score: {metrics.get('efficiency_score', 0.0):.2f}")
+
+    print("\nStatistical Analysis:")
+    if 'statistical_analysis' in academic_report:
+        sa = academic_report['statistical_analysis']
+        print("Significance Tests:")
+        for metric, stats in sa.items():
+            if isinstance(stats, dict) and 'p_value' in stats:
+                print(f"- {metric}:")
+                print(f"  * p-value: {stats['p_value']:.3f}")
+                print(f"  * effect size: {stats.get('effect_size', 0.0):.2f}")
+
+    # Optional Ablation Study Section with Enhanced Reporting
+    print("\n=== Ablation Study ===")
+    ablation_results = defaultdict(dict)
+    ablation_configs = [
+        {'name': 'No Pattern Analysis', 'disable_patterns': True},
+        {'name': 'Limited Hops', 'max_hops': 2},
+        {'name': 'High Threshold', 'match_threshold': 0.5}
+    ]
+    for config in ablation_configs:
+        config_name = config['name']
+        print(f"\nTesting Configuration: {config_name}")
+        try:
+            # Run baseline
+            baseline_result = system_manager.process_query_with_fallback(
+                "What are the environmental effects of deforestation?",
+                context
+            )
+            baseline_metrics = metrics_collector.get_real_time_metrics()
+
+            # Run modified version using a modified symbolic reasoner
+            modified_symbolic = GraphSymbolicReasoner(
+                rules_file=rules_path,
+                match_threshold=config.get('match_threshold', 0.25),
+                max_hops=config.get('max_hops', 5),
+                embedding_model='all-MiniLM-L6-v2'
+                # device=device  # <-- Only if GraphSymbolicReasoner can accept 'device'
+            )
+            modified_result = modified_symbolic.process_query(
+                "What are the environmental effects of deforestation?"
+            )
+            modified_metrics = metrics_collector.get_real_time_metrics()
+
+            ablation_results[config_name] = {
+                'baseline': baseline_metrics,
+                'modified': modified_metrics
+            }
+
+            print("\nPerformance Comparison:")
+            print(f"Baseline processing time: {baseline_metrics['average_processing_time']:.2f}s")
+            print(f"Modified processing time: {modified_metrics['average_processing_time']:.2f}s")
+        except Exception as e:
+            print(f"Error in ablation study for {config_name}: {str(e)}")
 
     print("\n=== System Performance Summary (Extended) ===")
     pattern_metrics = symbolic.get_reasoning_metrics()
@@ -342,24 +437,3 @@ if __name__ == "__main__":
     print("\n=== End of Run ===")
     print("\n=== Academic Evaluation Results ===")
     print(json.dumps(academic_report, indent=2))
-
-    # Optional Ablation Study Section
-    print("\n=== Ablation Study ===")
-    ablation_configs = [
-        {'name': 'No Pattern Analysis', 'disable_patterns': True},
-        {'name': 'Limited Hops', 'max_hops': 2},
-        {'name': 'High Threshold', 'match_threshold': 0.5}
-    ]
-    for config in ablation_configs:
-        print(f"\nTesting Configuration: {config['name']}")
-        modified_symbolic = GraphSymbolicReasoner(
-            rules_file=rules_path,
-            match_threshold=config.get('match_threshold', 0.25),
-            max_hops=config.get('max_hops', 5),
-            embedding_model='all-MiniLM-L6-v2'
-        )
-        # Sample query processing for ablation study (implementation details may vary)
-        sample_query = "What are the environmental effects of deforestation?"
-        modified_answer = modified_symbolic.process_query(sample_query)
-        print(f"Modified Answer: {modified_answer}")
-
