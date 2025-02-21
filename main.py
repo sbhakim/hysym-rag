@@ -15,6 +15,8 @@ from src.app import App
 from src.system.system_control_manager import SystemControlManager, UnifiedResponseAggregator
 from src.utils.metrics_collector import MetricsCollector
 from src.utils.device_manager import DeviceManager
+from src.ablation_study import run_ablation_study
+from src.utils.progress import tqdm, ProgressManager
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
@@ -28,6 +30,8 @@ from collections import defaultdict
 
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
+ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -71,6 +75,10 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
 
 if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
+
+    ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
+    logging.getLogger('transformers').setLevel(logging.ERROR)
+    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 
     # 1. Load configuration
     print("Loading configuration...")
@@ -118,7 +126,7 @@ if __name__ == "__main__":
 
     # 7. Additional components
     print("Initializing support components...")
-    logger = logging.getLogger(__name__)  # Standard logger for warnings
+    logger = logging.getLogger(__name__)  # Standard logger
     query_logger = QueryLogger()
     feedback_manager = FeedbackManager()
     print("Initializing QueryExpander...")
@@ -126,7 +134,7 @@ if __name__ == "__main__":
         complexity_config="src/config/complexity_rules.yaml"
     )
     print("Initializing RuleExtractor...")
-    rule_extractor = RuleExtractor()  # Instantiate RuleExtractor
+    rule_extractor = RuleExtractor()
     print("Loading evaluation dataset...")
 
     # Decide whether to load HotpotQA
@@ -161,7 +169,7 @@ if __name__ == "__main__":
         neural,
         resource_manager,
         expander,
-        # device=device  # <-- Only if your HybridIntegrator supports a 'device' param
+        # device=device  # Only if your HybridIntegrator supports a 'device' param
     )
 
     # 9. System Control - Initialize MetricsCollector and pass it to SystemControlManager
@@ -205,7 +213,7 @@ if __name__ == "__main__":
         the_answer = q_info.get("answer", None)
         forced_path = q_info.get("forced_path", None)
         data_type = q_info.get("type", "ground_truth_available")
-        supporting_facts = q_info.get("supporting_facts", None)  # Get supporting facts
+        supporting_facts = q_info.get("supporting_facts", None)
 
         print(f"\nProcessing Query: {query}")
         print(f"Query Type: {data_type}")
@@ -229,13 +237,23 @@ if __name__ == "__main__":
                 for key in final_metrics
             }
 
-            # Collect enhanced query metrics
+            # Extract the textual prediction from final_answer
+            prediction_val = final_answer.get('result', '')
+            if isinstance(prediction_val, tuple):
+                # If it's like ('some text', 'hybrid')
+                prediction_val = prediction_val[0]
+
+            # Collect query metrics with the textual answer
             metrics_collector.collect_query_metrics(
                 query=query,
-                prediction=final_answer[0] if isinstance(final_answer, tuple) else final_answer,
+                prediction=prediction_val,
                 ground_truth=the_answer,
-                reasoning_path=(symbolic.extract_reasoning_pattern(query, final_answer.get('reasoning_path', []))
-                                .get('pattern_type', 'unknown') if hasattr(symbolic, "extract_reasoning_pattern") else 'unknown'),
+                reasoning_path=(
+                    symbolic.extract_reasoning_pattern(query, final_answer.get('reasoning_path', []))
+                        .get('pattern_type', 'unknown')
+                    if hasattr(symbolic, "extract_reasoning_pattern")
+                    else 'unknown'
+                ),
                 processing_time=time.time() - initial_time,
                 resource_usage=resource_delta,
                 complexity_score=complexity
@@ -250,6 +268,7 @@ if __name__ == "__main__":
                     final_answer.get('neural_time', 0.0)
                 )
 
+            # Log the query and final_answer
             query_logger.log_query(
                 query=query,
                 result=final_answer,
@@ -267,13 +286,19 @@ if __name__ == "__main__":
             print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
 
+            # If we have a ground-truth answer, evaluate
             if data_type == "ground_truth_available" and the_answer is not None:
                 reasoning_chain = symbolic.extract_reasoning_pattern(
                     query,
                     final_answer.get('reasoning_path', [])
                 )
+
+                eval_pred_text = final_answer.get('result', '')
+                if isinstance(eval_pred_text, tuple):
+                    eval_pred_text = eval_pred_text[0]
+
                 eval_metrics = evaluator.evaluate(
-                    predictions={query: final_answer[0]},
+                    predictions={query: eval_pred_text},
                     ground_truths={query: the_answer},
                     supporting_facts={query: supporting_facts},
                     reasoning_chain=reasoning_chain
@@ -294,7 +319,22 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # 12. Optional Comparison Experiment
+    # 12. Optional Ablation Study
+    ablation_results = run_ablation_study(
+        rules_path=rules_path,
+        device=device,
+        neural=neural,
+        expander=expander,
+        aggregator=aggregator,
+        resource_manager=resource_manager,
+        system_manager=system_manager,  # Pass the system_manager
+        context=context  # Pass context
+    )
+
+    # *** IMPORTANT ***: Store ablation_results in metrics_collector so it appears in the academic report.
+    metrics_collector.ablation_results = ablation_results
+
+    # 13. Optional Comparison Experiment
     print("\n=== Comparison Experiment (Sample) ===")
     comparison_queries = ["Compare and contrast the film adaptations of 'Pride and Prejudice'."]
     header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (%)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
@@ -353,15 +393,20 @@ if __name__ == "__main__":
     academic_report = metrics_collector.generate_academic_report()
 
     print("\nPerformance Analysis:")
-    print(f"- Average Processing Time: {academic_report['performance_metrics']['processing_time']['mean']:.2f}s")
-    print(f"- 95th Percentile Time: {academic_report['performance_metrics']['processing_time']['percentile_95']:.2f}s")
+    if 'performance_metrics' in academic_report:
+        perf = academic_report['performance_metrics']
+        if 'processing_time' in perf and 'mean' in perf['processing_time']:
+            print(f"- Average Processing Time: {perf['processing_time']['mean']:.2f}s")
+        if 'processing_time' in perf and 'percentile_95' in perf['processing_time']:
+            print(f"- 95th Percentile Time: {perf['processing_time']['percentile_95']:.2f}s")
 
     print("\nReasoning Analysis:")
     if 'reasoning_analysis' in academic_report:
         ra = academic_report['reasoning_analysis']
-        print(f"- Average Chain Length: {ra.get('chain_characteristics', {}).get('avg_length', 0.0):.2f}")
-        print(f"- Average Confidence: {ra.get('chain_characteristics', {}).get('avg_confidence', 0.0):.2f}")
-        print(f"- Average Inference Depth: {ra.get('chain_characteristics', {}).get('avg_inference_depth', 0.0):.2f}")
+        cc = ra.get('chain_characteristics', {})
+        print(f"- Average Chain Length: {cc.get('avg_length', 0.0):.2f}")
+        print(f"- Average Confidence: {cc.get('avg_confidence', 0.0):.2f}")
+        print(f"- Average Inference Depth: {cc.get('avg_inference_depth', 0.0):.2f}")
 
     print("\nResource Efficiency:")
     if 'efficiency_metrics' in academic_report:
@@ -383,49 +428,7 @@ if __name__ == "__main__":
                 print(f"  * p-value: {stats['p_value']:.3f}")
                 print(f"  * effect size: {stats.get('effect_size', 0.0):.2f}")
 
-    # Optional Ablation Study Section with Enhanced Reporting
-    print("\n=== Ablation Study ===")
-    ablation_results = defaultdict(dict)
-    ablation_configs = [
-        {'name': 'No Pattern Analysis', 'disable_patterns': True},
-        {'name': 'Limited Hops', 'max_hops': 2},
-        {'name': 'High Threshold', 'match_threshold': 0.5}
-    ]
-    for config in ablation_configs:
-        config_name = config['name']
-        print(f"\nTesting Configuration: {config_name}")
-        try:
-            # Run baseline
-            baseline_result = system_manager.process_query_with_fallback(
-                "What are the environmental effects of deforestation?",
-                context
-            )
-            baseline_metrics = metrics_collector.get_real_time_metrics()
-
-            # Run modified version using a modified symbolic reasoner
-            modified_symbolic = GraphSymbolicReasoner(
-                rules_file=rules_path,
-                match_threshold=config.get('match_threshold', 0.25),
-                max_hops=config.get('max_hops', 5),
-                embedding_model='all-MiniLM-L6-v2'
-                # device=device  # <-- Only if GraphSymbolicReasoner can accept 'device'
-            )
-            modified_result = modified_symbolic.process_query(
-                "What are the environmental effects of deforestation?"
-            )
-            modified_metrics = metrics_collector.get_real_time_metrics()
-
-            ablation_results[config_name] = {
-                'baseline': baseline_metrics,
-                'modified': modified_metrics
-            }
-
-            print("\nPerformance Comparison:")
-            print(f"Baseline processing time: {baseline_metrics['average_processing_time']:.2f}s")
-            print(f"Modified processing time: {modified_metrics['average_processing_time']:.2f}s")
-        except Exception as e:
-            print(f"Error in ablation study for {config_name}: {str(e)}")
-
+    # The ablation_results are included in the final academic_report via ablation_results and _compile_ablation_results
     print("\n=== System Performance Summary (Extended) ===")
     pattern_metrics = symbolic.get_reasoning_metrics()
     print(f"- Average Chain Length: {pattern_metrics['path_analysis']['average_length']:.2f}")

@@ -79,8 +79,8 @@ class MetricsCollector:
             'error_rate': [],
             'resource_usage': []
         })
-        # Ablation study results
-        self.ablation_results = defaultdict(list)
+        # Ablation study results; updated to store baseline vs. modified reports
+        self.ablation_results = defaultdict(dict)
         # Path complexity tracking
         self.path_complexities = defaultdict(list)
 
@@ -155,7 +155,7 @@ class MetricsCollector:
                 'mean': 0.0,
                 'std': 0.0,
                 'count': 0,
-                'valid': False  # Add flag to indicate empty metrics
+                'valid': False
             }
         return {
             'mean': float(np.mean(values)),
@@ -176,7 +176,7 @@ class MetricsCollector:
             statistical_tests = self._run_statistical_tests()
             component_performance = self._analyze_component_performance()
             adaptability_metrics = self._analyze_system_adaptability()
-            ablation_analysis = self._compile_ablation_results()
+            ablation_analysis = self._compile_ablation_results()  # Incorporate ablation results
             confidence_intervals = self._calculate_confidence_intervals()
 
             report = {
@@ -205,28 +205,49 @@ class MetricsCollector:
         """
         stats = {}
         processing_times = self.metrics['timing']['processing_times']
-        stats['processing_time'] = {
-            'mean': float(np.mean(processing_times)),
-            'std': float(np.std(processing_times)),
-            'median': float(np.median(processing_times)),
-            'percentile_95': float(np.percentile(processing_times, 95))
-        }
+        if processing_times:
+            stats['processing_time'] = {
+                'mean': float(np.mean(processing_times)),
+                'std': float(np.std(processing_times)),
+                'median': float(np.median(processing_times)),
+                'percentile_95': float(np.percentile(processing_times, 95))
+            }
+        else:
+            # If no processing_times, return zeroed stats
+            stats['processing_time'] = {
+                'mean': 0.0, 'std': 0.0, 'median': 0.0, 'percentile_95': 0.0
+            }
+
+        # Resource usage stats
         for resource, values in self.metrics['resource_usage'].items():
-            stats[f'resource_{resource}'] = {
-                'mean': float(np.mean(values)),
-                'std': float(np.std(values)),
-                'peak': float(np.max(values))
-            }
+            if values:
+                stats[f'resource_{resource}'] = {
+                    'mean': float(np.mean(values)),
+                    'std': float(np.std(values)),
+                    'peak': float(np.max(values))
+                }
+            else:
+                stats[f'resource_{resource}'] = {
+                    'mean': 0.0, 'std': 0.0, 'peak': 0.0
+                }
+
+        # Complexity distribution
         complexities = [m['complexity_score'] for m in self.metrics['query_metrics'].values()]
-        hist, bin_edges = np.histogram(complexities, bins=10)
-        stats['query_complexity'] = {
-            'mean': float(np.mean(complexities)),
-            'std': float(np.std(complexities)),
-            'distribution': {
-                'histogram': hist.tolist(),
-                'bin_edges': bin_edges.tolist()
+        if complexities:
+            hist, bin_edges = np.histogram(complexities, bins=10)
+            stats['query_complexity'] = {
+                'mean': float(np.mean(complexities)),
+                'std': float(np.std(complexities)),
+                'distribution': {
+                    'histogram': hist.tolist(),
+                    'bin_edges': bin_edges.tolist()
+                }
             }
-        }
+        else:
+            stats['query_complexity'] = {
+                'mean': 0.0, 'std': 0.0,
+                'distribution': {'histogram': [], 'bin_edges': []}
+            }
         return stats
 
     def _calculate_success_rate(self, path_metrics: List[Dict[str, Any]]) -> float:
@@ -243,18 +264,24 @@ class MetricsCollector:
         """Analyze reasoning chain patterns and quality."""
         return {
             'chain_characteristics': {
-                'avg_length': float(np.mean(self.reasoning_metrics['chain_length'])) if self.reasoning_metrics['chain_length'] else 0.0,
-                'avg_confidence': float(np.mean(self.reasoning_metrics['confidence_scores'])) if self.reasoning_metrics['confidence_scores'] else 0.0,
-                'avg_inference_depth': float(np.mean(self.reasoning_metrics['inference_depth'])) if self.reasoning_metrics['inference_depth'] else 0.0
+                'avg_length': float(np.mean(self.reasoning_metrics['chain_length']))
+                                if self.reasoning_metrics['chain_length'] else 0.0,
+                'avg_confidence': float(np.mean(self.reasoning_metrics['confidence_scores']))
+                                  if self.reasoning_metrics['confidence_scores'] else 0.0,
+                'avg_inference_depth': float(np.mean(self.reasoning_metrics['inference_depth']))
+                                       if self.reasoning_metrics['inference_depth'] else 0.0
             },
             'path_distribution': self._analyze_path_distribution(),
             'step_accuracy': {
-                'mean': float(np.mean(self.reasoning_metrics['step_accuracy'])) if self.reasoning_metrics['step_accuracy'] else 0.0,
-                'std': float(np.std(self.reasoning_metrics['step_accuracy'])) if self.reasoning_metrics['step_accuracy'] else 0.0,
+                'mean': float(np.mean(self.reasoning_metrics['step_accuracy']))
+                         if self.reasoning_metrics['step_accuracy'] else 0.0,
+                'std': float(np.std(self.reasoning_metrics['step_accuracy']))
+                        if self.reasoning_metrics['step_accuracy'] else 0.0,
                 'distribution': self._analyze_accuracy_distribution()
             },
             'fact_coverage': {
-                'mean': float(np.mean(self.reasoning_metrics['fact_coverage'])) if self.reasoning_metrics['fact_coverage'] else 0.0,
+                'mean': float(np.mean(self.reasoning_metrics['fact_coverage']))
+                         if self.reasoning_metrics['fact_coverage'] else 0.0,
                 'by_complexity': self._analyze_coverage_by_complexity()
             }
         }
@@ -269,7 +296,7 @@ class MetricsCollector:
             path_counts[path] += 1
         return {path: count / total_paths for path, count in path_counts.items()}
 
-    def _analyze_accuracy_distribution(self) -> Dict[str, float]:
+    def _analyze_accuracy_distribution(self) -> Dict[str, Any]:
         """Analyze distribution of step accuracy values."""
         if not self.reasoning_metrics['step_accuracy']:
             return {}
@@ -283,8 +310,8 @@ class MetricsCollector:
         """Analyze fact coverage relative to query complexity."""
         complexity_bins = ['low', 'medium', 'high']
         coverage_by_complexity = defaultdict(list)
-        # Assuming self.path_complexities['query_complexity'] is populated
-        if 'query_complexity' not in self.path_complexities or not self.path_complexities['query_complexity']:
+        if ('query_complexity' not in self.path_complexities or
+                not self.path_complexities['query_complexity']):
             return {}
         for complexity, coverage in zip(
             self.path_complexities['query_complexity'],
@@ -293,7 +320,10 @@ class MetricsCollector:
             bin_idx = int(complexity * 3)
             bin_idx = min(2, max(0, bin_idx))
             coverage_by_complexity[complexity_bins[bin_idx]].append(coverage)
-        return {bin_name: float(np.mean(covers)) if covers else 0.0 for bin_name, covers in coverage_by_complexity.items()}
+        return {
+            bin_name: float(np.mean(covers)) if covers else 0.0
+            for bin_name, covers in coverage_by_complexity.items()
+        }
 
     def _analyze_performance_metrics(self) -> Dict[str, Any]:
         """Analyze system performance metrics."""
@@ -308,10 +338,14 @@ class MetricsCollector:
         component_analysis = {}
         for component, metrics in self.component_metrics.items():
             component_analysis[component] = {
-                'avg_execution_time': float(np.mean(metrics['execution_time'])) if metrics['execution_time'] else 0.0,
-                'success_rate': float(np.mean(metrics['success_rate'])) if metrics['success_rate'] else 0.0,
-                'error_rate': float(np.mean(metrics['error_rate'])) if metrics['error_rate'] else 0.0,
-                'avg_resource_usage': float(np.mean(metrics['resource_usage'])) if metrics['resource_usage'] else 0.0
+                'avg_execution_time': float(np.mean(metrics['execution_time']))
+                                      if metrics['execution_time'] else 0.0,
+                'success_rate': float(np.mean(metrics['success_rate']))
+                                if metrics['success_rate'] else 0.0,
+                'error_rate': float(np.mean(metrics['error_rate']))
+                              if metrics['error_rate'] else 0.0,
+                'avg_resource_usage': float(np.mean(metrics['resource_usage']))
+                                      if metrics['resource_usage'] else 0.0
             }
         return component_analysis
 
@@ -320,19 +354,28 @@ class MetricsCollector:
         efficiency_metrics = {}
         for resource, values in self.metrics['resource_usage'].items():
             if values:
+                mean_val = float(np.mean(values))
+                peak_val = float(np.max(values))
                 efficiency_metrics[resource] = {
-                    'mean_usage': float(np.mean(values)),
-                    'peak_usage': float(np.max(values)),
-                    'efficiency_score': float(1 - (np.mean(values) / np.max(values))) if np.max(values) != 0 else None
+                    'mean_usage': mean_val,
+                    'peak_usage': peak_val,
+                    'efficiency_score': float(1 - (mean_val / peak_val)) if peak_val != 0 else None
+                }
+            else:
+                efficiency_metrics[resource] = {
+                    'mean_usage': 0.0,
+                    'peak_usage': 0.0,
+                    'efficiency_score': None
                 }
         efficiency_metrics['trends'] = self._calculate_efficiency_trends()
         return efficiency_metrics
 
     def _analyze_execution_statistics(self) -> Dict[str, Any]:
         """Analyze overall execution statistics."""
+        proc_times = self.metrics['timing']['processing_times']
         return {
             'total_queries': self.query_count,
-            'average_processing_time': float(np.mean(self.metrics['timing']['processing_times'])) if self.metrics['timing']['processing_times'] else 0.0
+            'average_processing_time': float(np.mean(proc_times)) if proc_times else 0.0
         }
 
     def _analyze_system_adaptability(self) -> Dict[str, Any]:
@@ -345,36 +388,58 @@ class MetricsCollector:
 
     def _analyze_path_selection(self) -> float:
         """Placeholder: Analyze accuracy of path selection decisions."""
-        # Replace with actual implementation
         return 0.8
 
     def _analyze_complexity_adaptation(self) -> float:
         """Placeholder: Analyze system adaptation to varying query complexities."""
-        # Replace with actual implementation
         return 0.75
 
     def _analyze_resource_adaptation(self) -> float:
         """Placeholder: Analyze system adaptation to resource availability."""
-        # Replace with actual implementation
         return 0.85
 
     def _compile_ablation_results(self) -> Dict[str, Any]:
-        """Compile and analyze ablation study results."""
+        """
+        Compile and analyze ablation study results.
+        Now compares 'baseline_report' vs. 'modified_report' fields in self.ablation_results.
+        """
         ablation_analysis = {}
         for component, results in self.ablation_results.items():
-            baseline = np.mean([r['baseline'] for r in results]) if results else 0.0
-            ablated = np.mean([r['ablated'] for r in results]) if results else 0.0
-            ablation_analysis[component] = {
-                'performance_impact': float((baseline - ablated) / baseline) if baseline != 0 else 0.0,
-                'significance': self._calculate_significance(
-                    [r['baseline'] for r in results],
-                    [r['ablated'] for r in results]
-                ) if results else {}
-            }
+            # Ensure results exist and contain both baseline and modified
+            if not results or 'baseline_report' not in results or 'modified_report' not in results:
+                ablation_analysis[component] = {"error": "No results or incomplete results"}
+                continue
+
+            baseline = results['baseline_report']
+            ablated = results['modified_report']
+
+            impact_metrics = {}
+            # Compare mean values from baseline and ablated reports
+            for metric_key in baseline:
+                # Verify both baseline and ablated contain 'metric_key'
+                if (metric_key in ablated
+                    and isinstance(baseline[metric_key], dict)
+                    and isinstance(ablated[metric_key], dict)
+                    and 'mean' in baseline[metric_key]
+                    and 'mean' in ablated[metric_key]):
+                    base_val = baseline[metric_key]['mean']
+                    abl_val = ablated[metric_key]['mean']
+                    if abs(base_val) > 1e-9:
+                        relative_change = (abl_val - base_val) / base_val
+                    else:
+                        relative_change = 0.0
+                    impact_metrics[f'{metric_key}_impact'] = relative_change
+                else:
+                    impact_metrics[f'{metric_key}_impact'] = "metric_unavailable"
+
+            ablation_analysis[component] = impact_metrics
+
         return ablation_analysis
 
     def _calculate_significance(self, baseline_vals: List[float], ablated_vals: List[float]) -> Dict[str, float]:
-        """Calculate significance between baseline and ablated metrics."""
+        """
+        Calculate significance between baseline and ablated metrics.
+        """
         if len(baseline_vals) < 2 or len(ablated_vals) < 2:
             return {}
         t_stat, p_value = stats.ttest_rel(baseline_vals, ablated_vals)
@@ -423,7 +488,7 @@ class MetricsCollector:
                 }
         return confidence_intervals
 
-    def _calculate_efficiency_trends(self):
+    def _calculate_efficiency_trends(self) -> Dict[str, float]:
         """
         Calculate resource usage trends across queries.
         This computes the difference between the last and first recorded usage.
@@ -459,7 +524,8 @@ class MetricsCollector:
         """
         return {
             'current_query_count': self.query_count,
-            'average_processing_time': float(np.mean(self.metrics['timing']['processing_times'])) if self.metrics['timing']['processing_times'] else 0.0,
+            'average_processing_time': float(np.mean(self.metrics['timing']['processing_times']))
+            if self.metrics['timing']['processing_times'] else 0.0,
             'current_resource_usage': {
                 resource: values[-1] if values else 0
                 for resource, values in self.metrics['resource_usage'].items()
@@ -480,12 +546,14 @@ class MetricsCollector:
             'exact_match': float(prediction == ground_truth),
             'char_error_rate': self._calculate_char_error_rate(prediction, ground_truth),
             'prediction_length_ratio': float(len(prediction) / len(ground_truth))
+                                       if len(ground_truth) != 0 else 0.0,
+            'success': prediction == ground_truth
         }
 
     def _calculate_char_error_rate(self, prediction: str, ground_truth: str) -> float:
         """
-        Calculate character error rate between prediction and ground truth.
-        (Simple implementation using Levenshtein distance)
+        Calculate character error rate between prediction and ground truth
+        using a simple Levenshtein distance.
         """
         def levenshtein(s1, s2):
             if len(s1) < len(s2):
@@ -502,5 +570,6 @@ class MetricsCollector:
                     current_row.append(min(insertions, deletions, substitutions))
                 previous_row = current_row
             return previous_row[-1]
+
         distance = levenshtein(prediction, ground_truth)
         return distance / max(len(ground_truth), 1)
