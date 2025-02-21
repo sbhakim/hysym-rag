@@ -97,7 +97,8 @@ if __name__ == "__main__":
     symbolic = GraphSymbolicReasoner(
         rules_file=rules_path,
         match_threshold=0.25,
-        max_hops=5
+        max_hops=5,
+        embedding_model='all-MiniLM-L6-v2'  # Explicit embedding model specification
     )
 
     # 5. Initialize the Neural Retriever
@@ -130,7 +131,6 @@ if __name__ == "__main__":
         for i, sample in enumerate(test_queries):
             new_rules = rule_extractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
             if new_rules:
-                # Wrap in try-except to catch missing _track_rule_addition
                 try:
                     symbolic.add_dynamic_rules(new_rules)
                 except AttributeError as e:
@@ -229,17 +229,29 @@ if __name__ == "__main__":
             print("-" * 20)
 
             if data_type == "ground_truth_available" and the_answer is not None:
-                # Pass supporting facts to evaluator.evaluate
+                # Get reasoning chain information from symbolic reasoner
+                reasoning_chain = symbolic.extract_reasoning_pattern(
+                    query,
+                    final_answer.get('reasoning_path', [])
+                )
+                # Enhanced evaluation with reasoning chain analysis
                 eval_metrics = evaluator.evaluate(
                     predictions={query: final_answer[0]},
                     ground_truths={query: the_answer},
-                    supporting_facts={query: supporting_facts}  # Pass supporting facts
+                    supporting_facts={query: supporting_facts},
+                    reasoning_chain=reasoning_chain
                 )
                 print("\nEvaluation Metrics:")
                 print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
                 print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}")
-                print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}")  # Print BLEU
+                print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}")
                 print(f"F1 Score: {eval_metrics['average_f1']:.2f}")
+                # Add pattern analysis metrics
+                if 'reasoning_analysis' in eval_metrics:
+                    print("\nReasoning Analysis:")
+                    print(f"Pattern Type: {eval_metrics['reasoning_analysis'].get('pattern_type', 'unknown')}")
+                    print(f"Chain Length: {eval_metrics['reasoning_analysis'].get('chain_length', 0)}")
+                    print(f"Pattern Confidence: {eval_metrics['reasoning_analysis'].get('pattern_confidence', 0.0):.2f}")
 
         except KeyError as e:
             print(f"Error: Missing ground truth for query evaluation - {str(e)}")
@@ -300,12 +312,54 @@ if __name__ == "__main__":
         percentage = (count / total_queries) * 100 if total_queries > 0 else 0
         print(f"- {path}: {percentage:.1f}%")
 
-    print("\nSystem Information:")
-    print(f"Model Path: {neural.model.config._name_or_path}")
-    print(f"Cache Location: {os.getenv('HF_HOME', os.path.expanduser('~/.cache/huggingface'))}")
-    print("=== End of Run ===")
+    # Add Academic Analysis Section
+    print("\n=== Reasoning Pattern Analysis ===")
+    reasoning_analysis = symbolic.get_academic_analysis()
+    print("\nPattern Distribution:")
+    for pattern, frequency in reasoning_analysis['reasoning_patterns']['distribution'].items():
+        print(f"- {pattern}: {frequency * 100:.1f}%")
+    print("\nEffectiveness by Pattern:")
+    for pattern, metrics in reasoning_analysis['reasoning_patterns']['success_rates'].items():
+        print(f"\n{pattern}:")
+        print(f"- Success Rate: {metrics.get('success_rate', 0.0) * 100:.1f}%")
+        print(f"- Average Confidence: {metrics.get('avg_confidence', 0.0):.2f}")
+        print(f"- Sample Size: {metrics.get('sample_size', 0)}")
 
-    # 12. Generate and print academic evaluation report
-    academic_report = metrics_collector.generate_academic_report()
+    # Enhanced Academic Report Generation
+    academic_report = {
+        **metrics_collector.generate_academic_report(),
+        'reasoning_patterns': reasoning_analysis
+    }
+
+    print("\n=== System Performance Summary (Extended) ===")
+    pattern_metrics = symbolic.get_reasoning_metrics()
+    print(f"- Average Chain Length: {pattern_metrics['path_analysis']['average_length']:.2f}")
+    print(f"- Average Confidence: {pattern_metrics['confidence_analysis']['mean_confidence']:.2f}")
+    print("\nPattern Distribution:")
+    for length, frequency in pattern_metrics['path_analysis']['path_distribution'].items():
+        print(f"- {length}-hop paths: {frequency * 100:.1f}%")
+
+    print("\n=== End of Run ===")
     print("\n=== Academic Evaluation Results ===")
     print(json.dumps(academic_report, indent=2))
+
+    # Optional Ablation Study Section
+    print("\n=== Ablation Study ===")
+    ablation_configs = [
+        {'name': 'No Pattern Analysis', 'disable_patterns': True},
+        {'name': 'Limited Hops', 'max_hops': 2},
+        {'name': 'High Threshold', 'match_threshold': 0.5}
+    ]
+    for config in ablation_configs:
+        print(f"\nTesting Configuration: {config['name']}")
+        modified_symbolic = GraphSymbolicReasoner(
+            rules_file=rules_path,
+            match_threshold=config.get('match_threshold', 0.25),
+            max_hops=config.get('max_hops', 5),
+            embedding_model='all-MiniLM-L6-v2'
+        )
+        # Sample query processing for ablation study (implementation details may vary)
+        sample_query = "What are the environmental effects of deforestation?"
+        modified_answer = modified_symbolic.process_query(sample_query)
+        print(f"Modified Answer: {modified_answer}")
+
