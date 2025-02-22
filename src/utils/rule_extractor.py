@@ -2,7 +2,6 @@
 
 import json
 import re
-
 import numpy as np
 import spacy
 from typing import List, Dict, Tuple, Optional, Set
@@ -12,6 +11,9 @@ from transformers import pipeline
 from spacy.tokens import Token
 import torch
 from sentence_transformers import SentenceTransformer, util
+
+# Import the DimensionalityManager for alignment
+from src.utils.dimension_manager import DimensionalityManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -89,6 +91,18 @@ class RuleExtractor:
             'modifier': ['amod', 'advmod'],
             'compound': ['compound', 'nmod']
         }
+
+        # Initialize the DimensionalityManager to ensure rule embeddings are aligned
+        self.dim_manager = DimensionalityManager(target_dim=768)
+
+    def _compute_aligned_embedding(self, text: str) -> torch.Tensor:
+        """
+        Computes an embedding for the given text using SentenceTransformer,
+        and then aligns it to the target dimension using the DimensionalityManager.
+        """
+        embedding = self.encoder.encode(text, convert_to_tensor=True)
+        aligned_embedding = self.dim_manager.align_embeddings(embedding, "rule")
+        return aligned_embedding
 
     def extract_hotpot_facts(self, context_text: str, min_confidence: float = 0.7) -> List[Dict]:
         """
@@ -177,6 +191,9 @@ class RuleExtractor:
                 for entity, type_ in entities.items()
                 if entity in sentence
             }
+
+            # Compute and add the aligned embedding for the rule using the entire sentence
+            rule['embedding'] = self._compute_aligned_embedding(sentence)
 
             return rule
 

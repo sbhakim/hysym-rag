@@ -4,13 +4,22 @@ data_dir: "data/"
 rules_file: "rules.json"
 knowledge_base: "small_knowledge_base.txt"
 
+
+alignment:
+  target_dim: 768
+  num_heads: 4
+  dropout: 0.1
+  sym_dim: 384
+  neural_dim: 768
+
+
 embeddings:
   symbolic_dim: 384
   neural_dim: 384
   target_dim: 768
   model_name: "all-MiniLM-L6-v2"
 
-# ADD THESE LINES:
+
 resource_thresholds:
   cpu:
     base_threshold: 0.85

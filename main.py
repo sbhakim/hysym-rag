@@ -3,6 +3,7 @@
 from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
 from src.reasoners.neural_retriever import NeuralRetriever
 from src.integrators.hybrid_integrator import HybridIntegrator
+from src.utils.dimension_manager import DimensionalityManager
 from src.utils.rule_extractor import RuleExtractor
 from src.queries.query_logger import QueryLogger
 from src.resources.resource_manager import ResourceManager
@@ -79,10 +80,17 @@ if __name__ == "__main__":
     ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
     logging.getLogger('transformers').setLevel(logging.ERROR)
     logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+    logging.getLogger('DimensionalityManager').setLevel(logging.INFO)
 
     # 1. Load configuration
     print("Loading configuration...")
     config = ConfigLoader.load_config("src/config/config.yaml")
+    config.update({
+        'alignment': {
+            'target_dim': 768,
+            'num_heads': 4
+        }
+    })
     model_name = config["model_name"]
 
     # 2. Acquire a unified device from DeviceManager (optional, but recommended for consistency)
@@ -106,6 +114,7 @@ if __name__ == "__main__":
             json.dump([], f)
     print(f"Loading existing rules from {rules_path} (initially empty or minimal).")
 
+
     # 5. Initialize the Graph-Based Symbolic Reasoner
     print("Initializing Graph-Based Symbolic Reasoner...")
     symbolic = GraphSymbolicReasoner(
@@ -113,7 +122,7 @@ if __name__ == "__main__":
         match_threshold=0.25,
         max_hops=5,
         embedding_model='all-MiniLM-L6-v2',
-        device=device  # <-- Only if your GraphSymbolicReasoner supports a 'device' param
+        device=device,
     )
 
     # 6. Initialize the Neural Retriever
@@ -140,7 +149,7 @@ if __name__ == "__main__":
     # Decide whether to load HotpotQA
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
-    max_hotpot_samples = 4
+    max_hotpot_samples = 8
 
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
@@ -170,6 +179,7 @@ if __name__ == "__main__":
         resource_manager,
         expander,
         # device=device  # Only if your HybridIntegrator supports a 'device' param
+        # alignment_config=config['alignment']
     )
 
     # 9. System Control - Initialize MetricsCollector and pass it to SystemControlManager

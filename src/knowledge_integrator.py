@@ -8,41 +8,25 @@ import logging
 from typing import Tuple, Optional, Union
 
 from src.utils.device_manager import DeviceManager
+from src.utils.dimension_manager import DimensionalityManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class DimensionAdapter(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.in_features = in_dim
-        self.out_features = out_dim
-        self.projection = nn.Linear(in_dim, out_dim)
-        self.norm = nn.LayerNorm(out_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # If input dimension does not match expected, warn and adjust
-        if x.size(-1) != self.in_features:
-            logger.warning(f"Input dimension mismatch: {x.size(-1)} vs expected {self.in_features}. Adjusting...")
-            # Create a temporary linear layer to project to the expected dimension
-            adjust_layer = nn.Linear(x.size(-1), self.in_features).to(x.device)
-            x = adjust_layer(x)
-        projected = self.projection(x)
-        return self.norm(projected)
-
 class AlignmentLayer(nn.Module):
     def __init__(
             self,
-            sym_dim: int = 384,
-            neural_dim: int = 768,
-            target_dim: int = 768,
+            sym_dim: int = 384,        # Original symbolic dimension
+            neural_dim: int = 768,       # Original neural dimension
+            target_dim: int = 768,       # Target dimension for alignment (used by DimensionalityManager)
             num_heads: int = 4,
             dropout: float = 0.1,
             device: Optional[torch.device] = None
     ):
         """
         Enhanced alignment layer with dynamic dimension handling and confidence-weighted fusion.
+        Initializes projection adapters first and then sets up a centralized DimensionalityManager.
         """
         super(AlignmentLayer, self).__init__()
 
@@ -51,14 +35,27 @@ class AlignmentLayer(nn.Module):
 
         self.head_dim = 64
         self.num_heads = num_heads
-        self.hidden_dim = self.head_dim * num_heads
+        self.hidden_dim = self.head_dim * num_heads  # For multi-head attention (e.g., 4*64=256)
         self.target_dim = target_dim
 
-        # Dimension adapters for input embeddings
-        self.sym_adapter = DimensionAdapter(sym_dim, self.hidden_dim)
-        self.neural_adapter = DimensionAdapter(neural_dim, self.hidden_dim)
+        # Initialize projection adapters first (they replace the old sym_adapter error)
+        self.sym_adapter = nn.Linear(sym_dim, target_dim)
+        self.neural_adapter = nn.Linear(neural_dim, target_dim)
 
-        # Main projection layers for each branch
+        # Initialize centralized dimension manager to align embeddings to target_dim (768)
+        self.dim_manager = DimensionalityManager(
+            target_dim=target_dim,
+            device=self.device
+        )
+        # Register the adapters for symbolic and neural sources.
+        self.dim_manager.register_adapter('symbolic', self.sym_adapter)
+        self.dim_manager.register_adapter('neural', self.neural_adapter)
+
+        # New projection adapters: project from target_dim (768) to hidden_dim (256)
+        self.sym_projection_adapter = nn.Linear(target_dim, self.hidden_dim)
+        self.neural_projection_adapter = nn.Linear(target_dim, self.hidden_dim)
+
+        # Main projection layers for each branch (processing in hidden_dim space)
         self.sym_projection = nn.Sequential(
             nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
@@ -72,7 +69,7 @@ class AlignmentLayer(nn.Module):
 
         self.scale = math.sqrt(self.head_dim)
 
-        # Final alignment projection: combining features from both branches
+        # Final alignment projection: combine features from both branches
         self.alignment_projection = nn.Sequential(
             nn.Linear(self.hidden_dim * 2, self.hidden_dim),
             nn.LayerNorm(self.hidden_dim),
@@ -80,21 +77,19 @@ class AlignmentLayer(nn.Module):
             nn.Linear(self.hidden_dim, target_dim)
         )
 
-        # Confidence scoring module (original)
+        # Confidence scoring modules
         self.confidence_scorer = nn.Sequential(
             nn.Linear(target_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 1),
             nn.Sigmoid()
         )
-        # NEW: Rule confidence gate for additional rule-based confidence estimation
         self.rule_confidence_gate = nn.Sequential(
             nn.Linear(target_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
             nn.Sigmoid()
         )
-        # NEW: Context analyzer for computing context-based confidence
         self.context_analyzer = nn.Sequential(
             nn.Linear(target_dim, 128),
             nn.ReLU(),
@@ -111,19 +106,21 @@ class AlignmentLayer(nn.Module):
     def dynamic_project(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         try:
             device = sym_emb.device
-            sym_emb = self.sym_adapter(sym_emb.to(device))
-            neural_emb = self.neural_adapter(neural_emb.to(device))
-
-            sym_projected = self.sym_projection(sym_emb)
-            neural_projected = self.neural_projection(neural_emb)
+            # Align embeddings to target_dim using the centralized dimension manager
+            sym_aligned = self.dim_manager.align_embeddings(sym_emb.to(device), "symbolic")
+            neural_aligned = self.dim_manager.align_embeddings(neural_emb.to(device), "neural")
+            # Project the aligned embeddings to hidden_dim via dedicated adapters
+            sym_proj_input = self.sym_projection_adapter(sym_aligned)
+            neural_proj_input = self.neural_projection_adapter(neural_aligned)
+            # Process through branch-specific projection layers
+            sym_projected = self.sym_projection(sym_proj_input)
+            neural_projected = self.neural_projection(neural_proj_input)
             batch_size = sym_projected.size(0)
-
+            # Reshape for multi-head attention
             sym_heads = sym_projected.view(batch_size, -1, self.num_heads, self.head_dim)
             neural_heads = neural_projected.view(batch_size, -1, self.num_heads, self.head_dim)
-
             attention_scores = torch.matmul(sym_heads, neural_heads.transpose(-2, -1)) / self.scale
             attention_weights = F.softmax(attention_scores, dim=-1)
-
             attended_features = torch.matmul(attention_weights, neural_heads)
             attended_features = attended_features.view(batch_size, -1, self.hidden_dim)
             return attended_features, attention_weights
@@ -134,14 +131,8 @@ class AlignmentLayer(nn.Module):
     def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor, rule_confidence: Optional[float] = None) -> Tuple[torch.Tensor, float, Optional[dict]]:
         try:
             self._log_memory_usage("start_forward")
-
             sym_emb = self._validate_and_prepare_input(sym_emb, "Symbolic")
             neural_emb = self._validate_and_prepare_input(neural_emb, "Neural")
-
-            if sym_emb.size(1) != self.sym_adapter.in_features:
-                raise ValueError(f"Symbolic embedding size mismatch: {sym_emb.size(1)} vs expected {self.sym_adapter.in_features}")
-            if neural_emb.size(1) != self.neural_adapter.in_features:
-                raise ValueError(f"Neural embedding size mismatch: {neural_emb.size(1)} vs expected {self.neural_adapter.in_features}")
 
             # Ensure consistent device usage
             sym_emb = self._ensure_device(sym_emb, neural_emb.device)
@@ -152,44 +143,39 @@ class AlignmentLayer(nn.Module):
                 self._log_memory_usage("after_projection")
             except RuntimeError as e:
                 logger.error(f"Error in dynamic projection: {str(e)}")
-                sym_emb = self.sym_adapter(sym_emb)
-                neural_emb = self.neural_adapter(neural_emb)
-                attended_features, attention_weights = self.dynamic_project(sym_emb, neural_emb)
+                # Fallback: re-align and re-project
+                sym_aligned = self.dim_manager.align_embeddings(sym_emb, "symbolic")
+                neural_aligned = self.dim_manager.align_embeddings(neural_emb, "neural")
+                attended_features, attention_weights = self.dynamic_project(sym_aligned, neural_aligned)
 
             if attended_features.size(-1) != self.hidden_dim:
                 logger.warning(f"Attended features dimension mismatch: {attended_features.size(-1)} vs {self.hidden_dim}")
-                attended_features = self.sym_adapter(attended_features)
+                attended_features = self.sym_projection_adapter(attended_features)
 
             try:
                 attended_features = self._ensure_device(attended_features, neural_emb.device)
                 neural_emb = self._ensure_device(neural_emb, attended_features.device)
+                # Concatenate attended features with neural embedding (unsqueezed for matching dimensions)
                 combined = torch.cat([attended_features, neural_emb.unsqueeze(1)], dim=-1)
                 self._log_memory_usage("after_combination")
             except RuntimeError as e:
                 logger.error(f"Error in feature combination: {str(e)}")
                 if attended_features.size(-1) != neural_emb.size(-1):
-                    neural_emb = self.neural_adapter(neural_emb)
+                    neural_emb = self.neural_projection_adapter(neural_emb)
                 combined = torch.cat([attended_features, neural_emb.unsqueeze(1)], dim=-1)
 
             aligned_embedding = self.alignment_projection(combined)
-
             # Compute context-based confidence
             context_score = self.context_analyzer(aligned_embedding)
-
-            # If an external rule_confidence value is provided, compute a rule-based score and average it
             if rule_confidence is not None:
                 rule_score = self.rule_confidence_gate(aligned_embedding)
                 dynamic_confidence = (context_score + rule_score) / 2
             else:
                 dynamic_confidence = context_score
-
-            # Alternatively, you might still combine with the original confidence_scorer if needed:
-            # confidence_score = self.confidence_scorer(aligned_embedding).squeeze(-1)
-            confidence_score = dynamic_confidence  # Using the dynamic confidence computed above
-
+            confidence_score = dynamic_confidence  # Use the computed dynamic confidence
             self._log_memory_usage("after_alignment")
 
-            # Dynamic fusion: fuse aligned and original neural embedding weighted by the computed confidence score.
+            # Dynamic fusion: weighted fusion of aligned embedding and neural embedding
             fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
 
             debug_info = {
@@ -209,14 +195,13 @@ class AlignmentLayer(nn.Module):
 
             logger.info(f"Alignment completed successfully. Confidence: {confidence_score.mean().item():.4f}")
             self._log_memory_usage("end_forward")
-
             return fused_embedding, confidence_score.mean().item(), debug_info
 
         except ValueError as ve:
             logger.error(f"Validation error in forward pass: {str(ve)}")
             try:
-                if hasattr(self, 'neural_adapter'):
-                    neural_emb = self.neural_adapter(neural_emb)
+                if hasattr(self, 'neural_projection_adapter'):
+                    neural_emb = self.neural_projection_adapter(neural_emb)
                     return neural_emb, 0.0, {'error': str(ve), 'fallback': 'using_adapted_neural_embedding'}
             except:
                 pass
@@ -249,6 +234,5 @@ class AlignmentLayer(nn.Module):
         This method delegates to DeviceManager to maintain consistency.
         """
         device = target_device or self.device
-        # We only have one tensor, so pass the same tensor as both arguments:
         moved_tensor, _ = DeviceManager.ensure_same_device(tensor, tensor, device=device)
         return moved_tensor
