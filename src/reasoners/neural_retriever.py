@@ -1,5 +1,6 @@
 # src/reasoners/neural_retriever.py
 
+import re
 from transformers import AutoTokenizer, AutoModelForCausalLM, logging as transformers_logging
 from sentence_transformers import SentenceTransformer, util
 import torch
@@ -93,8 +94,12 @@ class NeuralRetriever:
                     for rule in symbolic_guidance
                 ]
 
-            # FIX 1: Add validation and safety checks
+            # Validate context before processing
             if isinstance(context, str) and context.strip():
+                # Minimum length check (e.g., 10 characters)
+                if len(context.strip()) < 10:
+                    logger.warning("Context too short for meaningful processing")
+                    return "No relevant context found."
                 try:
                     context_chunks = self._chunk_context(context)
                     if not context_chunks:
@@ -128,7 +133,8 @@ class NeuralRetriever:
                     'end_idx': len(context.split('.')) - 1
                 }]
 
-            prompt = self._create_prompt(
+            # Use the enhanced prompt creation method
+            prompt = self._create_enhanced_prompt(
                 question,
                 relevant_chunks,
                 symbolic_guidance
@@ -178,16 +184,38 @@ class NeuralRetriever:
             self.stats['errors'].append(str(e))
             return "Error retrieving answer."
 
-    def _encode_safely(self, text: str) -> torch.Tensor:
-        try:
-            with logging.getLogger('sentence_transformers').handlers[0].lock:
-                return self.encoder.encode(text, convert_to_tensor=True)
-        except torch.cuda.OutOfMemoryError as e:
-            logger.error(f"GPU memory error during encoding: {str(e)}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during encoding: {str(e)}")
-            raise
+    def _encode_safely(self, text: str) -> Optional[torch.Tensor]:
+        """
+        Enhanced safe encoding with multiple fallback strategies.
+        """
+        if not text or not text.strip():
+            logger.warning("Empty text provided for encoding")
+            return None
+
+        max_retries = 3
+        current_try = 0
+
+        while current_try < max_retries:
+            try:
+                with logging.getLogger('sentence_transformers').handlers[0].lock:
+                    encoded = self.encoder.encode(text, convert_to_tensor=True)
+                    return encoded.to(self.device)
+            except torch.cuda.OutOfMemoryError as e:
+                current_try += 1
+                logger.warning(f"GPU OOM on try {current_try}, attempting memory cleanup")
+                torch.cuda.empty_cache()
+                if current_try == max_retries:
+                    logger.error("GPU memory error persisted after retries")
+                    raise
+            except Exception as e:
+                logger.error(f"Encoding error: {str(e)}")
+                # Fallback to simpler encoding if possible
+                try:
+                    fallback = self.encoder.encode(text, convert_to_tensor=False)
+                    return torch.tensor(fallback, device=self.device)
+                except Exception as fallback_e:
+                    raise ValueError(f"Both primary and fallback encoding failed: {str(fallback_e)}")
+            time.sleep(0.1 * current_try)  # Exponential backoff
 
     def _generate_response(self, prompt: str) -> str:
         try:
@@ -226,50 +254,96 @@ class NeuralRetriever:
         return response
 
     def _chunk_context(self, context: str) -> List[Dict]:
-        # FIX 2: Add robust chunking logic
+        """
+        Enhanced context chunking with robust error handling and validation.
+        """
         try:
-            sentences = [s.strip() for s in context.split('.') if s.strip()]
+            # Input validation with detailed logging
+            if not isinstance(context, str):
+                logger.error("Invalid context type provided")
+                return []
+            if not context.strip():
+                logger.warning("Empty context provided")
+                return []
+            if len(context.strip()) < 10:
+                logger.warning("Context too short for meaningful processing")
+                return []
+
+            # Enhanced sentence splitting using regex for punctuation
+            sentences = []
+            for sent in re.split(r'[.!?]', context):
+                cleaned = sent.strip()
+                if cleaned and len(cleaned) > 3:
+                    sentences.append(cleaned)
+            if not sentences:
+                logger.warning("No valid sentences extracted from context")
+                return []
+
+            # Chunk processing with overlap handling
             chunks = []
             current_chunk = []
             current_length = 0
-
-            if not sentences:
-                return chunks
+            overlap_buffer = []  # For maintaining overlap between chunks
 
             for idx, sentence in enumerate(self._process_batch(sentences)):
-                sentence_tokens = len(self.tokenizer.encode(sentence))
-                if current_length + sentence_tokens > self.chunk_size and current_chunk:
-                    chunk_text = ' '.join(current_chunk)
-                    chunk_data = {
-                        'text': chunk_text,
-                        'embedding': self._encode_safely(chunk_text),
-                        'sentences': current_chunk.copy(),
-                        'start_idx': max(0, idx - len(current_chunk)), # Fix start_idx to be non-negative
-                        'end_idx': idx - 1
-                    }
-                    chunks.append(chunk_data)
-                    current_chunk = []
-                    current_length = 0
+                try:
+                    try:
+                        sentence_tokens = len(self.tokenizer.encode(sentence))
+                    except Exception as e:
+                        logger.warning(f"Tokenization failed, using fallback: {e}")
+                        sentence_tokens = len(sentence.split())
 
-                current_chunk.append(sentence)
-                current_length += sentence_tokens
+                    # Check if adding this sentence would exceed chunk size
+                    if current_length + sentence_tokens > self.chunk_size and current_chunk:
+                        overlap_text = ' '.join(overlap_buffer[-self.overlap:]) if overlap_buffer else ''
+                        chunk_text = ' '.join(current_chunk)
+                        try:
+                            chunk_embedding = self._encode_safely(chunk_text)
+                        except Exception as e:
+                            logger.error(f"Chunk embedding failed: {e}")
+                            chunk_embedding = None
 
-            # Don't forget last chunk
+                        chunks.append({
+                            'text': chunk_text,
+                            'embedding': chunk_embedding,
+                            'sentences': current_chunk.copy(),
+                            'start_idx': max(0, idx - len(current_chunk)),
+                            'end_idx': idx - 1,
+                            'overlap_text': overlap_text
+                        })
+                        # Reset for next chunk, maintaining overlap
+                        current_chunk = overlap_buffer[-self.overlap:] if overlap_buffer else []
+                        current_length = sum(len(self.tokenizer.encode(s)) for s in current_chunk)
+
+                    current_chunk.append(sentence)
+                    overlap_buffer.append(sentence)
+                    current_length += sentence_tokens
+
+                except Exception as e:
+                    logger.error(f"Error processing sentence {idx}: {e}")
+                    continue
+
+            # Handle final chunk
             if current_chunk:
-                chunk_text = ' '.join(current_chunk)
-                chunk_data = {
-                    'text': chunk_text,
-                    'embedding': self._encode_safely(chunk_text),
-                    'sentences': current_chunk,
-                    'start_idx': len(sentences) - len(current_chunk),
-                    'end_idx': len(sentences) - 1
-                }
-                chunks.append(chunk_data)
-            return chunks
-        except Exception as e:
-            logger.error(f"Error in _chunk_context: {str(e)}")
-            return []
+                try:
+                    chunk_text = ' '.join(current_chunk)
+                    chunk_embedding = self._encode_safely(chunk_text)
+                    chunks.append({
+                        'text': chunk_text,
+                        'embedding': chunk_embedding,
+                        'sentences': current_chunk,
+                        'start_idx': len(sentences) - len(current_chunk),
+                        'end_idx': len(sentences) - 1,
+                        'overlap_text': ''  # Last chunk has no following overlap
+                    })
+                except Exception as e:
+                    logger.error(f"Error processing final chunk: {e}")
 
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Critical error in _chunk_context: {str(e)}")
+            return []
 
     def _prioritize_supporting_facts(self,
                                      chunks: List[Dict],
@@ -291,27 +365,20 @@ class NeuralRetriever:
         if not chunks:
             logger.warning("No chunks available for processing")
             return []
-
         try:
             scored_chunks = []
             question_emb = question_embedding.view(-1)
             for chunk in chunks:
                 chunk_emb = chunk['embedding'].view(-1)
                 sim = util.cos_sim(chunk_emb.unsqueeze(0), question_emb.unsqueeze(0)).item()
-
                 if 'support_score' in chunk:
                     sim += chunk['support_score'] * self.support_boost
-
                 if symbolic_guidance:
                     guidance_boost = self._calculate_guidance_boost(chunk, symbolic_guidance)
                     sim += guidance_boost
-
                 scored_chunks.append((sim, chunk))
-
-            # Sort chunks by similarity score in descending order
             scored_chunks.sort(key=lambda x: x[0], reverse=True)
             relevant_chunks = [chunk for sim, chunk in scored_chunks if sim > 0]
-            # Fallback: if no chunk qualifies, use the top-scoring chunk
             if not relevant_chunks and scored_chunks:
                 logger.warning("No relevant chunks found, using top chunk as fallback.")
                 relevant_chunks = [scored_chunks[0][1]]
@@ -330,16 +397,46 @@ class NeuralRetriever:
                 boost += guide.get(self.guidance_confidence_key, 0.5) * self.guidance_boost_multiplier
         return min(boost, self.guidance_boost_limit)
 
-    def _create_prompt(self,
-                       question: str,
-                       chunks: List[Dict],
-                       symbolic_guidance: Optional[List[Dict]] = None) -> str:
-        context_parts = [c['text'] for c in chunks]
-        context = "\n".join(context_parts)
-        guidance_text = ""
-        if symbolic_guidance:
-            guidance_statements = [g[self.guidance_statement_key] for g in symbolic_guidance if g.get(self.guidance_confidence_key, 0) > 0.5 and self.guidance_statement_key in g]
-            if guidance_statements:
-                guidance_text = "\nRelevant information:\n- " + "\n- ".join(guidance_statements)
-        prompt = f"Context:{guidance_text}\n{context}\n\nQuestion: {question}\nAnswer:"
-        return prompt
+    def _create_enhanced_prompt(self, question: str, chunks: List[Dict],
+                                symbolic_guidance: Optional[List[Dict]] = None) -> str:
+        """
+        Create an enhanced prompt with better structure and guidance integration.
+        """
+        try:
+            valid_chunks = [c for c in chunks if isinstance(c, dict) and 'text' in c]
+            if not valid_chunks:
+                logger.warning("No valid chunks for prompt creation")
+                return self._create_fallback_prompt(question)
+            context_parts = []
+            for chunk in valid_chunks:
+                chunk_text = chunk['text'].strip()
+                if chunk_text:
+                    context_parts.append(chunk_text)
+            context = "\n\n".join(context_parts)
+            guidance_text = ""
+            if symbolic_guidance:
+                valid_statements = []
+                for guide in symbolic_guidance:
+                    if isinstance(guide, dict):
+                        statement = guide.get(self.guidance_statement_key)
+                        confidence = guide.get(self.guidance_confidence_key, 0)
+                        if statement and confidence > 0.5:
+                            valid_statements.append(statement)
+                if valid_statements:
+                    guidance_text = "\nRelevant background:\n- " + "\n- ".join(valid_statements)
+            prompt = (
+                f"Context:{guidance_text}\n\n"
+                f"{context}\n\n"
+                f"Question: {question}\n"
+                f"Answer: "
+            )
+            return prompt
+        except Exception as e:
+            logger.error(f"Error creating enhanced prompt: {e}")
+            return self._create_fallback_prompt(question)
+
+    def _create_fallback_prompt(self, question: str) -> str:
+        """
+        Create a minimal prompt when normal prompt creation fails.
+        """
+        return f"Question: {question}\nAnswer: "
