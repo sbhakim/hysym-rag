@@ -29,10 +29,15 @@ import logging
 import time
 from collections import defaultdict
 
+# Set up basic logging for all components
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
 ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -73,7 +78,6 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
             break
     return dataset
 
-
 if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
 
@@ -85,7 +89,7 @@ if __name__ == "__main__":
     # 1. Load configuration
     print("Loading configuration...")
     config = ConfigLoader.load_config("src/config/config.yaml")
-    config.update({
+    config.update({  # This config.update is unnecessary as config.yaml is corrected.  Keep it for now, but good to simplify later
         'alignment': {
             'target_dim': 768,
             'num_heads': 4
@@ -93,7 +97,7 @@ if __name__ == "__main__":
     })
     model_name = config["model_name"]
 
-    # 2. Acquire a unified device from DeviceManager (optional, but recommended for consistency)
+    # 2. Acquire a unified device from DeviceManager
     device = DeviceManager.get_device()
 
     # 3. Initialize Resource Manager
@@ -104,38 +108,55 @@ if __name__ == "__main__":
         history_window_size=100
     )
 
-    # ----------------------------------------------------------------
-    # 4. (Optional) We skip extracting rules from deforestation.txt.
-    #    Instead, ensure 'data/rules.json' exists but is empty or minimal.
-    # ----------------------------------------------------------------
+    # 4. Initialize Dimensionality Manager (NEW - Initialize before Symbolic Reasoner)
+    print("Initializing Dimensionality Manager...")
+    dimensionality_manager = DimensionalityManager(target_dim=config['alignment']['target_dim'], device=device)
+
+    # 5. Ensure that 'data/rules.json' exists (empty or minimal)
     rules_path = "data/rules.json"
     if not os.path.exists(rules_path):
         with open(rules_path, "w", encoding="utf-8") as f:
             json.dump([], f)
     print(f"Loading existing rules from {rules_path} (initially empty or minimal).")
 
-
-    # 5. Initialize the Graph-Based Symbolic Reasoner
+    # 6. Initialize the Graph-Based Symbolic Reasoner (NEW - Pass DimensionalityManager)
     print("Initializing Graph-Based Symbolic Reasoner...")
-    symbolic = GraphSymbolicReasoner(
-        rules_file=rules_path,
-        match_threshold=0.25,
-        max_hops=5,
-        embedding_model='all-MiniLM-L6-v2',
-        device=device,
-    )
+    try:
+        symbolic = GraphSymbolicReasoner(
+            rules_file=rules_path,
+            match_threshold=0.25,
+            max_hops=5,
+            embedding_model='all-MiniLM-L6-v2',
+            device=device,
+            dim_manager=dimensionality_manager # Pass dimensionality_manager here
+        )
+        if hasattr(symbolic, 'rules') and symbolic.rules:
+            print(f"Loaded {len(symbolic.rules)} rules successfully")
+        else:
+            print("Warning: No rules loaded in symbolic reasoner")
+    except Exception as e:
+        print(f"Error initializing symbolic reasoner: {str(e)}")
+        print("Continuing with empty rule set...")
+        symbolic = GraphSymbolicReasoner( # Keep this for fallback
+            rules_file=rules_path,
+            match_threshold=0.25,
+            max_hops=5,
+            embedding_model='all-MiniLM-L6-v2',
+            device=device,
+            dim_manager=dimensionality_manager
+        )
 
-    # 6. Initialize the Neural Retriever
+    # 7. Initialize the Neural Retriever
     print("Initializing Neural Retriever...")
     neural = NeuralRetriever(
         model_name,
         use_quantization=False,
-        device=device  # <-- Only if your NeuralRetriever supports a 'device' param
+        device=device
     )
 
-    # 7. Additional components
+    # 8. Additional components
     print("Initializing support components...")
-    logger = logging.getLogger(__name__)  # Standard logger
+    logger = logging.getLogger(__name__)
     query_logger = QueryLogger()
     feedback_manager = FeedbackManager()
     print("Initializing QueryExpander...")
@@ -146,7 +167,7 @@ if __name__ == "__main__":
     rule_extractor = RuleExtractor()
     print("Loading evaluation dataset...")
 
-    # Decide whether to load HotpotQA
+
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
     max_hotpot_samples = 8
@@ -154,13 +175,11 @@ if __name__ == "__main__":
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
         ground_truths = {}
-
-        # Build rules from HotpotQA contexts and store ground truths
         for i, sample in enumerate(test_queries):
             new_rules = rule_extractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
             if new_rules:
                 try:
-                    symbolic.add_dynamic_rules(new_rules)
+                    symbolic.add_dynamic_rules(new_rules)  #This should now work without error
                 except AttributeError as e:
                     logger.warning(f"Could not track new rules automatically (missing method?): {str(e)}")
             ground_truths[sample["query"]] = sample["answer"]
@@ -171,18 +190,16 @@ if __name__ == "__main__":
 
     evaluator = Evaluation()
 
-    # 8. Create Hybrid Integrator
+    # 9. Create Hybrid Integrator
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(
         symbolic,
         neural,
         resource_manager,
-        expander,
-        # device=device  # Only if your HybridIntegrator supports a 'device' param
-        # alignment_config=config['alignment']
+        expander
     )
 
-    # 9. System Control - Initialize MetricsCollector and pass it to SystemControlManager
+    # 10. Initialize System Control Components
     print("Initializing System Control Components...")
     aggregator = UnifiedResponseAggregator(include_explanations=True)
     metrics_collector = MetricsCollector()
@@ -195,7 +212,7 @@ if __name__ == "__main__":
         max_query_time=10
     )
 
-    # 10. Initialize Application
+    # 11. Initialize Application
     print("Initializing Application...")
     feedback_handler = FeedbackHandler(feedback_manager)
     app = App(
@@ -209,7 +226,7 @@ if __name__ == "__main__":
         system_manager=system_manager
     )
 
-    # 11. Possibly load a knowledge base for neural context
+    # 12. Load knowledge base for neural context (if available)
     kb_path = "data/small_knowledge_base.txt"
     if os.path.exists(kb_path):
         with open(kb_path, "r") as kb_file:
@@ -247,13 +264,10 @@ if __name__ == "__main__":
                 for key in final_metrics
             }
 
-            # Extract the textual prediction from final_answer
             prediction_val = final_answer.get('result', '')
             if isinstance(prediction_val, tuple):
-                # If it's like ('some text', 'hybrid')
                 prediction_val = prediction_val[0]
 
-            # Collect query metrics with the textual answer
             metrics_collector.collect_query_metrics(
                 query=query,
                 prediction=prediction_val,
@@ -269,7 +283,6 @@ if __name__ == "__main__":
                 complexity_score=complexity
             )
 
-            # Track component performance (if available)
             if isinstance(final_answer, dict):
                 metrics_collector.component_metrics['symbolic']['execution_time'].append(
                     final_answer.get('symbolic_time', 0.0)
@@ -278,7 +291,6 @@ if __name__ == "__main__":
                     final_answer.get('neural_time', 0.0)
                 )
 
-            # Log the query and final_answer
             query_logger.log_query(
                 query=query,
                 result=final_answer,
@@ -296,7 +308,6 @@ if __name__ == "__main__":
             print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
             print("-" * 20)
 
-            # If we have a ground-truth answer, evaluate
             if data_type == "ground_truth_available" and the_answer is not None:
                 reasoning_chain = symbolic.extract_reasoning_pattern(
                     query,
@@ -329,7 +340,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # 12. Optional Ablation Study
+    # Pass the dimensionality_manager to the ablation study
     ablation_results = run_ablation_study(
         rules_path=rules_path,
         device=device,
@@ -337,14 +348,13 @@ if __name__ == "__main__":
         expander=expander,
         aggregator=aggregator,
         resource_manager=resource_manager,
-        system_manager=system_manager,  # Pass the system_manager
-        context=context  # Pass context
+        system_manager=system_manager,
+        dimensionality_manager=dimensionality_manager,  # Pass dim_manager
+        context=context
     )
 
-    # *** IMPORTANT ***: Store ablation_results in metrics_collector so it appears in the academic report.
     metrics_collector.ablation_results = ablation_results
 
-    # 13. Optional Comparison Experiment
     print("\n=== Comparison Experiment (Sample) ===")
     comparison_queries = ["Compare and contrast the film adaptations of 'Pride and Prejudice'."]
     header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (%)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
@@ -398,7 +408,6 @@ if __name__ == "__main__":
         percentage = (count / total_queries) * 100 if total_queries > 0 else 0
         print(f"- {path}: {percentage:.1f}%")
 
-    # Enhanced Academic Analysis Display
     print("\n=== Comprehensive Academic Analysis ===")
     academic_report = metrics_collector.generate_academic_report()
 
@@ -438,7 +447,6 @@ if __name__ == "__main__":
                 print(f"  * p-value: {stats['p_value']:.3f}")
                 print(f"  * effect size: {stats.get('effect_size', 0.0):.2f}")
 
-    # The ablation_results are included in the final academic_report via ablation_results and _compile_ablation_results
     print("\n=== System Performance Summary (Extended) ===")
     pattern_metrics = symbolic.get_reasoning_metrics()
     print(f"- Average Chain Length: {pattern_metrics['path_analysis']['average_length']:.2f}")

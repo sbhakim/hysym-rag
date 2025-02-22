@@ -1,4 +1,4 @@
-# config.yaml
+# src/config/config.yaml
 model_name: "meta-llama/Llama-3.2-3B"
 data_dir: "data/"
 rules_file: "rules.json"
@@ -10,12 +10,12 @@ alignment:
   num_heads: 4
   dropout: 0.1
   sym_dim: 384
-  neural_dim: 768
+  neural_dim: 768  # Corrected to 768 to match expected neural model dimension and alignment target
 
 
 embeddings:
   symbolic_dim: 384
-  neural_dim: 384
+  neural_dim: 768  # Corrected to 768 to be consistent with alignment and expected model dimension
   target_dim: 768
   model_name: "all-MiniLM-L6-v2"
 

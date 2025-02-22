@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class RuleGuidedRetriever:
-    def __init__(self, encoder=None, similarity_threshold=0.4, adaptive_threshold=True, context_granularity="sentence"):
+    def __init__(self, encoder=None, similarity_threshold=0.3, adaptive_threshold=True, context_granularity="sentence"):
         """
         Advanced Rule-Guided Retriever using semantic similarity for context filtering.
 

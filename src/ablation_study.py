@@ -15,6 +15,7 @@ def run_ablation_study(
     aggregator,
     resource_manager,
     system_manager,  # Pass the original system manager for baseline
+    dimensionality_manager, # NEW - Accept dimensionality_manager as argument
     context  # Pass context
 ):
     """
@@ -33,7 +34,7 @@ def run_ablation_study(
         try:
             # 1. Baseline Run (Original System)
             print(f"  Running Baseline...")
-            metrics_collector = MetricsCollector()  # Instantiate metrics_collector here for each run
+            metrics_collector = MetricsCollector()
             initial_metrics_baseline = resource_manager.check_resources()
             baseline_answer = system_manager.process_query_with_fallback(
                 "What are the environmental effects of deforestation?",
@@ -45,15 +46,17 @@ def run_ablation_study(
 
             # 2. Modified Run (Ablated System)
             print(f"  Running Modified Configuration: {config_name}...")
-            metrics_collector_modified = MetricsCollector()  # New MetricsCollector for modified run
+            metrics_collector_modified = MetricsCollector()
             initial_metrics_modified = resource_manager.check_resources()
-            # **Important: Create a NEW SystemControlManager with modified symbolic reasoner**
+
+            # **Important: Create a NEW SystemControlManager with modified symbolic reasoner & pass dimensionality_manager**
             modified_symbolic = GraphSymbolicReasoner(
                 rules_file=rules_path,
                 match_threshold=config.get('match_threshold', 0.25),
                 max_hops=config.get('max_hops', 5),
                 embedding_model='all-MiniLM-L6-v2',
-                device=device
+                device=device,
+                dim_manager=dimensionality_manager # **Pass dimensionality_manager here!**
             )
             modified_integrator = HybridIntegrator(
                 modified_symbolic,
@@ -65,7 +68,7 @@ def run_ablation_study(
                 hybrid_integrator=modified_integrator,
                 resource_manager=resource_manager,
                 aggregator=aggregator,
-                metrics_collector=metrics_collector_modified,  # Pass new MetricsCollector
+                metrics_collector=metrics_collector_modified,
                 error_retry_limit=2,
                 max_query_time=10
             )
@@ -76,7 +79,7 @@ def run_ablation_study(
             )
             final_metrics_modified = resource_manager.check_resources()
             modified_resource_delta = {k: final_metrics_modified[k] - initial_metrics_modified[k] for k in final_metrics_modified}
-            modified_academic_report = modified_system_manager.metrics_collector.generate_academic_report()  # Access metrics from the modified_system_manager
+            modified_academic_report = modified_system_manager.metrics_collector.generate_academic_report()
 
             ablation_results[config_name] = {
                 'baseline_report': baseline_academic_report['performance_metrics'],
@@ -91,11 +94,9 @@ def run_ablation_study(
         except Exception as e:
             print(f"Error in ablation study for {config_name}: {str(e)}")
 
-        return ablation_results  # Return ablation_results
+        return ablation_results
 
 
 if __name__ == "__main__":
-    # Example usage (for testing ablation study in isolation if needed)
-    # You'd need to mock or initialize the dependencies for testing here.
     print("This is the ablation study module. It is intended to be called from main.py.")
-    pass  # Add example test call if necessary for isolated testing
+    pass

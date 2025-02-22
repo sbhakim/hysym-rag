@@ -7,9 +7,9 @@ import logging
 import numpy as np
 from typing import List, Dict, Optional, Tuple, Union
 from collections import defaultdict
-from src.utils.progress import tqdm, ProgressManager  # Import ProgressManager
+from src.utils.progress import tqdm, ProgressManager
 from src.utils.device_manager import DeviceManager
-import time  # Import the time module
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -30,59 +30,29 @@ class NeuralRetriever:
                  guidance_statement_key: str = 'statement',
                  guidance_confidence_key: str = 'confidence',
                  device: Optional[torch.device] = None):
-        """
-        Initialize the enhanced neural retriever.
 
-        Args:
-            model_name: Name of the language model
-            use_quantization: Whether to use 8-bit quantization
-            max_context_length: Maximum context length
-            chunk_size: Size of context chunks
-            overlap: Overlap between chunks
-            top_k: Number of relevant chunks to retrieve.
-            support_boost: Weight for supporting fact boost.
-            guidance_boost_limit: Maximum boost from symbolic guidance.
-            guidance_boost_multiplier: Multiplier for guidance boost.
-            guidance_statement_key: Key for statement in guidance.
-            guidance_confidence_key: Key for confidence in guidance.
-            device: Optional torch.device or None to auto-detect
-        """
         print(f"Initializing Neural Retriever with model: {model_name}...")
-
-        # Determine the device
         if device is None:
             device = DeviceManager.get_device()
         self.device = device
 
-        # Disable all progress bars
         ProgressManager.disable_progress()
         transformers_logging.set_verbosity_error()
 
-        # Suppress unnecessary warnings
         logging.getLogger('transformers').setLevel(logging.ERROR)
         logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 
-        # Initialize tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        if use_quantization:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                device_map="auto",
-                torch_dtype="auto",
-                load_in_8bit=True
-            )
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                device_map="auto",
-                torch_dtype="auto"
-            )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="auto",
+            torch_dtype="auto",
+            load_in_8bit=use_quantization
+        )
 
-        # Initialize sentence transformer for semantic search on the chosen device
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
 
-        # Configuration parameters
         self.max_context_length = max_context_length
         self.chunk_size = chunk_size
         self.overlap = overlap
@@ -93,7 +63,6 @@ class NeuralRetriever:
         self.guidance_statement_key = guidance_statement_key
         self.guidance_confidence_key = guidance_confidence_key
 
-        # Performance tracking
         self.stats = defaultdict(list)
 
         print(f"Model {model_name} loaded successfully!")
@@ -108,16 +77,12 @@ class NeuralRetriever:
                         supporting_facts: Optional[List[Tuple[str, int]]] = None,
                         query_complexity: Optional[float] = None
                         ) -> str:
-        """
-        Retrieve answer with supporting facts awareness.
-        """
-        start_time = time.time()  # Start tracking time
+
+        start_time = time.time()
         try:
-            # Validate inputs
             if not isinstance(context, str) or not isinstance(question, str):
                 raise ValueError("Context and question must be strings")
 
-            # Type validation for symbolic_guidance
             if isinstance(symbolic_guidance, str):
                 symbolic_guidance = [{"response": symbolic_guidance}]
             elif symbolic_guidance and not isinstance(symbolic_guidance, list):
@@ -128,7 +93,6 @@ class NeuralRetriever:
                     for rule in symbolic_guidance
                 ]
 
-            # Process context into chunks
             context_chunks = self._chunk_context(context)
             if not context_chunks:
                 logger.warning("No context chunks created; falling back to full context.")
@@ -140,17 +104,14 @@ class NeuralRetriever:
                     'end_idx': len(context.split('.')) - 1
                 }]
 
-            # Prioritize chunks if supporting facts provided
             if supporting_facts:
                 context_chunks = self._prioritize_supporting_facts(
                     context_chunks,
                     supporting_facts
                 )
 
-            # Encode question
             question_embedding = self._encode_safely(question)
 
-            # Get relevant chunks with fixed selection logic (ensuring at least one chunk)
             relevant_chunks = self._get_relevant_chunks(
                 question_embedding,
                 context_chunks,
@@ -166,14 +127,13 @@ class NeuralRetriever:
                     'end_idx': len(context.split('.')) - 1
                 }]
 
-            # Create prompt
             prompt = self._create_prompt(
                 question,
                 relevant_chunks,
                 symbolic_guidance
             )
 
-            # Generate answer
+
             inputs_pt = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -181,14 +141,21 @@ class NeuralRetriever:
                 max_length=self.max_context_length
             ).to(self.device)
 
-            # Using the lock from transformers logging handler for thread safety
+
             with logging.getLogger('transformers').handlers[0].lock:
-                outputs = self.model.generate(
-                    **inputs_pt,
-                    max_new_tokens=150,
-                    num_return_sequences=1,
-                    no_repeat_ngram_size=3
-                )
+                try: # **NEW - Error handling for model.generate()**
+                    outputs = self.model.generate(
+                        **inputs_pt,
+                        max_new_tokens=150,
+                        num_return_sequences=1,
+                        no_repeat_ngram_size=3,
+                        pad_token_id=self.tokenizer.eos_token_id # **NEW - Pad token**
+                    )
+                except Exception as model_e:
+                    logger.error(f"Error during model generation: {model_e}")
+                    self.stats['errors'].append(str(model_e))
+                    return "Error generating answer."
+
 
             response = self.tokenizer.decode(
                 outputs[0],
@@ -196,20 +163,20 @@ class NeuralRetriever:
             )
 
             result = self._post_process_response(response)
-            self.stats['processing_times'].append(time.time() - start_time)  # Store processing time
+            self.stats['processing_times'].append(time.time() - start_time)
             return result
 
-        except torch.cuda.OutOfMemoryError as e:  # Catch CUDA OOM errors
+        except torch.cuda.OutOfMemoryError as e:
             logger.error(f"GPU memory error in retrieve_answer: {str(e)}")
-            self.stats['errors'].append(str(e))  # store errors
+            self.stats['errors'].append(str(e))
             return "Error: GPU out of memory."
-        except Exception as e:  # Catch other exceptions
+        except Exception as e:
             logger.error(f"Error in retrieve_answer: {str(e)}")
-            self.stats['errors'].append(str(e))  # store errors
+            self.stats['errors'].append(str(e))
             return "Error retrieving answer."
 
+
     def _encode_safely(self, text: str) -> torch.Tensor:
-        """Safely encode text with error handling."""
         try:
             with logging.getLogger('sentence_transformers').handlers[0].lock:
                 return self.encoder.encode(text, convert_to_tensor=True)
@@ -221,7 +188,6 @@ class NeuralRetriever:
             raise
 
     def _generate_response(self, prompt: str) -> str:
-        """Generate response with proper error handling."""
         try:
             inputs_pt = self.tokenizer(
                 prompt,
@@ -235,7 +201,8 @@ class NeuralRetriever:
                     **inputs_pt,
                     max_new_tokens=150,
                     num_return_sequences=1,
-                    no_repeat_ngram_size=3
+                    no_repeat_ngram_size=3,
+                    pad_token_id=self.tokenizer.eos_token_id # **NEW - Pad token here as well, for consistency**
                 )
 
             return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -247,7 +214,6 @@ class NeuralRetriever:
             return "Error generating response."
 
     def _post_process_response(self, response: str) -> str:
-        """Clean and validate the generated response."""
         if "Question:" in response:
             response = response.split("Answer:")[-1]
         response = response.strip()
@@ -256,13 +222,14 @@ class NeuralRetriever:
         return response
 
     def _chunk_context(self, context: str) -> List[Dict]:
-        """
-        Split context into overlapping chunks with metadata.
-        """
         sentences = [s.strip() for s in context.split('.') if s.strip()]
         chunks = []
         current_chunk = []
         current_length = 0
+
+        if not sentences: # **NEW - Handle empty sentences list**
+            return chunks
+
 
         try:
             for idx, sentence in enumerate(self._process_batch(sentences)):
@@ -279,7 +246,6 @@ class NeuralRetriever:
                         }
                     chunks.append(chunk_data)
 
-                    # Create overlap from the last sentence(s)
                     overlap_tokens = sum(len(self.tokenizer.encode(s)) for s in current_chunk[-1:])
                     overlap_sentences = current_chunk[-1:]
 
@@ -305,7 +271,6 @@ class NeuralRetriever:
                     }
                 chunks.append(chunk_data)
         finally:
-            # Clear CUDA cache if using GPU
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         return chunks
@@ -314,9 +279,6 @@ class NeuralRetriever:
                                      chunks: List[Dict],
                                      supporting_facts: List[Tuple[str, int]]
                                      ) -> List[Dict]:
-        """
-        Prioritize chunks containing supporting facts.
-        """
         supporting_indices = {idx for _, idx in supporting_facts}
         for chunk in chunks:
             support_count = sum(
@@ -330,47 +292,36 @@ class NeuralRetriever:
                              question_embedding: torch.Tensor,
                              chunks: List[Dict],
                              symbolic_guidance: Optional[List[Dict]] = None) -> List[Dict]:
-        """
-        Get relevant chunks with enhanced error handling and scoring.
-        Fixed to ensure tensor dimensions and to always return at least one chunk.
-        """
         if not chunks:
             logger.warning("No chunks available for processing")
             return []
 
         try:
             scored_chunks = []
-            # Ensure question embedding is a 1D tensor
             question_emb = question_embedding.view(-1)
             for chunk in chunks:
-                # Ensure chunk embedding is a 1D tensor
                 chunk_emb = chunk['embedding'].view(-1)
                 sim = util.cos_sim(chunk_emb.unsqueeze(0), question_emb.unsqueeze(0)).item()
 
-                # Apply supporting facts boost if available
                 if 'support_score' in chunk:
                     sim += chunk['support_score'] * self.support_boost
 
-                # Apply symbolic guidance boost
                 if symbolic_guidance:
                     guidance_boost = self._calculate_guidance_boost(chunk, symbolic_guidance)
                     sim += guidance_boost
 
                 scored_chunks.append((sim, chunk))
 
-            # Sort and return top-k chunks; ensure at least one chunk is returned.
             sorted_chunks = sorted(scored_chunks, key=lambda x: x[0], reverse=True)
             return [chunk for _, chunk in sorted_chunks[:max(1, self.top_k)]]
         except Exception as e:
             logger.error(f"Error processing chunks: {str(e)}")
-            return [chunks[0]] if chunks else []
+            return [chunks[0]] if chunks else [] # **Ensure at least one chunk as fallback**
+
 
     def _calculate_guidance_boost(self,
                                   chunk: Dict,
                                   guidance: List[Dict]) -> float:
-        """
-        Calculate score boost based on symbolic guidance.
-        """
         boost = 0.0
         chunk_text = chunk['text'].lower()
         for guide in guidance:
@@ -382,9 +333,6 @@ class NeuralRetriever:
                        question: str,
                        chunks: List[Dict],
                        symbolic_guidance: Optional[List[Dict]] = None) -> str:
-        """
-        Create enhanced prompt with relevant context and guidance.
-        """
         context_parts = [c['text'] for c in chunks]
         context = "\n".join(context_parts)
         guidance_text = ""
