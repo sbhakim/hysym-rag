@@ -15,8 +15,9 @@ from src.utils.device_manager import DeviceManager
 from src.utils.dimension_manager import DimensionalityManager  # Import DimensionalityManager
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Set logging level to DEBUG
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) # Set logger level to DEBUG
 
 class GraphSymbolicReasoner:
     """
@@ -25,7 +26,7 @@ class GraphSymbolicReasoner:
 
     def __init__(self,
                  rules_file: str,
-                 match_threshold: float = 0.25,
+                 match_threshold: float = 0.1, # CHANGED: Reduced match_threshold
                  max_hops: int = 5,
                  embedding_model: str = 'all-MiniLM-L6-v2',
                  device: Optional[torch.device] = None,
@@ -35,8 +36,7 @@ class GraphSymbolicReasoner:
         Enhanced symbolic reasoner with proper tensor handling and academic metrics tracking.
         """
         # Initialize logger first
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
+        self.logger = logger
 
 
         self.match_threshold = match_threshold
@@ -133,7 +133,11 @@ class GraphSymbolicReasoner:
 
             if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
                 # Align rule embedding to target dimension during index building
+                logger.debug(f"Rule ID: {rule_id} Original rule embedding shape: {rule['embedding'].shape}")  # DEBUG PRINT
                 aligned_embedding = self.dim_manager.align_embeddings(rule['embedding'].to(self.device), "rule")
+                logger.debug(f"Rule ID: {rule_id} Aligned rule embedding shape: {aligned_embedding.shape}")  # DEBUG PRINT
+                if aligned_embedding.shape[-1] != 768:
+                    raise ValueError(f"Rule {rule_id} embedding dimension {aligned_embedding.shape[-1]} does not match target 768")
                 rule['embedding'] = aligned_embedding # Replace with aligned embedding
                 rule_embeddings_list.append(aligned_embedding) # Append aligned embedding
             elif 'source_text' in rule: # For rules dynamically extracted from HotpotQA that have 'source_text' but no pre-computed 'embedding'
@@ -201,18 +205,21 @@ class GraphSymbolicReasoner:
         try:
             if not isinstance(rule, dict):
                 return False
+
             if "supporting_fact" in rule:
                 required_hotpot_fields = {"type", "source_text", "keywords"}
-                has_required = all(field in rule for field in required_hotpot_fields)
-                if has_required:
+                # Check if all required fields are present and of the correct type.
+                if all(field in rule and isinstance(rule[field], (str, list)) for field in required_hotpot_fields):
                     if "confidence" not in rule:
                         rule["confidence"] = self._calculate_rule_confidence(rule)
                     return True
                 else:
+
                     return False
+
             required_fields = {"keywords", "response"}
-            has_required = all(field in rule for field in required_fields)
-            if has_required:
+            # Check all required fields and their type
+            if all(field in rule and isinstance(rule[field], (str, list)) for field in required_fields):
                 if "confidence" not in rule:
                     rule["confidence"] = self._calculate_rule_confidence(rule)
                 return True
@@ -293,9 +300,12 @@ class GraphSymbolicReasoner:
         try:
             # Align query embedding to target dimension before processing
             query_embedding_raw = self.embedder.encode(query, convert_to_tensor=True).to(self.device)
-            query_embedding = self.dim_manager.align_embeddings(query_embedding_raw, "symbolic")
+            logger.debug(f"Raw query embedding shape: {query_embedding_raw.shape}")  # Should be [384] or [1, 384]
+            query_embedding = self.dim_manager.align_embeddings(query_embedding_raw, "query")
+            logger.debug(f"Aligned query embedding shape: {query_embedding.shape}")  # Should be [1, 768]
 
-            responses = self.traverse_graph(query_embedding)
+
+            responses = self.traverse_graph(query_embedding) # Pass aligned embedding
             self._update_reasoning_metrics(responses)
             if not responses:
                 self.logger.info("No symbolic match found.")
@@ -306,29 +316,48 @@ class GraphSymbolicReasoner:
             self.logger.error(f"Error in process_query: {str(e)}")
             return [f"Error processing query: {str(e)}"]
 
-    def _find_matching_rules(self, query_embedding: torch.Tensor) -> List[Tuple[str, float]]:
+    def _find_matching_rules(self, query_embedding: torch.Tensor, query: str) -> List[Tuple[str, float]]: # UPDATED: added query argument
         """
         Find matching rules with proper tensor comparison handling.
         """
         matches = []
-        # Ensure query embedding is properly shaped
-        query_embedding = query_embedding.view(1, -1)
+        logger.debug(f"Query embedding shape (before alignment in _find_matching_rules): {query_embedding.shape}") # DEBUG: Log shape before alignment
+        # Remove redundant alignment
+        # query_embedding = self.dim_manager.align_embeddings(query_embedding, "query")
+        logger.debug(f"Query embedding shape (after alignment in _find_matching_rules): {query_embedding.shape}") # DEBUG: Log shape after alignment
+        if query_embedding.shape[-1] != self.dim_manager.target_dim:
+            raise ValueError(f"Query embedding dimension {query_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}")
+
+
         for rule_id, rule in self.rules.items():
             if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
-                rule_embedding = rule['embedding'].to(self.device).view(1, -1)
-                with torch.no_grad():
-                    similarity = F.cosine_similarity(query_embedding, rule_embedding, dim=1)
-                    sim_value = similarity.item()
-                    if sim_value >= self.match_threshold:
-                        matches.append((rule_id, sim_value))
+                rule_embedding = rule['embedding'].to(self.device)
+                logger.debug(f"Rule ID: {rule_id}, Rule embedding shape (before alignment): {rule_embedding.shape}") # DEBUG: Log shape before alignment
+                # Ensure rule embedding is aligned using DimensionalityManager
+                rule_embedding = self.dim_manager.align_embeddings(rule_embedding, "rule")
+                logger.debug(f"Rule ID: {rule_id}, Rule embedding shape (after alignment): {rule_embedding.shape}") # DEBUG: Log shape after alignment
+
+                similarity = self._calculate_similarity(query_embedding, rule_embedding)
+                if similarity >= self.match_threshold:
+                    matches.append((rule_id, similarity))
+        if not matches:  # Fallback to keyword-based matching
+            self.logger.info("No embedding-based matches, attempting keyword fallback.")
+            query_keywords = set(query.lower().split())
+            for rule_id, rule in self.rules.items():
+                rule_keywords = set(rule.get('keywords', []))
+                if rule_keywords:
+                    overlap = len(query_keywords & rule_keywords) / len(rule_keywords)
+                    if overlap >= 0.2:  # Adjustable threshold
+                        matches.append((rule_id, overlap))
         return sorted(matches, key=lambda x: x[1], reverse=True)
+
 
     def traverse_graph(self, query_embedding: torch.Tensor) -> List[str]:
         """
         Traverse the knowledge graph to find relevant responses based on the query embedding.
         """
         responses = []
-        matching_rules = self._find_matching_rules(query_embedding)
+        matching_rules = self._find_matching_rules(query_embedding, "")  # Pass aligned embedding
         for rule_id, sim_score in matching_rules:
             rule = self.rules.get(rule_id, {})
             responses.extend(self._process_rule(rule, {"subject": None}))
@@ -388,6 +417,20 @@ class GraphSymbolicReasoner:
                 if similarity > self.match_threshold:
                     used_rules.add(rule_id)
         return used_rules
+
+    def _calculate_similarity(self, query_embedding: torch.Tensor, rule_embedding: torch.Tensor) -> float:
+        """Calculates cosine similarity between query and rule embeddings."""
+        assert query_embedding.shape[-1] == rule_embedding.shape[-1], \
+            f"Dimension mismatch: query {query_embedding.shape}, rule {rule_embedding.shape}"
+        assert query_embedding.shape[-1] == self.dim_manager.target_dim, \
+            f"Query embedding dimension {query_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}"
+        with torch.no_grad(): # Important for inference
+            similarity = F.cosine_similarity(
+                query_embedding.view(1, -1), # reshape to [1, dim]
+                rule_embedding.view(1, -1), # reshape to [1, dim]
+                dim=1
+            ).item() # Get scalar value
+        return similarity
 
     # ------------------- New Methods for Enhanced Reasoning Chain Extraction -------------------
 
@@ -641,11 +684,7 @@ class GraphSymbolicReasoner:
         """
         serialized = {}
         for u, v, data in dependencies.edges(data=True):
-            serialized.setdefault(u, []).append({
-                'to': v,
-                'weight': data.get('weight', 0.0)
-            })
-        return serialized
+            serialized
 
     # ------------------- Utility / Placeholder methods for chain calculations -------------------
 

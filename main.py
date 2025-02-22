@@ -28,10 +28,11 @@ import warnings
 import logging
 import time
 from collections import defaultdict
+import torch.nn as nn
 
 # Set up basic logging for all components
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Set log level to DEBUG to capture dimension alignment logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -85,16 +86,11 @@ if __name__ == "__main__":
     logging.getLogger('transformers').setLevel(logging.ERROR)
     logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
     logging.getLogger('DimensionalityManager').setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)
 
     # 1. Load configuration
     print("Loading configuration...")
     config = ConfigLoader.load_config("src/config/config.yaml")
-    config.update({  # This config.update is unnecessary as config.yaml is corrected.  Keep it for now, but good to simplify later
-        'alignment': {
-            'target_dim': 768,
-            'num_heads': 4
-        }
-    })
     model_name = config["model_name"]
 
     # 2. Acquire a unified device from DeviceManager
@@ -108,9 +104,12 @@ if __name__ == "__main__":
         history_window_size=100
     )
 
-    # 4. Initialize Dimensionality Manager (NEW - Initialize before Symbolic Reasoner)
+    # 4. Initialize Dimensionality Manager (FIRST - Before other components!)
     print("Initializing Dimensionality Manager...")
     dimensionality_manager = DimensionalityManager(target_dim=config['alignment']['target_dim'], device=device)
+    # Register a query adapter: project from 384 to 768 dimensions
+    query_adapter = nn.Linear(384, 768).to(device)
+    dimensionality_manager.register_adapter('query', query_adapter)
 
     # 5. Ensure that 'data/rules.json' exists (empty or minimal)
     rules_path = "data/rules.json"
@@ -119,7 +118,7 @@ if __name__ == "__main__":
             json.dump([], f)
     print(f"Loading existing rules from {rules_path} (initially empty or minimal).")
 
-    # 6. Initialize the Graph-Based Symbolic Reasoner (NEW - Pass DimensionalityManager)
+    # 6. Initialize the Graph-Based Symbolic Reasoner (Pass dim_manager)
     print("Initializing Graph-Based Symbolic Reasoner...")
     try:
         symbolic = GraphSymbolicReasoner(
@@ -128,7 +127,7 @@ if __name__ == "__main__":
             max_hops=5,
             embedding_model='all-MiniLM-L6-v2',
             device=device,
-            dim_manager=dimensionality_manager # Pass dimensionality_manager here
+            dim_manager=dimensionality_manager  # PASS dim_manager HERE
         )
         if hasattr(symbolic, 'rules') and symbolic.rules:
             print(f"Loaded {len(symbolic.rules)} rules successfully")
@@ -137,13 +136,13 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error initializing symbolic reasoner: {str(e)}")
         print("Continuing with empty rule set...")
-        symbolic = GraphSymbolicReasoner( # Keep this for fallback
+        symbolic = GraphSymbolicReasoner(
             rules_file=rules_path,
             match_threshold=0.25,
             max_hops=5,
             embedding_model='all-MiniLM-L6-v2',
             device=device,
-            dim_manager=dimensionality_manager
+            dim_manager=dimensionality_manager  # PASS dim_manager HERE (in fallback as well)
         )
 
     # 7. Initialize the Neural Retriever
@@ -156,7 +155,6 @@ if __name__ == "__main__":
 
     # 8. Additional components
     print("Initializing support components...")
-    logger = logging.getLogger(__name__)
     query_logger = QueryLogger()
     feedback_manager = FeedbackManager()
     print("Initializing QueryExpander...")
@@ -166,7 +164,6 @@ if __name__ == "__main__":
     print("Initializing RuleExtractor...")
     rule_extractor = RuleExtractor()
     print("Loading evaluation dataset...")
-
 
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
@@ -179,7 +176,7 @@ if __name__ == "__main__":
             new_rules = rule_extractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
             if new_rules:
                 try:
-                    symbolic.add_dynamic_rules(new_rules)  #This should now work without error
+                    symbolic.add_dynamic_rules(new_rules)  # This should now work without error
                 except AttributeError as e:
                     logger.warning(f"Could not track new rules automatically (missing method?): {str(e)}")
             ground_truths[sample["query"]] = sample["answer"]
@@ -190,13 +187,14 @@ if __name__ == "__main__":
 
     evaluator = Evaluation()
 
-    # 9. Create Hybrid Integrator
+    # 9. Create Hybrid Integrator (Pass dim_manager)
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(
-        symbolic,
-        neural,
-        resource_manager,
-        expander
+        symbolic_reasoner=symbolic,  # Use 'symbolic_reasoner' instead of just 'symbolic'
+        neural_retriever=neural,     # Use 'neural_retriever' instead of just 'neural'
+        resource_manager=resource_manager,
+        query_expander=expander,
+        dim_manager=dimensionality_manager  # PASS dim_manager HERE
     )
 
     # 10. Initialize System Control Components
@@ -432,10 +430,13 @@ if __name__ == "__main__":
         em = academic_report['efficiency_metrics']
         for resource, metrics in em.items():
             if resource != 'trends':
+                efficiency_score_val = metrics.get('efficiency_score')
+                if efficiency_score_val is None:
+                    efficiency_score_val = 0.0
                 print(f"- {resource.capitalize()}:")
                 print(f"  * Mean Usage: {metrics.get('mean_usage', 0.0)*100:.1f}%")
                 print(f"  * Peak Usage: {metrics.get('peak_usage', 0.0)*100:.1f}%")
-                print(f"  * Efficiency Score: {metrics.get('efficiency_score', 0.0):.2f}")
+                print(f"  * Efficiency Score: {efficiency_score_val:.2f}")
 
     print("\nStatistical Analysis:")
     if 'statistical_analysis' in academic_report:

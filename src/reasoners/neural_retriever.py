@@ -93,16 +93,17 @@ class NeuralRetriever:
                     for rule in symbolic_guidance
                 ]
 
-            context_chunks = self._chunk_context(context)
-            if not context_chunks:
-                logger.warning("No context chunks created; falling back to full context.")
-                context_chunks = [{
-                    'text': context,
-                    'embedding': self._encode_safely(context),
-                    'sentences': context.split('.'),
-                    'start_idx': 0,
-                    'end_idx': len(context.split('.')) - 1
-                }]
+            # FIX 1: Add validation and safety checks
+            if isinstance(context, str) and context.strip():
+                try:
+                    context_chunks = self._chunk_context(context)
+                    if not context_chunks:
+                        return "No relevant context found."
+                except Exception as e:
+                    logger.error(f"Error chunking context: {str(e)}")
+                    return "Error processing context."
+            else:
+                return "Invalid context provided."
 
             if supporting_facts:
                 context_chunks = self._prioritize_supporting_facts(
@@ -133,7 +134,6 @@ class NeuralRetriever:
                 symbolic_guidance
             )
 
-
             inputs_pt = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -141,21 +141,24 @@ class NeuralRetriever:
                 max_length=self.max_context_length
             ).to(self.device)
 
-
             with logging.getLogger('transformers').handlers[0].lock:
-                try: # **NEW - Error handling for model.generate()**
+                try:
                     outputs = self.model.generate(
                         **inputs_pt,
                         max_new_tokens=150,
                         num_return_sequences=1,
                         no_repeat_ngram_size=3,
-                        pad_token_id=self.tokenizer.eos_token_id # **NEW - Pad token**
+                        pad_token_id=self.tokenizer.eos_token_id
                     )
                 except Exception as model_e:
                     logger.error(f"Error during model generation: {model_e}")
                     self.stats['errors'].append(str(model_e))
                     return "Error generating answer."
 
+            # Check if outputs is empty
+            if outputs is None or outputs.numel() == 0:
+                logger.error("Model generated empty output")
+                return "Error: Model failed to generate response."
 
             response = self.tokenizer.decode(
                 outputs[0],
@@ -174,7 +177,6 @@ class NeuralRetriever:
             logger.error(f"Error in retrieve_answer: {str(e)}")
             self.stats['errors'].append(str(e))
             return "Error retrieving answer."
-
 
     def _encode_safely(self, text: str) -> torch.Tensor:
         try:
@@ -202,9 +204,11 @@ class NeuralRetriever:
                     max_new_tokens=150,
                     num_return_sequences=1,
                     no_repeat_ngram_size=3,
-                    pad_token_id=self.tokenizer.eos_token_id # **NEW - Pad token here as well, for consistency**
+                    pad_token_id=self.tokenizer.eos_token_id
                 )
-
+            if outputs is None or outputs.numel() == 0:
+                logger.error("Model generated empty output in _generate_response")
+                return "Error: Model failed to generate response."
             return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         except torch.cuda.OutOfMemoryError as e:
             logger.error(f"GPU memory error during generation: {str(e)}")
@@ -222,58 +226,50 @@ class NeuralRetriever:
         return response
 
     def _chunk_context(self, context: str) -> List[Dict]:
-        sentences = [s.strip() for s in context.split('.') if s.strip()]
-        chunks = []
-        current_chunk = []
-        current_length = 0
-
-        if not sentences: # **NEW - Handle empty sentences list**
-            return chunks
-
-
+        # FIX 2: Add robust chunking logic
         try:
+            sentences = [s.strip() for s in context.split('.') if s.strip()]
+            chunks = []
+            current_chunk = []
+            current_length = 0
+
+            if not sentences:
+                return chunks
+
             for idx, sentence in enumerate(self._process_batch(sentences)):
                 sentence_tokens = len(self.tokenizer.encode(sentence))
                 if current_length + sentence_tokens > self.chunk_size and current_chunk:
                     chunk_text = ' '.join(current_chunk)
-                    with logging.getLogger('sentence_transformers').handlers[0].lock:
-                        chunk_data = {
-                            'text': chunk_text,
-                            'embedding': self.encoder.encode(chunk_text, convert_to_tensor=True),
-                            'sentences': current_chunk.copy(),
-                            'start_idx': idx - len(current_chunk),
-                            'end_idx': idx - 1
-                        }
+                    chunk_data = {
+                        'text': chunk_text,
+                        'embedding': self._encode_safely(chunk_text),
+                        'sentences': current_chunk.copy(),
+                        'start_idx': max(0, idx - len(current_chunk)), # Fix start_idx to be non-negative
+                        'end_idx': idx - 1
+                    }
                     chunks.append(chunk_data)
-
-                    overlap_tokens = sum(len(self.tokenizer.encode(s)) for s in current_chunk[-1:])
-                    overlap_sentences = current_chunk[-1:]
-
-                    while overlap_tokens < self.overlap and len(overlap_sentences) < len(current_chunk):
-                        overlap_sentences.insert(0, current_chunk[-len(overlap_sentences)-1])
-                        overlap_tokens += len(self.tokenizer.encode(overlap_sentences[0]))
-
-                    current_chunk = overlap_sentences
-                    current_length = overlap_tokens
+                    current_chunk = []
+                    current_length = 0
 
                 current_chunk.append(sentence)
                 current_length += sentence_tokens
 
+            # Don't forget last chunk
             if current_chunk:
                 chunk_text = ' '.join(current_chunk)
-                with logging.getLogger('sentence_transformers').handlers[0].lock:
-                    chunk_data = {
-                        'text': chunk_text,
-                        'embedding': self.encoder.encode(chunk_text, convert_to_tensor=True),
-                        'sentences': current_chunk,
-                        'start_idx': len(sentences) - len(current_chunk),
-                        'end_idx': len(sentences) - 1
-                    }
+                chunk_data = {
+                    'text': chunk_text,
+                    'embedding': self._encode_safely(chunk_text),
+                    'sentences': current_chunk,
+                    'start_idx': len(sentences) - len(current_chunk),
+                    'end_idx': len(sentences) - 1
+                }
                 chunks.append(chunk_data)
-        finally:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        return chunks
+            return chunks
+        except Exception as e:
+            logger.error(f"Error in _chunk_context: {str(e)}")
+            return []
+
 
     def _prioritize_supporting_facts(self,
                                      chunks: List[Dict],
@@ -312,12 +308,17 @@ class NeuralRetriever:
 
                 scored_chunks.append((sim, chunk))
 
-            sorted_chunks = sorted(scored_chunks, key=lambda x: x[0], reverse=True)
-            return [chunk for _, chunk in sorted_chunks[:max(1, self.top_k)]]
+            # Sort chunks by similarity score in descending order
+            scored_chunks.sort(key=lambda x: x[0], reverse=True)
+            relevant_chunks = [chunk for sim, chunk in scored_chunks if sim > 0]
+            # Fallback: if no chunk qualifies, use the top-scoring chunk
+            if not relevant_chunks and scored_chunks:
+                logger.warning("No relevant chunks found, using top chunk as fallback.")
+                relevant_chunks = [scored_chunks[0][1]]
+            return relevant_chunks[:max(1, self.top_k)]
         except Exception as e:
             logger.error(f"Error processing chunks: {str(e)}")
-            return [chunks[0]] if chunks else [] # **Ensure at least one chunk as fallback**
-
+            return [chunks[0]] if chunks else []
 
     def _calculate_guidance_boost(self,
                                   chunk: Dict,

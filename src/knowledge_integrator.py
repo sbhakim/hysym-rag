@@ -5,51 +5,45 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import logging
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional
 
 from src.utils.device_manager import DeviceManager
 from src.utils.dimension_manager import DimensionalityManager
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to DEBUG level to capture detailed logs
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 
 class AlignmentLayer(nn.Module):
     def __init__(
             self,
-            sym_dim: int = 384,        # Original symbolic dimension
-            neural_dim: int = 768,       # Original neural dimension
-            target_dim: int = 768,       # Target dimension for alignment (used by DimensionalityManager)
-            num_heads: int = 4,
+            sym_dim: int = 384,
+            neural_dim: int = 768,
+            target_dim: int = 768,
+            num_heads: int = 4,  # unused right now.
             dropout: float = 0.1,
-            device: Optional[torch.device] = None
+            device: Optional[torch.device] = None,
+            dim_manager: Optional[DimensionalityManager] = None
     ):
         """
         Enhanced alignment layer with dynamic dimension handling and confidence-weighted fusion.
-        Initializes projection adapters first and then sets up a centralized DimensionalityManager.
         """
         super(AlignmentLayer, self).__init__()
-
-        # Store or retrieve the device from DeviceManager
         self.device = device if device is not None else DeviceManager.get_device()
-
         self.head_dim = 64
-        self.num_heads = num_heads
-        self.hidden_dim = self.head_dim * num_heads  # For multi-head attention (e.g., 4*64=256)
+        self.num_heads = num_heads  # currently unused
+        self.hidden_dim = self.head_dim * num_heads
         self.target_dim = target_dim
+        self.dim_manager = dim_manager or DimensionalityManager(target_dim=target_dim, device=device)
 
-        # Initialize projection adapters first (they replace the old sym_adapter error)
-        self.sym_adapter = nn.Linear(sym_dim, target_dim)
-        self.neural_adapter = nn.Linear(neural_dim, target_dim)
-
-        # Initialize centralized dimension manager to align embeddings to target_dim (768)
-        self.dim_manager = DimensionalityManager(
-            target_dim=target_dim,
-            device=self.device
-        )
-        # Register the adapters for symbolic and neural sources.
-        self.dim_manager.register_adapter('symbolic', self.sym_adapter)
-        self.dim_manager.register_adapter('neural', self.neural_adapter)
+        # --- Directly use registered adapters from dim_manager, do not recreate. ---
+        # These lines are removed because they recreate the adapters, causing conflicts:
+        # self.sym_adapter = nn.Linear(sym_dim, target_dim)
+        # self.neural_adapter = nn.Linear(neural_dim, target_dim)
+        # self.dim_manager.register_adapter('symbolic', self.sym_adapter)
+        # self.dim_manager.register_adapter('neural', self.neural_adapter)
 
         # New projection adapters: project from target_dim (768) to hidden_dim (256)
         self.sym_projection_adapter = nn.Linear(target_dim, self.hidden_dim)
@@ -71,7 +65,7 @@ class AlignmentLayer(nn.Module):
 
         # Final alignment projection: combine features from both branches
         self.alignment_projection = nn.Sequential(
-            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),  # Combine attended features and neural projection
             nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
             nn.Linear(self.hidden_dim, target_dim)
@@ -104,78 +98,82 @@ class AlignmentLayer(nn.Module):
         return emb
 
     def dynamic_project(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # No need for re-alignment here, use input embeddings directly.
         try:
-            device = sym_emb.device
-            # Align embeddings to target_dim using the centralized dimension manager
-            sym_aligned = self.dim_manager.align_embeddings(sym_emb.to(device), "symbolic")
-            neural_aligned = self.dim_manager.align_embeddings(neural_emb.to(device), "neural")
-            # Project the aligned embeddings to hidden_dim via dedicated adapters
-            sym_proj_input = self.sym_projection_adapter(sym_aligned)
-            neural_proj_input = self.neural_projection_adapter(neural_aligned)
+            batch_size = sym_emb.size(0)
+
+            # Project the aligned embeddings to the hidden dimension via dedicated adapters
+            sym_proj_input = self.sym_projection_adapter(sym_emb)
+            neural_proj_input = self.neural_projection_adapter(neural_emb)
+
             # Process through branch-specific projection layers
             sym_projected = self.sym_projection(sym_proj_input)
             neural_projected = self.neural_projection(neural_proj_input)
-            batch_size = sym_projected.size(0)
-            # Reshape for multi-head attention
+            logger.debug(f"Symbolic Projected Shape: {sym_projected.shape}")  # Expected: [batch, hidden_dim]
+            logger.debug(f"Neural Projected Shape: {neural_projected.shape}")    # Expected: [batch, hidden_dim]
+
+
+            # Reshape for multi-head attention: [batch, tokens, num_heads, head_dim]
+            #  (Assuming single token for now)
             sym_heads = sym_projected.view(batch_size, -1, self.num_heads, self.head_dim)
             neural_heads = neural_projected.view(batch_size, -1, self.num_heads, self.head_dim)
+            logger.debug(f"Symbolic Heads Shape: {sym_heads.shape}")  # Expected: [batch, 1, num_heads, head_dim]
+            logger.debug(f"Neural Heads Shape: {neural_heads.shape}")    # Expected: [batch, 1, num_heads, head_dim]
+
+            # Compute attention scores and weights.  Key matrix multiplication happens here.
             attention_scores = torch.matmul(sym_heads, neural_heads.transpose(-2, -1)) / self.scale
+            logger.debug(f"Attention Scores shape: {attention_scores.shape}") # Expected: [batch_size, num_heads, 1, 1]
             attention_weights = F.softmax(attention_scores, dim=-1)
-            attended_features = torch.matmul(attention_weights, neural_heads)
-            attended_features = attended_features.view(batch_size, -1, self.hidden_dim)
+            attended_features = torch.matmul(attention_weights, neural_heads) # Expected output: [batch, num_heads, 1, head_dim]
+            attended_features = attended_features.view(batch_size, -1, self.hidden_dim) # Expected output: [batch, 1, hidden_dim]
+            logger.debug(f"Attended features shape: {attended_features.shape}") # Expected: [batch, 1, hidden_dim]
+
             return attended_features, attention_weights
+
         except Exception as e:
             logger.error(f"Error in dynamic_project: {str(e)}")
             raise
 
-    def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor, rule_confidence: Optional[float] = None) -> Tuple[torch.Tensor, float, Optional[dict]]:
+    def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor, rule_confidence: Optional[float] = None) -> \
+            Tuple[torch.Tensor, float, Optional[dict]]:
         try:
             self._log_memory_usage("start_forward")
             sym_emb = self._validate_and_prepare_input(sym_emb, "Symbolic")
             neural_emb = self._validate_and_prepare_input(neural_emb, "Neural")
 
-            # Ensure consistent device usage
             sym_emb = self._ensure_device(sym_emb, neural_emb.device)
             self._log_memory_usage("after_device_placement")
 
-            try:
-                attended_features, attention_weights = self.dynamic_project(sym_emb, neural_emb)
-                self._log_memory_usage("after_projection")
-            except RuntimeError as e:
-                logger.error(f"Error in dynamic projection: {str(e)}")
-                # Fallback: re-align and re-project
-                sym_aligned = self.dim_manager.align_embeddings(sym_emb, "symbolic")
-                neural_aligned = self.dim_manager.align_embeddings(neural_emb, "neural")
-                attended_features, attention_weights = self.dynamic_project(sym_aligned, neural_aligned)
+            attended_features, attention_weights = self.dynamic_project(sym_emb, neural_emb)
+            self._log_memory_usage("after_projection")
 
             if attended_features.size(-1) != self.hidden_dim:
                 logger.warning(f"Attended features dimension mismatch: {attended_features.size(-1)} vs {self.hidden_dim}")
-                attended_features = self.sym_projection_adapter(attended_features)
+                # This shouldn't be necessary anymore
+                # attended_features = self.sym_projection_adapter(attended_features)
 
-            try:
-                attended_features = self._ensure_device(attended_features, neural_emb.device)
-                neural_emb = self._ensure_device(neural_emb, attended_features.device)
-                # Concatenate attended features with neural embedding (unsqueezed for matching dimensions)
-                combined = torch.cat([attended_features, neural_emb.unsqueeze(1)], dim=-1)
-                self._log_memory_usage("after_combination")
-            except RuntimeError as e:
-                logger.error(f"Error in feature combination: {str(e)}")
-                if attended_features.size(-1) != neural_emb.size(-1):
-                    neural_emb = self.neural_projection_adapter(neural_emb)
-                combined = torch.cat([attended_features, neural_emb.unsqueeze(1)], dim=-1)
+            attended_features = self._ensure_device(attended_features, neural_emb.device)
+            neural_emb = self._ensure_device(neural_emb, attended_features.device)
+            # Instead of concatenating the raw neural_emb, project neural_emb to hidden_dim space:
+            # neural_aligned = self.dim_manager.align_embeddings(neural_emb.to(neural_emb.device), "neural") # No longer needed.
+            neural_proj = self.neural_projection_adapter(neural_emb)  # Use ALREADY ALIGNED neural_emb
+            neural_proj = self.neural_projection(neural_proj)          # Now shape: [batch, hidden_dim]
+            neural_proj = neural_proj.unsqueeze(1)  # Shape: [batch, 1, hidden_dim]
+
+            # Concatenate attended features with the projected neural embedding
+            combined = torch.cat([attended_features, neural_proj], dim=-1)
+            self._log_memory_usage("after_combination")
 
             aligned_embedding = self.alignment_projection(combined)
-            # Compute context-based confidence
             context_score = self.context_analyzer(aligned_embedding)
             if rule_confidence is not None:
                 rule_score = self.rule_confidence_gate(aligned_embedding)
                 dynamic_confidence = (context_score + rule_score) / 2
             else:
                 dynamic_confidence = context_score
-            confidence_score = dynamic_confidence  # Use the computed dynamic confidence
+            confidence_score = dynamic_confidence
             self._log_memory_usage("after_alignment")
 
-            # Dynamic fusion: weighted fusion of aligned embedding and neural embedding
             fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
 
             debug_info = {
@@ -197,20 +195,13 @@ class AlignmentLayer(nn.Module):
             self._log_memory_usage("end_forward")
             return fused_embedding, confidence_score.mean().item(), debug_info
 
-        except ValueError as ve:
-            logger.error(f"Validation error in forward pass: {str(ve)}")
-            try:
-                if hasattr(self, 'neural_projection_adapter'):
-                    neural_emb = self.neural_projection_adapter(neural_emb)
-                    return neural_emb, 0.0, {'error': str(ve), 'fallback': 'using_adapted_neural_embedding'}
-            except:
-                pass
-            return neural_emb, 0.0, {'error': str(ve), 'fallback': 'using_neural_embedding'}
 
-        except Exception as e:
+        except Exception as e: # Catch ALL exceptions here
             logger.error(f"Unexpected error in forward pass: {str(e)}")
             self._log_memory_usage("error_state")
+            # Fallback: return neural embedding, 0 confidence, and the error
             return neural_emb, 0.0, {'error': str(e), 'fallback': 'using_neural_embedding'}
+
 
     def compute_loss(self, aligned_emb: torch.Tensor, target_emb: torch.Tensor, confidence_score: float,
                      lambda_cos: float = 0.7, lambda_l2: float = 0.3) -> torch.Tensor:
@@ -229,10 +220,6 @@ class AlignmentLayer(nn.Module):
             logger.debug(f"Memory usage at {stage}: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 
     def _ensure_device(self, tensor: torch.Tensor, target_device: Optional[torch.device] = None) -> torch.Tensor:
-        """
-        Ensure 'tensor' is on 'target_device'. If 'target_device' is None, use self.device.
-        This method delegates to DeviceManager to maintain consistency.
-        """
         device = target_device or self.device
         moved_tensor, _ = DeviceManager.ensure_same_device(tensor, tensor, device=device)
         return moved_tensor
