@@ -32,3 +32,25 @@ resource_thresholds:
   gpu:
     base_threshold: 0.95
     adjustment_factor: 0.05
+
+
+# Chunking Configuration
+chunking:
+  chunk_size: 512
+  chunk_overlap: 128
+  min_chunk_size: 64
+  fallback_enabled: true
+
+# Error Recovery Configuration
+error_recovery:
+  max_retries: 3
+  backoff_factor: 1.5
+  fallback_enabled: true
+  cache_ttl: 3600
+
+# Metrics Configuration
+metrics:
+  detailed_logging: true
+  save_frequency: 100
+  history_window: 1000
+  performance_tracking: true

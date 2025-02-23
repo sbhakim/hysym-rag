@@ -27,7 +27,7 @@ class DimensionalityManager:
             nn.LayerNorm(target_dim),
             nn.ReLU()
         ).to(self.device)
-        logger.info(f"DimensionalityManager initialized: target_dim={target_dim}, device={self.device}") # Initialization log
+        logger.info(f"DimensionalityManager initialized: target_dim={target_dim}, device={self.device}")
 
     def register_adapter(self, name: str, adapter: nn.Module) -> None:
         """
@@ -41,52 +41,54 @@ class DimensionalityManager:
                          source: str,
                          return_confidence: bool = False) -> torch.Tensor:
         """
-        Aligns embeddings to target dimension using registered adapters
-        or creating new ones as needed.
-
-        Args:
-            embedding: Input embedding tensor.
-            source: Source identifier (e.g., 'symbolic', 'neural').
-            return_confidence: Whether to return an alignment confidence score.
-
-        Returns:
-            Aligned embedding tensor, optionally with a confidence score.
+        Enhanced embedding alignment with improved validation and error handling.
         """
-        # Ensure embedding is at least 2D.
-        if embedding.dim() == 1:
-            embedding = embedding.unsqueeze(0)
-
-        input_dim = embedding.size(-1)
-        logger.debug(f"Aligning embedding from source '{source}', original dim={input_dim}, target_dim={self.target_dim}, current embedding shape: {embedding.shape}") # DEBUG log
-
-        # If already aligned, return immediately.
-        if input_dim == self.target_dim:
-            logger.debug(f"Embedding from source '{source}' already aligned (dim={input_dim}).")  # DEBUG log
-            return (embedding, 1.0) if return_confidence else embedding
-
-        if source in self.alignment_cache: # Use registered adapter if available
-            adapter = self.alignment_cache[source]
-            logger.debug(f"Using registered adapter for source '{source}'.") # DEBUG log
+        try:
+            # Ensure embedding is at least 2D.
             if embedding.dim() == 1:
-                embedding = embedding.unsqueeze(0)  # Ensure 2D input for adapter
-            aligned = adapter(embedding)
-            if aligned.shape[-1] != self.target_dim:
-                raise ValueError(f"Aligned embedding dimension {aligned.shape[-1]} from source '{source}' does not match target {self.target_dim}")
-            logger.debug(f"Aligned embedding shape using adapter: {aligned.shape}") # DEBUG log
-            return aligned
+                embedding = embedding.unsqueeze(0)
 
-        if input_dim == 384:  # Special handling for symbolic embeddings (assuming 384 is symbolic dim, using validation_layer)
-            logger.debug(f"Aligning symbolic embedding from source '{source}' (dim=384) to target dim {self.target_dim} using validation_layer.")  # DEBUG log
-            aligned_validation = self.validation_layer(embedding)
-            logger.debug(f"Aligned embedding shape using validation_layer: {aligned_validation.shape}") # DEBUG log
-            return aligned_validation
+            input_dim = embedding.size(-1)
+            logger.debug(
+                f"Aligning embedding from source '{source}', original dim={input_dim}, target_dim={self.target_dim}, current embedding shape: {embedding.shape}")
 
+            # If already aligned, return immediately.
+            if input_dim == self.target_dim:
+                logger.debug(f"Embedding from source '{source}' already aligned (dim={input_dim}).")
+                return (embedding, 1.0) if return_confidence else embedding
 
-        logger.debug(f"Aligning embedding from source '{source}' (dim={input_dim}) to target dim {self.target_dim} using dynamic projection.")  # DEBUG log
-        projected_embedding = self._create_projection(input_dim)(embedding)
-        logger.debug(f"Aligned embedding shape using dynamic projection: {projected_embedding.shape}") # DEBUG log
-        return projected_embedding
+            # Use registered adapter if available.
+            if source in self.alignment_cache:
+                adapter = self.alignment_cache[source]
+                logger.debug(f"Using registered adapter for source '{source}'.")
+                if embedding.dim() == 1:
+                    embedding = embedding.unsqueeze(0)  # Ensure 2D input for adapter
+                aligned = adapter(embedding)
+                if aligned.shape[-1] != self.target_dim:
+                    raise ValueError(
+                        f"Aligned embedding dimension {aligned.shape[-1]} from source '{source}' does not match target {self.target_dim}")
+                logger.debug(f"Aligned embedding shape using adapter: {aligned.shape}")
+                return aligned
 
+            # Special handling for symbolic embeddings.
+            if input_dim == 384:
+                logger.debug(
+                    f"Aligning symbolic embedding from source '{source}' (dim=384) to target dim {self.target_dim} using validation_layer.")
+                aligned = self.validation_layer(embedding)
+                logger.debug(f"Aligned embedding shape using validation_layer: {aligned.shape}")
+                return aligned
+
+            # Dynamic projection for unknown dimensions.
+            logger.debug(
+                f"Aligning embedding from source '{source}' (dim={input_dim}) to target dim {self.target_dim} using dynamic projection.")
+            projection = self._create_projection(input_dim)
+            projected_embedding = projection(embedding)
+            logger.debug(f"Aligned embedding shape using dynamic projection: {projected_embedding.shape}")
+            return projected_embedding
+
+        except Exception as e:
+            logger.error(f"Error in alignment: {str(e)}")
+            raise
 
     def _create_projection(self, input_dim: int) -> nn.Module:
         """
@@ -111,7 +113,7 @@ class DimensionalityManager:
                 # Create a temporary projector if dimensions differ (should not happen if correctly configured).
                 projector = nn.Linear(original.size(-1), aligned.size(-1)).to(original.device)
                 original = projector(original)
-                logger.warning("Dimension mismatch in _calculate_alignment_confidence, using temporary projector.") # WARNING log
+                logger.warning("Dimension mismatch in _calculate_alignment_confidence, using temporary projector.")
             similarity = F.cosine_similarity(original, aligned).mean().item()
             return max(0.0, min(1.0, similarity))
 

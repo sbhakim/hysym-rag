@@ -167,7 +167,7 @@ if __name__ == "__main__":
 
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
-    max_hotpot_samples = 8
+    max_hotpot_samples = 4
 
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
