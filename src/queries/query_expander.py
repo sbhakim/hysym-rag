@@ -1,15 +1,15 @@
 # src/queries/query_expander.py
 
 import yaml
+import re
 from transformers import AutoTokenizer, AutoModel
 import torch
 import spacy
 import os
 from sentence_transformers import SentenceTransformer, util
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set, Any
 import logging
-
 
 class QueryExpander:
     """
@@ -126,7 +126,7 @@ class QueryExpander:
         # Check patterns
         for q_type, patterns in self.multi_hop_patterns.items():
             for pattern in patterns:
-                if any(re.match(p, query.lower()) for p in patterns):
+                if re.match(pattern, query.lower()):
                     self.pattern_cache[cache_key] = q_type
                     return q_type
 
@@ -229,7 +229,6 @@ class QueryExpander:
                 for idx, sim in enumerate(similarities[0]):
                     if sim > self.hop_threshold:
                         related.append(terms[idx])
-
             self.embedding_cache[cache_key] = related
             return related
 
@@ -253,3 +252,87 @@ class QueryExpander:
                     pairs.append((entities[i].text, entities[j].text))
 
         return pairs
+
+    # --- New Methods for Automatic Query Decomposition ---
+
+    def decompose_query(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Decompose complex queries into atomic reasoning steps.
+        """
+        doc = self.nlp(query)
+        reasoning_markers = {
+            'compare': 'comparison',
+            'cause': 'causality',
+            'before': 'temporal',
+            'after': 'temporal',
+            'because': 'causality'
+        }
+        steps = []
+        current_step = {'text': '', 'type': 'standard', 'entities': []}
+        for sent in doc.sents:
+            marker_type = None
+            for token in sent:
+                if token.text.lower() in reasoning_markers:
+                    marker_type = reasoning_markers[token.text.lower()]
+                    break
+            if marker_type:
+                if current_step['text']:
+                    steps.append(current_step)
+                current_step = {
+                    'text': sent.text.strip(),
+                    'type': marker_type,
+                    'entities': [ent.text for ent in sent.ents]
+                }
+            else:
+                if current_step['text']:
+                    current_step['text'] += " " + sent.text.strip()
+                else:
+                    current_step['text'] = sent.text.strip()
+                current_step['entities'].extend([ent.text for ent in sent.ents])
+        if current_step['text']:
+            steps.append(current_step)
+        return self._enrich_steps(steps)
+
+    def _enrich_steps(self, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enrich reasoning steps with additional metadata.
+        """
+        enriched_steps = []
+        for idx, step in enumerate(steps):
+            enriched = {
+                'step_id': idx,
+                'question': step['text'],
+                'type': step['type'],
+                'entities': list(set(step.get('entities', []))),
+                'complexity': self._calculate_step_complexity(step)
+            }
+            enriched_steps.append(enriched)
+        return enriched_steps
+
+    def _calculate_step_complexity(self, step: Dict[str, Any]) -> float:
+        """
+        Calculate complexity for a reasoning step based on text length and entity count.
+        """
+        text_length = len(step['text'].split())
+        entity_count = len(step.get('entities', []))
+        return min(0.5, (entity_count * 0.1 + text_length / 100.0))
+
+    def _get_similar_terms(self, term: str) -> List[str]:
+        """
+        Get similar terms to the given term using embedding similarity.
+        """
+        try:
+            term_emb = self.embedder.encode(term, convert_to_tensor=True)
+            corpus = [term] + [w for w in term.split()]
+            corpus_emb = self.embedder.encode(corpus, convert_to_tensor=True)
+            similarities = util.cos_sim(term_emb, corpus_emb)[0]
+            similar_terms = []
+            for idx, sim in enumerate(similarities):
+                if idx == 0:
+                    continue
+                if sim > self.hop_threshold:
+                    similar_terms.append(corpus[idx])
+            return similar_terms
+        except Exception as e:
+            self.logger.error(f"Error in getting similar terms for {term}: {str(e)}")
+            return []

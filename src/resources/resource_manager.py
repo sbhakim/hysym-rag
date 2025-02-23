@@ -110,55 +110,59 @@ class ResourceManager:
     def _establish_baseline(self) -> Dict[str, float]:
         """
         Establish initial resource usage baseline for academic measurements.
-        Takes multiple readings for stability.
+        Takes multiple readings for stability and removes outliers using the IQR method.
         """
         readings = []
-        for _ in range(5):  # Take 5 readings
-            readings.append(self._raw_resource_check())
-            time.sleep(0.1)
-        baseline = {resource: sum(r[resource] for r in readings) / len(readings)
-                    for resource in readings[0]}
+        num_samples = 10  # Increased sample size for better statistical significance
+        for _ in range(num_samples):
+            reading = self._raw_resource_check()
+            readings.append(reading)
+            time.sleep(0.2)  # Increased interval for more stable measurements
+
+        baseline = {}
+        for resource in readings[0].keys():
+            values = [r[resource] for r in readings]
+            q1 = np.percentile(values, 25)
+            q3 = np.percentile(values, 75)
+            iqr = q3 - q1
+            valid_values = [v for v in values if q1 - 1.5 * iqr <= v <= q3 + 1.5 * iqr]
+            if valid_values:
+                baseline[resource] = float(np.mean(valid_values))
+            else:
+                baseline[resource] = float(np.mean(values))
         self.logger.info(f"Established baseline resource usage: {baseline}")
         return baseline
 
     def check_resources(self) -> Dict[str, float]:
         """
-        Check current resource usage (CPU, memory, GPU).
-        Returns usage as fraction of capacity (0.0 - 1.0).
+        Check current resource usage with enhanced smoothing and stability.
+        Uses exponential moving average (EMA) smoothing.
         """
         with self._lock:
-            # Ensure non-negative values using max(0.0, ...)
-            cpu_usage = max(0.0, psutil.cpu_percent(interval=0.1) / 100.0)
-            mem_usage = max(0.0, psutil.virtual_memory().percent / 100.0)
-            gpu_usage = 0.0
+            # Get raw measurements
+            current_usage = self._raw_resource_check()
 
-            if self._gpu_available:
-                try:
-                    import pynvml
-                    pynvml.nvmlInit()
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                    gpu_usage = max(0.0, mem_info.used / mem_info.total)
-                    pynvml.nvmlShutdown()
-                except Exception as e:
-                    self.logger.error(f"Error getting GPU usage: {e}")
+            # Apply exponential moving average smoothing
+            alpha = 0.3  # Smoothing factor
+            for resource in current_usage:
+                if self.usage_history[resource]:
+                    previous = self.usage_history[resource][-1]
+                    current_usage[resource] = alpha * current_usage[resource] + (1 - alpha) * previous
 
-            resource_usage = {
-                "cpu": cpu_usage,
-                "memory": mem_usage,
-                "gpu": gpu_usage
-            }
+                # Apply a stability threshold to remove trivial fluctuations
+                if abs(current_usage[resource]) < 0.001:  # 0.1% threshold
+                    current_usage[resource] = 0.0
 
-            # Update usage history
-            self._update_usage_history(resource_usage)
-            return resource_usage
+            self._update_usage_history(current_usage)
+            return current_usage
 
     def _update_usage_history(self, usage: Dict[str, float]):
         """
         Update rolling history of resource usage.
         """
         for key in usage:
-            self.usage_history[key].append(usage[key])
+            validated = max(0.0, usage[key])  # Ensure no negative values are stored.
+            self.usage_history[key].append(validated)
             if len(self.usage_history[key]) > self.history_window_size:
                 self.usage_history[key].pop(0)
 
@@ -180,6 +184,32 @@ class ResourceManager:
                 optimal_allocations[resource] = new_target
             return optimal_allocations
 
+    def optimize_query_processing(self, query_complexity: float, current_usage: Dict[str, float]) -> Dict[str, Any]:
+        """
+        Optimize resource allocation and processing parameters based on query complexity and current usage.
+        Returns an optimization plan with device mapping, precision mode, and batch size adjustments.
+        """
+        optimization_plan = {
+            'device_mapping': {},
+            'batch_size': 1,
+            'precision': 'fp32'
+        }
+        # Adjust based on GPU usage if available
+        if current_usage.get('gpu', 0) > self.thresholds.get('gpu', {}).get("base_threshold", 0.8) * 0.8:
+            optimization_plan.update({
+                'device_mapping': {
+                    'embedding': 'cpu',
+                    'preprocessing': 'cpu',
+                    'inference': 'gpu'
+                },
+                'precision': 'fp16',
+                'batch_size': max(1, 1)  # Adjust batch size as needed
+            })
+        # Adjust based on query complexity
+        if query_complexity > 0.7:
+            optimization_plan['batch_size'] = max(1, optimization_plan['batch_size'] // 2)
+        return optimization_plan
+
     def apply_optimal_allocations(self, allocations: Dict[str, float]):
         """
         Apply new resource allocations (placeholder).
@@ -196,7 +226,8 @@ class ResourceManager:
             backoff_factor = self.recovery_config.get("backoff_factor", 1.5)
             max_retries = self.recovery_config.get("max_retries", 3)
             grace_period = self.recovery_config.get("grace_period", 10)
-            self.logger.warning(f"Recovering from overload: backoff={backoff_factor}, retries={max_retries}, grace={grace_period}")
+            self.logger.warning(
+                f"Recovering from overload: backoff={backoff_factor}, retries={max_retries}, grace={grace_period}")
             time.sleep(grace_period)
 
     def is_overloaded(self, usage: Optional[Dict[str, float]] = None) -> bool:
@@ -249,13 +280,41 @@ class ResourceManager:
 
     def get_resource_delta(self, current: Dict[str, float]) -> Dict[str, float]:
         """
-        Calculate resource usage changes relative to the established baseline.
-        Returns absolute differences.
+        Calculate validated resource usage changes relative to the established baseline.
+        If current usage is below baseline, delta is set to 0.
+        Otherwise, delta is normalized by the baseline and clamped between 0.0 and 1.0.
         """
-        return {
-            resource: abs(current[resource] - self.baseline.get(resource, 0.0))
-            for resource in current
-        }
+        try:
+            deltas = {}
+            stability_threshold = 0.001  # 0.1% threshold
+
+            for resource in current:
+                baseline_value = self.baseline.get(resource, 0.0)
+                raw_delta = current[resource] - baseline_value
+
+                # If current usage is lower than baseline, set delta to 0
+                if raw_delta < stability_threshold:
+                    deltas[resource] = 0.0
+                    continue
+
+                # Normalize delta relative to baseline (if baseline is nonzero)
+                if baseline_value > stability_threshold:
+                    normalized_delta = raw_delta / baseline_value
+                else:
+                    normalized_delta = raw_delta if raw_delta > 0 else 0.0
+
+                normalized_delta = max(0.0, min(normalized_delta, 1.0))
+                deltas[resource] = normalized_delta
+
+                if normalized_delta > 0.1:
+                    self.logger.info(
+                        f"Significant {resource} change: current={current[resource]:.3f}, "
+                        f"baseline={baseline_value:.3f}, delta={normalized_delta:.3f}"
+                    )
+            return deltas
+        except Exception as e:
+            self.logger.error(f"Error calculating resource delta: {str(e)}")
+            return {resource: 0.0 for resource in current}
 
     def _calculate_stability(self, values: List[float]) -> str:
         """
@@ -279,7 +338,6 @@ class ResourceManager:
         avg_usage = self.get_average_usage()
         scores = []
         for resource, usage in avg_usage.items():
-            # Avoid division by zero; assume perfect efficiency if usage is 0
             score = 1.0 / usage if usage > 0 else 1.0
             scores.append(score)
         return float(np.mean(scores)) if scores else 0.0
@@ -287,9 +345,7 @@ class ResourceManager:
     def _count_recovery_events(self) -> int:
         """
         Stub method to count recovery events.
-        In a complete implementation, this would track the number of times recovery has been triggered.
         """
-        # For now, return 0 as a placeholder.
         return 0
 
     def get_academic_metrics(self) -> Dict[str, Any]:

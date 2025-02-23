@@ -41,7 +41,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
 ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 def load_hotpotqa(hotpotqa_path, max_samples=None):
     """
@@ -85,8 +85,8 @@ if __name__ == "__main__":
     ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
     logging.getLogger('transformers').setLevel(logging.ERROR)
     logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
-    logging.getLogger('DimensionalityManager').setLevel(logging.INFO)
-    logger.setLevel(logging.INFO)
+    logging.getLogger('DimensionalityManager').setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
 
     # 1. Load configuration
     print("Loading configuration...")
@@ -121,9 +121,10 @@ if __name__ == "__main__":
     # 6. Initialize the Graph-Based Symbolic Reasoner (Pass dim_manager)
     print("Initializing Graph-Based Symbolic Reasoner...")
     try:
+        # Adjusted match_threshold to 0.1 to leverage enhanced rule matching improvements
         symbolic = GraphSymbolicReasoner(
             rules_file=rules_path,
-            match_threshold=0.25,
+            match_threshold=0.1,
             max_hops=5,
             embedding_model='all-MiniLM-L6-v2',
             device=device,
@@ -138,7 +139,7 @@ if __name__ == "__main__":
         print("Continuing with empty rule set...")
         symbolic = GraphSymbolicReasoner(
             rules_file=rules_path,
-            match_threshold=0.25,
+            match_threshold=0.1,
             max_hops=5,
             embedding_model='all-MiniLM-L6-v2',
             device=device,
@@ -459,3 +460,4 @@ if __name__ == "__main__":
     print("\n=== End of Run ===")
     print("\n=== Academic Evaluation Results ===")
     print(json.dumps(academic_report, indent=2))
+

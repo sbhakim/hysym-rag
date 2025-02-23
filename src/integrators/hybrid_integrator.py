@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from collections import defaultdict
+import math
+from datetime import datetime
 
 from src.knowledge_integrator import AlignmentLayer
 from src.reasoners.rg_retriever import RuleGuidedRetriever
@@ -89,10 +91,12 @@ class HybridIntegrator:
                                                                          supporting_facts=supporting_facts)
         else:
             filtered_context = self.rg_retriever.filter_context_by_rules(context, symbolic_guidance)
-        neural_answer = self.neural.retrieve_answer(filtered_context, query, symbolic_guidance=symbolic_guidance,
-                                                    query_complexity=0.5)
-        fused_answer, confidence, debug_info = self._fuse_symbolic_neural(query, symbolic_result, neural_answer,
-                                                                          query_complexity=0.5)
+        neural_answer = self.neural.retrieve_answer(filtered_context, query,
+                                                     symbolic_guidance=symbolic_guidance,
+                                                     query_complexity=0.5)
+        fused_answer, confidence, debug_info = self._fuse_symbolic_neural(
+            query, symbolic_result, neural_answer, query_complexity=0.5
+        )
         return (fused_answer, "hybrid")
 
     def _handle_multi_hop_query(self, query: str, context: str, symbolic_result: List[str],
@@ -101,10 +105,13 @@ class HybridIntegrator:
         Enhanced multi-hop query handling with robust reasoning chain construction.
         """
         try:
-            # Extract reasoning steps with improved decomposition
-            reasoning_chain = self._extract_reasoning_chain(query, context)
+            # Use query_expander's decomposition if available; else fallback to basic extraction.
+            if self.query_expander and hasattr(self.query_expander, 'decompose_query'):
+                reasoning_chain = self.query_expander.decompose_query(query)
+            else:
+                reasoning_chain = self._extract_reasoning_chain(query, context)
             if not reasoning_chain:
-                logger.warning("Could not extract reasoning chain")
+                self.logger.warning("Could not extract reasoning chain")
                 return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
 
             intermediate_results = []
@@ -112,29 +119,25 @@ class HybridIntegrator:
             accumulated_knowledge = ""
 
             for hop_idx, hop in enumerate(reasoning_chain):
-                # Prepare symbolic guidance for this hop
+                # Get symbolic guidance for this hop
                 symbolic_guidance = self._get_symbolic_guidance(symbolic_result, hop)
-
                 # Update context with accumulated knowledge
                 enriched_context = current_context
                 if accumulated_knowledge:
                     enriched_context = f"{current_context}\n\nPrevious findings:\n{accumulated_knowledge}"
-
                 # Filter context for this hop
                 filtered_context = self.rg_retriever.filter_context_by_rules(
                     enriched_context,
                     symbolic_guidance,
                     query_complexity=0.7
                 )
-
-                # Get hop response
+                # Get hop response using both symbolic and neural components
                 hop_response = self.neural.retrieve_answer(
                     filtered_context,
                     hop['question'],
                     symbolic_guidance=symbolic_guidance,
                     query_complexity=0.7
                 )
-
                 if hop_response and not hop_response.startswith("Error"):
                     intermediate_results.append({
                         'hop_idx': hop_idx,
@@ -143,15 +146,21 @@ class HybridIntegrator:
                         'context_used': filtered_context
                     })
                     accumulated_knowledge += f"\nStep {hop_idx + 1}: {hop_response}"
-                    # Optionally update current_context for next hop:
+                    # Optionally update current_context for subsequent hops
                     current_context += " " + hop_response
 
-            # Generate final answer with reasoning chain
-            final_answer = self._combine_hop_results(intermediate_results, reasoning_chain)
+            # Combine hop responses into a final answer
+            final_answer = self._combine_hop_results(
+                [res['response'] for res in intermediate_results],
+                reasoning_chain
+            )
 
-            # Update metrics
+            # Update integration metrics
             self.integration_metrics['reasoning_steps'].append(len(reasoning_chain))
-            self.integration_metrics['step_success'].append(len(intermediate_results) / len(reasoning_chain))
+            if len(reasoning_chain) > 0:
+                self.integration_metrics['step_success'].append(len(intermediate_results) / len(reasoning_chain))
+            else:
+                self.integration_metrics['step_success'].append(0)
 
             # Final fusion with symbolic knowledge
             fused_answer, confidence, debug_info = self._fuse_symbolic_neural(
@@ -160,10 +169,11 @@ class HybridIntegrator:
             return (fused_answer, "hybrid")
 
         except Exception as e:
-            logger.error(f"Error in multi-hop processing: {str(e)}")
+            self.logger.error(f"Error in multi-hop processing: {str(e)}")
             return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
 
     def _extract_reasoning_chain(self, query: str, context: str) -> List[Dict[str, str]]:
+        # Basic fallback: decompose query by splitting on 'and'
         subqueries = [q.strip() for q in query.split("and") if q.strip()]
         return [{"question": subq} for subq in subqueries]
 
@@ -253,7 +263,6 @@ class HybridIntegrator:
                 'reasoning_depth': {'avg_steps': 0.0, 'max_steps': 0},
                 'fusion_quality': {'mean': 0.0, 'std': 0.0}
             }
-
         return {
             'alignment_quality': {
                 'mean': float(np.mean(self.integration_metrics['alignment_scores'])),
@@ -290,26 +299,3 @@ class HybridIntegrator:
 
     def _set_cache(self, key: str, result: Tuple[str, str]):
         self.cache[key] = (result, time.time())
-
-    def get_integration_metrics(self) -> Dict[str, Any]:
-        if not self.integration_metrics['reasoning_steps']:
-            return {
-                'alignment_quality': {'mean': 0.0, 'std': 0.0},
-                'reasoning_depth': {'avg_steps': 0.0, 'max_steps': 0},
-                'fusion_quality': {'mean': 0.0, 'std': 0.0}
-            }
-
-        return {
-            'alignment_quality': {
-                'mean': float(np.mean(self.integration_metrics['alignment_scores'])),
-                'std': float(np.std(self.integration_metrics['alignment_scores']))
-            },
-            'reasoning_depth': {
-                'avg_steps': float(np.mean(self.integration_metrics['reasoning_steps'])),
-                'max_steps': max(self.integration_metrics['reasoning_steps'])
-            },
-            'fusion_quality': {
-                'mean': float(np.mean(self.integration_metrics['fusion_quality'])),
-                'std': float(np.std(self.integration_metrics['fusion_quality']))
-            }
-        }

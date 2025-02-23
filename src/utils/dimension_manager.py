@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class DimensionalityManager:
     """
     Manages embedding dimensions across the system to ensure consistency.
-    Provides caching and validation of dimension transformations.
+    Provides caching and validation of dimension transformations with adaptive projection and error recovery.
     """
 
     def __init__(self, target_dim: int = 768, device: Optional[torch.device] = None):
@@ -21,7 +21,7 @@ class DimensionalityManager:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.alignment_cache: Dict[str, nn.Module] = {}
         self.mismatch_counts: Dict[str, int] = defaultdict(int)
-        # Add a validation layer for explicit 384 to 768 conversion
+        # Validation layer for explicit 384 to 768 conversion
         self.validation_layer = nn.Sequential(
             nn.Linear(384, target_dim),  # Explicit conversion from 384 to 768
             nn.LayerNorm(target_dim),
@@ -41,7 +41,7 @@ class DimensionalityManager:
                          source: str,
                          return_confidence: bool = False) -> torch.Tensor:
         """
-        Enhanced embedding alignment with improved validation and error handling.
+        Enhanced embedding alignment with adaptive projection, improved validation, and error handling.
         """
         try:
             # Ensure embedding is at least 2D.
@@ -50,7 +50,8 @@ class DimensionalityManager:
 
             input_dim = embedding.size(-1)
             logger.debug(
-                f"Aligning embedding from source '{source}', original dim={input_dim}, target_dim={self.target_dim}, current embedding shape: {embedding.shape}")
+                f"Aligning embedding from source '{source}', original dim={input_dim}, target_dim={self.target_dim}, current embedding shape: {embedding.shape}"
+            )
 
             # If already aligned, return immediately.
             if input_dim == self.target_dim:
@@ -66,33 +67,36 @@ class DimensionalityManager:
                 aligned = adapter(embedding)
                 if aligned.shape[-1] != self.target_dim:
                     raise ValueError(
-                        f"Aligned embedding dimension {aligned.shape[-1]} from source '{source}' does not match target {self.target_dim}")
+                        f"Aligned embedding dimension {aligned.shape[-1]} from source '{source}' does not match target {self.target_dim}"
+                    )
                 logger.debug(f"Aligned embedding shape using adapter: {aligned.shape}")
                 return aligned
 
-            # Special handling for symbolic embeddings.
+            # Special handling for symbolic embeddings (input_dim == 384).
             if input_dim == 384:
                 logger.debug(
-                    f"Aligning symbolic embedding from source '{source}' (dim=384) to target dim {self.target_dim} using validation_layer.")
+                    f"Aligning symbolic embedding from source '{source}' (dim=384) to target dim {self.target_dim} using validation_layer."
+                )
                 aligned = self.validation_layer(embedding)
                 logger.debug(f"Aligned embedding shape using validation_layer: {aligned.shape}")
                 return aligned
 
             # Dynamic projection for unknown dimensions.
             logger.debug(
-                f"Aligning embedding from source '{source}' (dim={input_dim}) to target dim {self.target_dim} using dynamic projection.")
+                f"Aligning embedding from source '{source}' (dim={input_dim}) to target dim {self.target_dim} using dynamic projection."
+            )
             projection = self._create_projection(input_dim)
             projected_embedding = projection(embedding)
             logger.debug(f"Aligned embedding shape using dynamic projection: {projected_embedding.shape}")
             return projected_embedding
 
         except Exception as e:
-            logger.error(f"Error in alignment: {str(e)}")
+            logger.error(f"Error in alignment for source '{source}': {str(e)}")
             raise
 
     def _create_projection(self, input_dim: int) -> nn.Module:
         """
-        Creates a new projection layer to map embeddings from input_dim to target_dim.
+        Creates a new projection layer to map embeddings from input_dim to target_dim with adaptive dropout.
         """
         projection = nn.Sequential(
             nn.Linear(input_dim, self.target_dim),
@@ -100,6 +104,10 @@ class DimensionalityManager:
             nn.ReLU(),
             nn.Dropout(0.1)
         )
+        # Initialize weights with smart scaling
+        with torch.no_grad():
+            std = (2.0 / (input_dim + self.target_dim)) ** 0.5
+            projection[0].weight.data.normal_(0.0, std)
         return projection.to(self.device)
 
     def _calculate_alignment_confidence(self,
