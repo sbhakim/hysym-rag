@@ -63,7 +63,7 @@ class MetricsCollector:
         self.start_time = datetime.now()
 
         # --- Enhanced Academic Metrics Tracking ---
-        # Detailed reasoning metrics
+        # Detailed reasoning metrics: chain length, confidence scores, inference depth, etc.
         self.reasoning_metrics = {
             'chain_length': [],
             'confidence_scores': [],
@@ -213,7 +213,6 @@ class MetricsCollector:
                 'percentile_95': float(np.percentile(processing_times, 95))
             }
         else:
-            # If no processing_times, return zeroed stats
             stats['processing_time'] = {
                 'mean': 0.0, 'std': 0.0, 'median': 0.0, 'percentile_95': 0.0
             }
@@ -356,10 +355,12 @@ class MetricsCollector:
             if values:
                 mean_val = float(np.mean(values))
                 peak_val = float(np.max(values))
+                # Prevent negative efficiency scores; if peak is zero, set score to None.
+                efficiency_score = max(0.0, 1 - (mean_val / peak_val)) if peak_val != 0 else None
                 efficiency_metrics[resource] = {
                     'mean_usage': mean_val,
                     'peak_usage': peak_val,
-                    'efficiency_score': float(1 - (mean_val / peak_val)) if peak_val != 0 else None
+                    'efficiency_score': efficiency_score
                 }
             else:
                 efficiency_metrics[resource] = {
@@ -416,7 +417,6 @@ class MetricsCollector:
             impact_metrics = {}
             # Compare mean values from baseline and ablated reports
             for metric_key in baseline:
-                # Verify both baseline and ablated contain 'metric_key'
                 if (metric_key in ablated
                     and isinstance(baseline[metric_key], dict)
                     and isinstance(ablated[metric_key], dict)
@@ -431,9 +431,7 @@ class MetricsCollector:
                     impact_metrics[f'{metric_key}_impact'] = relative_change
                 else:
                     impact_metrics[f'{metric_key}_impact'] = "metric_unavailable"
-
             ablation_analysis[component] = impact_metrics
-
         return ablation_analysis
 
     def _calculate_significance(self, baseline_vals: List[float], ablated_vals: List[float]) -> Dict[str, float]:

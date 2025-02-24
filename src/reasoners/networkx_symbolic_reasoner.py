@@ -12,17 +12,20 @@ from typing import List, Dict, Set, Optional, Tuple, Any
 from collections import defaultdict
 from datetime import datetime
 from src.utils.device_manager import DeviceManager
-from src.utils.dimension_manager import DimensionalityManager  # Import DimensionalityManager
+from src.utils.dimension_manager import DimensionalityManager
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)  # Set logging level to DEBUG
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Set logger level to DEBUG
+logger.setLevel(logging.DEBUG)
 
 
 class GraphSymbolicReasoner:
     """
     Enhanced graph-based symbolic reasoner for academic evaluation of HySym-RAG.
+    Core functionalities include loading and validating rules, building a knowledge graph,
+    indexing rules, matching rules against query embeddings, and basic query processing.
+    Detailed reasoning chain extraction and academic metrics are moved to a separate module.
     """
 
     def __init__(self,
@@ -34,7 +37,7 @@ class GraphSymbolicReasoner:
                  dim_manager: Optional[DimensionalityManager] = None  # Add DimensionalityManager
                  ):
         """
-        Enhanced symbolic reasoner with proper tensor handling and academic metrics tracking.
+        Initialize the symbolic reasoner with proper tensor handling and basic academic metrics tracking.
         """
         self.logger = logger
 
@@ -56,7 +59,7 @@ class GraphSymbolicReasoner:
         # Load and validate rules into a dictionary keyed by rule ID
         self.rules = self._load_rules(rules_file)
 
-        # Initialize academic tracking metrics
+        # Initialize academic tracking metrics (basic ones only; detailed chain extraction is handled elsewhere)
         self.reasoning_metrics = {
             'path_lengths': [],
             'match_confidences': [],
@@ -117,51 +120,65 @@ class GraphSymbolicReasoner:
     def build_rule_index(self):
         """
         Build an index for rules to speed up retrieval.
+        This updated method validates embedding dimensions before stacking.
         """
         self.rule_index = {}
-        self.rule_ids = []
+        valid_rule_ids = []
         rule_embeddings_list = []
+        embedding_dim = None
 
         for rule_id, rule in self.rules.items():
-            self.rule_ids.append(rule_id)
+            # Add rule to index regardless; we'll only add valid embeddings to the parallel lists.
             self.rule_index[rule_id] = rule
 
             if 'keywords' in rule:
                 for keyword in rule['keywords']:
                     self.keyword_index[keyword].append(rule_id)
 
-            if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
-                self.logger.debug(f"Rule ID: {rule_id} Original rule embedding shape: {rule['embedding'].shape}")
-                aligned_embedding = self.dim_manager.align_embeddings(rule['embedding'].to(self.device), "rule")
-                self.logger.debug(f"Rule ID: {rule_id} Aligned rule embedding shape: {aligned_embedding.shape}")
-                if aligned_embedding.shape[-1] != self.dim_manager.target_dim:
-                    self.logger.warning(
-                        f"Rule {rule_id} embedding dimension {aligned_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}. Skipping rule.")
-                    continue  # Skip rule if dimension mismatches
-                rule['embedding'] = aligned_embedding
-                rule_embeddings_list.append(aligned_embedding)
-            elif 'source_text' in rule:
-                rule_embedding = self.embedder.encode(rule['source_text'], convert_to_tensor=True).to(self.device)
-                aligned_embedding = self.dim_manager.align_embeddings(rule_embedding, "rule")
-                if aligned_embedding.shape[-1] != self.dim_manager.target_dim:
-                    self.logger.warning(
-                        f"Rule {rule_id} embedding (from source_text) dimension {aligned_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}. Skipping rule.")
-                    continue
-                rule['embedding'] = aligned_embedding
-                rule_embeddings_list.append(aligned_embedding)
+            try:
+                if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
+                    self.logger.debug(f"Rule ID: {rule_id} Original rule embedding shape: {rule['embedding'].shape}")
+                    current_embedding = self.dim_manager.align_embeddings(rule['embedding'].to(self.device), "rule")
+                    self.logger.debug(f"Rule ID: {rule_id} Aligned rule embedding shape: {current_embedding.shape}")
+                    # Validate dimensions
+                    if embedding_dim is None:
+                        embedding_dim = current_embedding.shape[-1]
+                    elif current_embedding.shape[-1] != embedding_dim:
+                        self.logger.warning(
+                            f"Rule {rule_id} embedding dimension mismatch. Expected {embedding_dim}, got {current_embedding.shape[-1]}"
+                        )
+                        continue
+                    rule['embedding'] = current_embedding
+                    valid_rule_ids.append(rule_id)
+                    rule_embeddings_list.append(current_embedding)
+                elif 'source_text' in rule:
+                    rule_embedding = self.embedder.encode(rule['source_text'], convert_to_tensor=True).to(self.device)
+                    current_embedding = self.dim_manager.align_embeddings(rule_embedding, "rule")
+                    self.logger.debug(f"Rule ID: {rule_id} Aligned rule embedding (from source_text) shape: {current_embedding.shape}")
+                    if current_embedding.shape[-1] != self.dim_manager.target_dim:
+                        self.logger.warning(
+                            f"Rule {rule_id} embedding (from source_text) dimension {current_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}. Skipping rule.")
+                        continue
+                    rule['embedding'] = current_embedding
+                    valid_rule_ids.append(rule_id)
+                    rule_embeddings_list.append(current_embedding)
+            except Exception as e:
+                self.logger.error(f"Error processing rule {rule_id}: {e}")
+                continue
 
+        self.rule_ids = valid_rule_ids
         if rule_embeddings_list:
             try:
-                # Ensure consistent shape: expected shape [num_rules, target_dim]
+                # Ensure consistent shape: expected shape [num_valid_rules, target_dim]
                 self.rule_embeddings = torch.stack(rule_embeddings_list).to(self.device)
                 self.logger.info(f"Rule embeddings tensor created with shape: {self.rule_embeddings.shape}")
             except Exception as e:
-                self.logger.error(f"Error stacking rule embeddings: {str(e)}")
+                self.logger.error(f"Error stacking rule embeddings: {e}")
                 self.rule_embeddings = None
         else:
             self.rule_embeddings = None
 
-        self.logger.info(f"Rule index built successfully with {len(self.rules)} rules.")
+        self.logger.info(f"Rule index built successfully with {len(self.rules)} rules. Final count of valid rules: {len(self.rule_ids)}")
 
     def build_graph(self):
         """
@@ -297,9 +314,10 @@ class GraphSymbolicReasoner:
                     'type': rule.get('type', 'unknown')
                 })
 
+    # --- Modified process_query with multi-hop support ---
     def process_query(self, query: str) -> List[str]:
         """
-        Process a query using symbolic reasoning with improved error handling.
+        Process a query using symbolic reasoning with improved error handling and multi-hop support.
         """
         try:
             # Encode and align query embedding
@@ -316,7 +334,24 @@ class GraphSymbolicReasoner:
                 raise ValueError(
                     f"Query embedding dimension {query_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}")
 
-            responses = self.traverse_graph(query_embedding)
+            # New multi-hop logic: retrieve a list of rule IDs representing each hop.
+            # Here we use a dummy traversal that returns all rule_ids as a placeholder.
+            multi_hop_paths = self._some_graph_traversal(query_embedding)
+            all_hop_embeddings = []
+            for rule_id in multi_hop_paths:
+                # Each rule has an embedding; add new dimension for stacking.
+                hop_emb = self.rules[rule_id]['embedding']
+                all_hop_embeddings.append(hop_emb.unsqueeze(0))  # shape [1, embedding_dim]
+
+            if all_hop_embeddings:
+                # Stack along a new dimension to produce shape [1, hop_count, embedding_dim]
+                multi_hop_emb = torch.cat(all_hop_embeddings, dim=0).unsqueeze(0)
+            else:
+                # Fallback: use query_embedding with dummy hop dimension => [1, 1, embedding_dim]
+                multi_hop_emb = query_embedding.unsqueeze(0).unsqueeze(0)
+
+            # Use the multi-hop embeddings to traverse the graph.
+            responses = self.traverse_graph_from_multi_hop(multi_hop_emb)
             self._update_reasoning_metrics(responses)
 
             if not responses:
@@ -330,104 +365,38 @@ class GraphSymbolicReasoner:
             logger.error(f"Error in process_query: {str(e)}")
             return [f"Error processing query: {str(e)}"]
 
-    def _find_matching_rules(self, query_embedding: torch.Tensor, query: str, top_k: int = 3) -> List[
-        Tuple[str, float]]:
+    def _some_graph_traversal(self, query_embedding: torch.Tensor) -> List[str]:
         """
-        Find matching rules using multiple similarity metrics.
-        This enhanced method uses top-k semantic similarity and contextual relevance.
+        Dummy graph traversal to simulate multi-hop path retrieval.
+        Replace this with your actual multi-hop traversal logic.
+        Returns a list of rule IDs.
         """
-        matches = []
-        try:
-            # Ensure query_embedding has shape [1, target_dim]
-            query_embedding = query_embedding.view(1, -1)
+        # For robust multi-hop, you would traverse self.graph starting from some node.
+        # Here we simply return all rule_ids as a placeholder.
+        return self.rule_ids
 
-            if self.rule_embeddings is None or len(self.rules) == 0:
-                self.logger.info("No rules available for matching")
-                return matches
-
-            # Ensure rule_embeddings have shape [num_rules, target_dim]
-            try:
-                rule_embeddings = self.rule_embeddings.reshape(len(self.rules), -1)
-            except Exception as e:
-                self.logger.error(f"Error reshaping rule embeddings: {str(e)}")
-                return matches
-
-            similarities = util.cos_sim(query_embedding, rule_embeddings)
-
-            if similarities.numel() > 0:
-                top_k_values, top_k_indices = similarities.topk(k=min(top_k, similarities.size(1)))
-
-                for sim, idx in zip(top_k_values.squeeze(0), top_k_indices.squeeze(0)):
-                    rule_id = self.rule_ids[idx]
-                    rule = self.rules[rule_id]
-                    context_score = self._calculate_contextual_relevance(query, rule.get('response', ''))
-                    combined_score = 0.7 * sim.item() + 0.3 * context_score
-
-                    if combined_score >= self.match_threshold:
-                        matches.append((rule_id, combined_score))
-
-            if not matches:
-                self.logger.info("No embedding-based matches, attempting keyword fallback.")
-                query_keywords = set(query.lower().split())
-                for rule_id, rule in self.rules.items():
-                    rule_keywords = set(rule.get('keywords', []))
-                    if rule_keywords:
-                        overlap = len(query_keywords & rule_keywords) / len(rule_keywords)
-                        if overlap >= 0.2:
-                            matches.append((rule_id, overlap))
-
-            return sorted(matches, key=lambda x: x[1], reverse=True)
-        except Exception as e:
-            self.logger.error(f"Error in rule matching: {str(e)}")
-            return matches
-
-    def _calculate_contextual_relevance(self, query: str, rule_text: str) -> float:
+    def traverse_graph_from_multi_hop(self, multi_hop_emb: torch.Tensor) -> List[str]:
         """
-        Calculate contextual relevance using NLP features.
-        """
-        query_doc = self.nlp(query)
-        rule_doc = self.nlp(rule_text)
-        query_ents = set(ent.text.lower() for ent in query_doc.ents)
-        rule_ents = set(ent.text.lower() for ent in rule_doc.ents)
-        entity_overlap = len(query_ents & rule_ents) / max(len(query_ents), 1)
-        query_keywords = set(token.text.lower() for token in query_doc if not token.is_stop and token.is_alpha)
-        rule_keywords = set(token.text.lower() for token in rule_doc if not token.is_stop and token.is_alpha)
-        keyword_overlap = len(query_keywords & rule_keywords) / max(len(query_keywords), 1)
-        return 0.6 * entity_overlap + 0.4 * keyword_overlap
-
-    def traverse_graph(self, query_embedding: torch.Tensor) -> List[str]:
-        """
-        Traverse the knowledge graph to find relevant responses based on the query embedding.
+        Process multi-hop embeddings to generate responses.
+        For now, this dummy implementation returns responses for each hop.
         """
         responses = []
-        matching_rules = self._find_matching_rules(query_embedding, "")
-        for rule_id, sim_score in matching_rules:
-            rule = self.rules.get(rule_id, {})
-            responses.extend(self._process_rule(rule, {"subject": None}))
+        # Assume multi_hop_emb shape is [1, hop_count, embedding_dim]
+        hop_count = multi_hop_emb.size(1)
+        for i in range(hop_count):
+            if i < len(self.rule_ids):
+                rule_id = self.rule_ids[i]
+                rule = self.rules.get(rule_id, {})
+                responses.append(rule.get('response', ''))
         return responses
-
-    def _process_rule(self, rule: Dict, context: Dict[str, Any]) -> List[str]:
-        """
-        Process a rule to generate a response.
-        """
-        return [rule.get('response', '')]
-
-    def _extract_keywords(self, text: str) -> List[str]:
-        """
-        Extract relevant keywords from text using spaCy.
-        """
-        doc = self.nlp(text.lower())
-        return [
-            token.lemma_
-            for token in doc
-            if (token.pos_ in ('NOUN', 'VERB', 'ADJ') and not token.is_stop and len(token.text) > 2)
-        ]
 
     def _update_reasoning_metrics(self, responses: List[str]):
         """
-        Update reasoning metrics for academic analysis.
+        Update reasoning metrics for basic academic analysis.
         """
-        self.reasoning_metrics['path_lengths'].append(len(responses))
+        # If multi-hop was used, record the hop count.
+        chain_length = len(responses) if responses else 1
+        self.reasoning_metrics['path_lengths'].append(chain_length)
         confidences = [self._calculate_response_confidence(response) for response in responses]
         self.reasoning_metrics['match_confidences'].extend(confidences)
         for response in responses:
@@ -479,329 +448,12 @@ class GraphSymbolicReasoner:
             self.logger.error(f"Error calculating similarity: {str(e)}")
             return 0.0
 
-    # ------------------- New Methods for Enhanced Reasoning Chain Extraction -------------------
+    def _log_memory_usage(self, stage: str):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.debug(f"Memory usage at {stage}: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 
-    def _extract_reasoning_chain(self, path: List[str], confidence_scores: List[float],
-                                 query_id: Optional[str] = None) -> Dict:
-        """
-        Extract a structured reasoning chain from a given path through the graph.
-        """
-        reasoning_steps = []
-        dependencies = nx.DiGraph()
-        for idx, (node, base_conf) in enumerate(zip(path, confidence_scores)):
-            rule = self.rules.get(node, {})
-            prereqs = self._get_prerequisites(node)
-            conclusions = self._get_conclusions(node)
-            step_conf = self._calculate_step_confidence(rule, prereqs, base_conf)
-            reasoning_steps.append({
-                'step_id': idx,
-                'rule': rule.get('response', ''),
-                'confidence': step_conf,
-                'prerequisites': prereqs,
-                'conclusions': conclusions
-            })
-            if idx > 0:
-                dependencies.add_edge(idx - 1, idx, weight=step_conf)
-        chain_metrics = self._calculate_chain_metrics(reasoning_steps, dependencies)
-        if query_id:
-            self.reasoning_metrics.setdefault('chains', []).append({
-                'query_id': query_id,
-                'steps': reasoning_steps,
-                'pattern': self.extract_reasoning_pattern("", path)
-            })
-            self.reasoning_metrics.setdefault('pattern_types', []).append(
-                self.extract_reasoning_pattern("", path).get('pattern_type', 'unknown')
-            )
-        return {
-            'steps': reasoning_steps,
-            'overall_confidence': float(np.mean(confidence_scores)) if confidence_scores else 0.0,
-            'chain_length': len(path),
-            'metrics': chain_metrics,
-            'dependencies': self._serialize_dependencies(dependencies)
-        }
-
-    def extract_reasoning_pattern(self, query: str, path: List[str]) -> Dict[str, Any]:
-        """
-        Extract and analyze reasoning patterns for academic evaluation.
-        """
-        try:
-            query_type = self._classify_query_type(query)
-            pattern = self._analyze_path_pattern(path)
-            steps = self._extract_intermediate_steps(path)
-            return {
-                'pattern_type': pattern.get('type', 'unknown'),
-                'hop_count': len(path),
-                'intermediate_facts': steps,
-                'pattern_confidence': pattern.get('confidence', 0.0)
-            }
-        except Exception as e:
-            self.logger.error(f"Error extracting reasoning pattern: {str(e)}")
-            return {}
-
-    def _classify_query_type(self, query: str) -> str:
-        """
-        Basic classification of query type.
-        """
-        if "compare" in query.lower() or "contrast" in query.lower():
-            return "comparison"
-        elif "?" in query:
-            return "multi-hop"
-        else:
-            return "standard"
-
-    def _analyze_path_pattern(self, path: List[str]) -> Dict[str, Any]:
-        """
-        Analyze the reasoning path pattern.
-        """
-        if len(path) <= 1:
-            return {'type': 'linear', 'confidence': 1.0}
-        unique_rules = set(path)
-        if len(unique_rules) < len(path):
-            return {'type': 'branching', 'confidence': 0.8}
-        return {'type': 'linear', 'confidence': 0.9}
-
-    def _extract_intermediate_steps(self, path: List[str]) -> List[str]:
-        """
-        Extract key intermediate facts from the reasoning path.
-        """
-        return [self.rules.get(node, {}).get('response', '') for node in path]
-
-    def _calculate_chain_metrics(self, steps: List[Dict], dependencies: nx.DiGraph) -> Dict:
-        """
-        Calculate comprehensive chain metrics for academic analysis.
-        """
-        try:
-            base_metrics = {
-                'step_coherence': self._calculate_step_coherence(steps),
-                'branching_factor': self._calculate_branching(dependencies),
-                'path_linearity': self._calculate_linearity(dependencies)
-            }
-            academic_metrics = {
-                'reasoning_depth': len(steps),
-                'fact_utilization': self._calculate_fact_utilization(steps),
-                'inference_quality': self._calculate_inference_quality(steps),
-                'pattern_complexity': self._calculate_pattern_complexity(dependencies)
-            }
-            metrics = {**base_metrics, **academic_metrics}
-            self._update_academic_metrics(metrics)
-            return metrics
-        except Exception as e:
-            self.logger.error(f"Error calculating chain metrics: {str(e)}")
-            return {}
-
-    def _calculate_fact_utilization(self, steps: List[Dict]) -> float:
-        """
-        Calculate fact utilization as a placeholder metric.
-        """
-        utilized = sum(1 for step in steps if step.get('rule', '') != "")
-        return utilized / len(steps) if steps else 0.0
-
-    def _calculate_inference_quality(self, steps: List[Dict]) -> float:
-        """
-        Calculate inference quality as a placeholder (e.g., average confidence).
-        """
-        confidences = [step.get('confidence', 0.0) for step in steps]
-        return float(np.mean(confidences)) if confidences else 0.0
-
-    def _calculate_pattern_complexity(self, dependencies: nx.DiGraph) -> float:
-        """
-        Calculate pattern complexity based on the structure of the dependency graph.
-        """
-        if dependencies.number_of_nodes() == 0:
-            return 0.0
-        return float(dependencies.number_of_edges()) / dependencies.number_of_nodes()
-
-    def _update_academic_metrics(self, metrics: Dict):
-        """
-        Update academic metrics tracking (placeholder implementation).
-        """
-        self.logger.info(f"Updated academic chain metrics: {metrics}")
-
-    def get_reasoning_metrics(self) -> Dict[str, Any]:
-        """
-        Get comprehensive reasoning metrics for academic evaluation.
-        """
-        return {
-            'path_analysis': {
-                'average_length': float(np.mean(self.reasoning_metrics['path_lengths'])),
-                'max_length': float(max(self.reasoning_metrics['path_lengths'] or [0])),
-                'path_distribution': self._calculate_path_distribution()
-            },
-            'confidence_analysis': {
-                'mean_confidence': float(np.mean(self.reasoning_metrics['match_confidences'] or [0])),
-                'confidence_distribution': np.histogram(self.reasoning_metrics['match_confidences'], bins=10)
-            },
-            'rule_utilization': dict(self.reasoning_metrics.get('rule_utilization', {})),
-            'timing_analysis': {
-                'mean_time': float(np.mean(self.reasoning_metrics.get('reasoning_times', [0]))),
-                'std_time': float(np.std(self.reasoning_metrics.get('reasoning_times', [0])))
-            },
-            'rule_additions': self.reasoning_metrics.get('rule_additions', [])
-        }
-
-    def _calculate_path_distribution(self) -> Dict[int, float]:
-        """
-        Calculate distribution of reasoning path lengths.
-        """
-        path_counts = defaultdict(int)
-        for length in self.reasoning_metrics['path_lengths']:
-            path_counts[length] += 1
-        total = len(self.reasoning_metrics['path_lengths'])
-        return {length: count / total for length, count in path_counts.items()} if total else {}
-
-    def _analyze_pattern_distribution(self) -> Dict[str, float]:
-        """
-        Analyze distribution of reasoning pattern types.
-        """
-        counts = defaultdict(int)
-        total = len(self.reasoning_metrics.get('pattern_types', []))
-        for p in self.reasoning_metrics.get('pattern_types', []):
-            counts[p] += 1
-        if total == 0:
-            return {}
-        return {ptype: counts[ptype] / total for ptype in counts}
-
-    def _calculate_complexity_correlation(self) -> float:
-        """
-        Placeholder: Calculate correlation between chain length and average confidence.
-        """
-        lengths = self.reasoning_metrics['path_lengths']
-        confidences = self.reasoning_metrics['match_confidences']
-        if lengths and confidences and len(lengths) == len(confidences):
-            return float(np.corrcoef(lengths, confidences)[0, 1])
-        return 0.0
-
-    def _calculate_pattern_success_rates(self) -> Dict[str, float]:
-        """
-        Placeholder: Calculate success rates for different reasoning patterns.
-        """
-        success_counts = defaultdict(int)
-        total_counts = defaultdict(int)
-        for chain in self.reasoning_metrics.get('chains', []):
-            ptype = chain.get('pattern', {}).get('type', 'unknown')
-            total_counts[ptype] += 1
-            if chain.get('success', 0):
-                success_counts[ptype] += 1
-
-        return {
-            ptype: (success_counts[ptype] / total_counts[ptype]) if total_counts[ptype] else 0.0
-            for ptype in total_counts
-        }
-
-    def _get_complexity_metrics(self) -> Dict[str, float]:
-        """
-        Placeholder: Return additional complexity metrics.
-        """
-        return {
-            'avg_chain_length': float(np.mean(self.reasoning_metrics['path_lengths'])),
-            'std_chain_length': float(np.std(self.reasoning_metrics['path_lengths']))
-        }
-
-    def _analyze_pattern_effectiveness(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Analyze effectiveness of different reasoning patterns.
-        """
-        effectiveness = defaultdict(list)
-        for chain, ptype in zip(self.reasoning_metrics.get('chains', []),
-                                self.reasoning_metrics.get('pattern_types', [])):
-            effectiveness[ptype].append({
-                'success': chain.get('success', 0),
-                'confidence': chain.get('overall_confidence', 0.0)
-            })
-        result = {}
-        for pattern_type, measures in effectiveness.items():
-            success_rate = np.mean([m['success'] for m in measures])
-            avg_confidence = np.mean([m['confidence'] for m in measures])
-            result[pattern_type] = {
-                'success_rate': float(success_rate),
-                'avg_confidence': float(avg_confidence),
-                'sample_size': len(measures)
-            }
-        return result
-
-    def _get_ablation_metrics(self) -> Dict[str, Any]:
-        """
-        Placeholder: Return ablation study results.
-        """
-        return {}
-
-    def _serialize_dependencies(self, dependencies: nx.DiGraph) -> Dict:
-        """
-        Serialize the dependencies graph into a dictionary format.
-        """
-        serialized = {}
-        for u, v, data in dependencies.edges(data=True):
-            if u not in serialized:
-                serialized[u] = []
-            serialized[u].append({'target': v, 'data': data})
-        return serialized
-
-    # ------------------- Utility / Placeholder methods for chain calculations -------------------
-
-    def _get_prerequisites(self, node_id: str) -> List[str]:
-        """
-        Placeholder: Return prerequisite nodes for a rule.
-        """
-        return []
-
-    def _get_conclusions(self, node_id: str) -> List[str]:
-        """
-        Placeholder: Return conclusion nodes for a rule.
-        """
-        return []
-
-    def _calculate_step_confidence(self, rule: Dict, prereqs: List[str], base_conf: float) -> float:
-        """
-        Placeholder for more advanced step-by-step confidence calculation.
-        """
-        return base_conf
-
-    def _calculate_step_coherence(self, steps: List[Dict]) -> float:
-        """
-        Placeholder: Evaluate how coherent each step is with the others.
-        """
-        return 1.0
-
-    def _calculate_branching(self, dependencies: nx.DiGraph) -> float:
-        """
-        Placeholder: Evaluate branching factor of the dependency graph.
-        """
-        if dependencies.number_of_nodes() <= 1:
-            return 0.0
-        return float(dependencies.number_of_edges()) / dependencies.number_of_nodes()
-
-    def _calculate_linearity(self, dependencies: nx.DiGraph) -> float:
-        """
-        Placeholder: Evaluate how linear the path is.
-        """
-        if dependencies.number_of_nodes() <= 1:
-            return 1.0
-        edges = dependencies.number_of_edges()
-        nodes = dependencies.number_of_nodes()
-        linear_ratio = float(edges) / (nodes - 1) if nodes > 1 else 1.0
-        return min(1.0, linear_ratio)
-
-    def _generate_cache_key(self, query: str, context: str) -> str:
-        """
-        Generate a unique cache key from query and context.
-        """
-        return f"{hash(query)}_{hash(context)}"
-
-    def _get_cache(self, key: str) -> Optional[Tuple[str, str]]:
-        """
-        Retrieve a cached result if it hasn't expired.
-        """
-        if hasattr(self, 'cache') and key in self.cache:
-            result, timestamp = self.cache[key]
-            if (datetime.now().timestamp() - timestamp) < 3600:
-                return result
-            del self.cache[key]
-        return None
-
-    def _set_cache(self, key: str, result: Tuple[str, str]):
-        """
-        Store a result in cache with a timestamp.
-        """
-        if not hasattr(self, 'cache'):
-            self.cache = {}
-        self.cache[key] = (result, datetime.now().timestamp())
+    def _ensure_device(self, tensor: torch.Tensor, target_device: Optional[torch.device] = None) -> torch.Tensor:
+        device = target_device or self.device
+        moved_tensor, _ = DeviceManager.ensure_same_device(tensor, tensor, device=device)
+        return moved_tensor

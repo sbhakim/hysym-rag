@@ -1,6 +1,10 @@
 # main.py
 
 from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
+from src.reasoners.networkx_symbolic_reasoning_metrics import (
+    extract_reasoning_pattern,
+    get_reasoning_metrics
+)
 from src.reasoners.neural_retriever import NeuralRetriever
 from src.integrators.hybrid_integrator import HybridIntegrator
 from src.utils.dimension_manager import DimensionalityManager
@@ -78,6 +82,7 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
         if max_samples and count >= max_samples:
             break
     return dataset
+
 
 if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
@@ -267,16 +272,23 @@ if __name__ == "__main__":
             if isinstance(prediction_val, tuple):
                 prediction_val = prediction_val[0]
 
+            # Instead of symbolic.extract_reasoning_pattern(...), we call the standalone function
+            # from networkx_symbolic_reasoning_metrics, if we want a 'pattern_type' in our metrics:
+            if final_answer.get('reasoning_path') is not None:
+                pattern_dict = extract_reasoning_pattern(
+                    query,
+                    final_answer.get('reasoning_path', []),
+                    symbolic.rules
+                )
+                pattern_type_val = pattern_dict.get('pattern_type', 'unknown')
+            else:
+                pattern_type_val = 'unknown'
+
             metrics_collector.collect_query_metrics(
                 query=query,
                 prediction=prediction_val,
                 ground_truth=the_answer,
-                reasoning_path=(
-                    symbolic.extract_reasoning_pattern(query, final_answer.get('reasoning_path', []))
-                        .get('pattern_type', 'unknown')
-                    if hasattr(symbolic, "extract_reasoning_pattern")
-                    else 'unknown'
-                ),
+                reasoning_path=pattern_type_val,  # pass the pattern_type
                 processing_time=time.time() - initial_time,
                 resource_usage=resource_delta,
                 complexity_score=complexity
@@ -308,10 +320,15 @@ if __name__ == "__main__":
             print("-" * 20)
 
             if data_type == "ground_truth_available" and the_answer is not None:
-                reasoning_chain = symbolic.extract_reasoning_pattern(
-                    query,
-                    final_answer.get('reasoning_path', [])
-                )
+                # Similarly, if we want a "reasoning_chain" from that path:
+                if final_answer.get('reasoning_path') is not None:
+                    chain_dict = extract_reasoning_pattern(
+                        query,
+                        final_answer.get('reasoning_path', []),
+                        symbolic.rules
+                    )
+                else:
+                    chain_dict = {}  # fallback if no path
 
                 eval_pred_text = final_answer.get('result', '')
                 if isinstance(eval_pred_text, tuple):
@@ -321,7 +338,7 @@ if __name__ == "__main__":
                     predictions={query: eval_pred_text},
                     ground_truths={query: the_answer},
                     supporting_facts={query: supporting_facts},
-                    reasoning_chain=reasoning_chain
+                    reasoning_chain=chain_dict
                 )
                 print("\nEvaluation Metrics:")
                 print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
@@ -450,7 +467,9 @@ if __name__ == "__main__":
                 print(f"  * effect size: {stats.get('effect_size', 0.0):.2f}")
 
     print("\n=== System Performance Summary (Extended) ===")
-    pattern_metrics = symbolic.get_reasoning_metrics()
+    # Replacing the old call: symbolic.get_reasoning_metrics()
+    # with the new get_reasoning_metrics(...) that takes symbolic.reasoning_metrics
+    pattern_metrics = get_reasoning_metrics(symbolic.reasoning_metrics)
     print(f"- Average Chain Length: {pattern_metrics['path_analysis']['average_length']:.2f}")
     print(f"- Average Confidence: {pattern_metrics['confidence_analysis']['mean_confidence']:.2f}")
     print("\nPattern Distribution:")
@@ -460,4 +479,3 @@ if __name__ == "__main__":
     print("\n=== End of Run ===")
     print("\n=== Academic Evaluation Results ===")
     print(json.dumps(academic_report, indent=2))
-

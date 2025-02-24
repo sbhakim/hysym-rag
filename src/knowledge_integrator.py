@@ -28,7 +28,8 @@ class AlignmentLayer(nn.Module):
             dim_manager: Optional[DimensionalityManager] = None
     ):
         """
-        Enhanced alignment layer with dynamic dimension handling and confidence-weighted fusion.
+        Enhanced alignment layer with dynamic dimension handling, confidence-weighted fusion,
+        and reasoning chain tracking for academic evaluation.
         """
         super(AlignmentLayer, self).__init__()
         self.device = device if device is not None else DeviceManager.get_device()
@@ -37,13 +38,6 @@ class AlignmentLayer(nn.Module):
         self.hidden_dim = self.head_dim * num_heads
         self.target_dim = target_dim
         self.dim_manager = dim_manager or DimensionalityManager(target_dim=target_dim, device=device)
-
-        # --- Directly use registered adapters from dim_manager, do not recreate. ---
-        # These lines are removed because they recreate the adapters, causing conflicts:
-        # self.sym_adapter = nn.Linear(sym_dim, target_dim)
-        # self.neural_adapter = nn.Linear(neural_dim, target_dim)
-        # self.dim_manager.register_adapter('symbolic', self.sym_adapter)
-        # self.dim_manager.register_adapter('neural', self.neural_adapter)
 
         # New projection adapters: project from target_dim (768) to hidden_dim (256)
         self.sym_projection_adapter = nn.Linear(target_dim, self.hidden_dim)
@@ -91,6 +85,14 @@ class AlignmentLayer(nn.Module):
             nn.Sigmoid()
         )
 
+        # Initialize chain tracking metrics for academic analysis.
+        # Stores lists of chain lengths, average confidence scores, and computed inference depths.
+        self.chain_metrics = {
+            'lengths': [],
+            'confidences': [],
+            'depths': []
+        }
+
     def _validate_and_prepare_input(self, emb: torch.Tensor, name: str) -> torch.Tensor:
         if emb.dim() == 1:
             emb = emb.unsqueeze(0)
@@ -112,17 +114,16 @@ class AlignmentLayer(nn.Module):
             logger.debug(f"Symbolic Projected Shape: {sym_projected.shape}")  # Expected: [batch, hidden_dim]
             logger.debug(f"Neural Projected Shape: {neural_projected.shape}")    # Expected: [batch, hidden_dim]
 
-
             # Reshape for multi-head attention: [batch, tokens, num_heads, head_dim]
-            #  (Assuming single token for now)
+            # (Assuming single token for now)
             sym_heads = sym_projected.view(batch_size, -1, self.num_heads, self.head_dim)
             neural_heads = neural_projected.view(batch_size, -1, self.num_heads, self.head_dim)
             logger.debug(f"Symbolic Heads Shape: {sym_heads.shape}")  # Expected: [batch, 1, num_heads, head_dim]
             logger.debug(f"Neural Heads Shape: {neural_heads.shape}")    # Expected: [batch, 1, num_heads, head_dim]
 
-            # Compute attention scores and weights.  Key matrix multiplication happens here.
+            # Compute attention scores and weights. Key matrix multiplication happens here.
             attention_scores = torch.matmul(sym_heads, neural_heads.transpose(-2, -1)) / self.scale
-            logger.debug(f"Attention Scores shape: {attention_scores.shape}") # Expected: [batch_size, num_heads, 1, 1]
+            logger.debug(f"Attention Scores shape: {attention_scores.shape}") # Expected: [batch, num_heads, 1, 1]
             attention_weights = F.softmax(attention_scores, dim=-1)
             attended_features = torch.matmul(attention_weights, neural_heads) # Expected output: [batch, num_heads, 1, head_dim]
             attended_features = attended_features.view(batch_size, -1, self.hidden_dim) # Expected output: [batch, 1, hidden_dim]
@@ -149,15 +150,12 @@ class AlignmentLayer(nn.Module):
 
             if attended_features.size(-1) != self.hidden_dim:
                 logger.warning(f"Attended features dimension mismatch: {attended_features.size(-1)} vs {self.hidden_dim}")
-                # This shouldn't be necessary anymore
-                # attended_features = self.sym_projection_adapter(attended_features)
 
             attended_features = self._ensure_device(attended_features, neural_emb.device)
             neural_emb = self._ensure_device(neural_emb, attended_features.device)
-            # Instead of concatenating the raw neural_emb, project neural_emb to hidden_dim space:
-            # neural_aligned = self.dim_manager.align_embeddings(neural_emb.to(neural_emb.device), "neural") # No longer needed.
-            neural_proj = self.neural_projection_adapter(neural_emb)  # Use ALREADY ALIGNED neural_emb
-            neural_proj = self.neural_projection(neural_proj)          # Now shape: [batch, hidden_dim]
+            # Project neural embedding to hidden_dim space:
+            neural_proj = self.neural_projection_adapter(neural_emb)
+            neural_proj = self.neural_projection(neural_proj)
             neural_proj = neural_proj.unsqueeze(1)  # Shape: [batch, 1, hidden_dim]
 
             # Concatenate attended features with the projected neural embedding
@@ -176,9 +174,29 @@ class AlignmentLayer(nn.Module):
 
             fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
 
+            # --- Reasoning Chain Metrics Tracking ---
+            # Handle multi-hop: if sym_emb has shape [batch, hop_count, emb_dim], pool over hops.
+            if sym_emb.dim() == 3:
+                chain_length = sym_emb.size(1)
+                # Pool over the hop dimension (e.g., average pooling)
+                sym_emb = sym_emb.mean(dim=1)
+            else:
+                chain_length = 1
+
+            # Compute inference depth as a simple logarithmic function of chain length.
+            inference_depth = max(1, int(math.log2(chain_length + 1)))
+            # Average confidence for this chain is the mean of confidence_score.
+            chain_conf = confidence_score.mean().item()
+
+            # Update internal chain metrics for academic evaluation.
+            self.chain_metrics['lengths'].append(chain_length)
+            self.chain_metrics['confidences'].append(chain_conf)
+            self.chain_metrics['depths'].append(inference_depth)
+
+            # Include these chain metrics in debug info.
             debug_info = {
                 'attention_weights': attention_weights.detach().cpu().numpy(),
-                'confidence_score': confidence_score.mean().item(),
+                'confidence_score': chain_conf,
                 'alignment_magnitude': torch.norm(aligned_embedding).item(),
                 'sym_emb_shape': list(sym_emb.shape),
                 'neural_emb_shape': list(neural_emb.shape),
@@ -186,22 +204,23 @@ class AlignmentLayer(nn.Module):
                 'fused_emb_shape': list(fused_embedding.shape),
                 'attended_features_shape': list(attended_features.shape),
                 'combined_shape': list(combined.shape),
-                'context_score': context_score.mean().item()
+                'context_score': context_score.mean().item(),
+                'chain_length': chain_length,
+                'inference_depth': inference_depth,
+                'chain_confidence': chain_conf
             }
             if rule_confidence is not None:
                 debug_info['rule_score'] = rule_score.mean().item()
 
-            logger.info(f"Alignment completed successfully. Confidence: {confidence_score.mean().item():.4f}")
+            logger.info(f"Alignment completed successfully. Confidence: {chain_conf:.4f}")
             self._log_memory_usage("end_forward")
-            return fused_embedding, confidence_score.mean().item(), debug_info
+            return fused_embedding, chain_conf, debug_info
 
-
-        except Exception as e: # Catch ALL exceptions here
+        except Exception as e:
             logger.error(f"Unexpected error in forward pass: {str(e)}")
             self._log_memory_usage("error_state")
-            # Fallback: return neural embedding, 0 confidence, and the error
+            # Fallback: return neural embedding, 0 confidence, and the error info.
             return neural_emb, 0.0, {'error': str(e), 'fallback': 'using_neural_embedding'}
-
 
     def compute_loss(self, aligned_emb: torch.Tensor, target_emb: torch.Tensor, confidence_score: float,
                      lambda_cos: float = 0.7, lambda_l2: float = 0.3) -> torch.Tensor:
