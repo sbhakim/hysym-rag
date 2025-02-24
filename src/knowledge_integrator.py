@@ -5,8 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import logging
-from typing import Tuple, Optional
-
+from typing import Tuple, Optional, List
 from src.utils.device_manager import DeviceManager
 from src.utils.dimension_manager import DimensionalityManager
 
@@ -85,7 +84,7 @@ class AlignmentLayer(nn.Module):
             nn.Sigmoid()
         )
 
-        # Initialize chain tracking metrics for academic analysis.
+        # Initialize chain tracking metrics for academic evaluation.
         # Stores lists of chain lengths, average confidence scores, and computed inference depths.
         self.chain_metrics = {
             'lengths': [],
@@ -135,6 +134,43 @@ class AlignmentLayer(nn.Module):
             logger.error(f"Error in dynamic_project: {str(e)}")
             raise
 
+    def traverse_graph_from_multi_hop(self, embeddings: torch.Tensor) -> List[str]:
+        """
+        Dummy multi-hop traversal: for each hop (dimension 1 of embeddings), return a fixed symbolic response.
+        This is a placeholder and should be replaced with actual multi-hop logic.
+        """
+        if embeddings.dim() < 2:
+            return ["Symbolic response"]
+        hop_count = embeddings.size(1)
+        return ["Symbolic response" for _ in range(hop_count)]
+
+    def _track_reasoning_chain(self, query_embedding: torch.Tensor, response_embedding: torch.Tensor, chain_info: Optional[dict] = None) -> dict:
+        """
+        Track reasoning chain metrics for academic analysis.
+        Returns a dictionary with 'chain_length', 'confidence', and 'depth'.
+        """
+        metrics = {
+            'chain_length': 0,
+            'confidence': 0.0,
+            'depth': 0
+        }
+        try:
+            if chain_info and 'steps' in chain_info:
+                metrics['chain_length'] = len(chain_info['steps'])
+            # Use cosine similarity between query and response embeddings to derive a confidence score.
+            if query_embedding is not None and response_embedding is not None:
+                similarity = F.cosine_similarity(query_embedding.view(1, -1), response_embedding.view(1, -1)).item()
+                metrics['confidence'] = max(0.0, min(1.0, similarity))
+            if chain_info and 'reasoning_path' in chain_info:
+                metrics['depth'] = len(chain_info['reasoning_path'])
+            # Update internal tracking
+            self.chain_metrics['lengths'].append(metrics['chain_length'])
+            self.chain_metrics['confidences'].append(metrics['confidence'])
+            self.chain_metrics['depths'].append(metrics['depth'])
+        except Exception as e:
+            logger.error(f"Error tracking reasoning chain: {str(e)}")
+        return metrics
+
     def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor, rule_confidence: Optional[float] = None) -> \
             Tuple[torch.Tensor, float, Optional[dict]]:
         try:
@@ -170,30 +206,26 @@ class AlignmentLayer(nn.Module):
             else:
                 dynamic_confidence = context_score
             confidence_score = dynamic_confidence
+
+            # Apply a minimum confidence threshold of 0.1 to avoid zero values.
+            MIN_CONFIDENCE = 0.1
+            confidence_score = torch.max(confidence_score, torch.tensor(MIN_CONFIDENCE, device=confidence_score.device))
+
             self._log_memory_usage("after_alignment")
 
             fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
 
             # --- Reasoning Chain Metrics Tracking ---
-            # Handle multi-hop: if sym_emb has shape [batch, hop_count, emb_dim], pool over hops.
-            if sym_emb.dim() == 3:
-                chain_length = sym_emb.size(1)
-                # Pool over the hop dimension (e.g., average pooling)
-                sym_emb = sym_emb.mean(dim=1)
-            else:
-                chain_length = 1
+            # Create a basic chain_info dictionary using a dummy traversal.
+            chain_info = {
+                'steps': self.traverse_graph_from_multi_hop(neural_emb.unsqueeze(0).unsqueeze(0)),
+                'reasoning_path': self.traverse_graph_from_multi_hop(neural_emb.unsqueeze(0).unsqueeze(0))
+            }
+            chain_metrics = self._track_reasoning_chain(sym_emb, aligned_embedding, chain_info=chain_info)
+            chain_length = chain_metrics.get('chain_length', 1)
+            chain_conf = chain_metrics.get('confidence', 0.0)
+            inference_depth = chain_metrics.get('depth', 1)
 
-            # Compute inference depth as a simple logarithmic function of chain length.
-            inference_depth = max(1, int(math.log2(chain_length + 1)))
-            # Average confidence for this chain is the mean of confidence_score.
-            chain_conf = confidence_score.mean().item()
-
-            # Update internal chain metrics for academic evaluation.
-            self.chain_metrics['lengths'].append(chain_length)
-            self.chain_metrics['confidences'].append(chain_conf)
-            self.chain_metrics['depths'].append(inference_depth)
-
-            # Include these chain metrics in debug info.
             debug_info = {
                 'attention_weights': attention_weights.detach().cpu().numpy(),
                 'confidence_score': chain_conf,

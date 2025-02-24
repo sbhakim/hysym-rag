@@ -186,36 +186,31 @@ class NeuralRetriever:
 
     def _encode_safely(self, text: str) -> Optional[torch.Tensor]:
         """
-        Enhanced safe encoding with multiple fallback strategies.
+        Enhanced safe encoding with robust fallback mechanism.
+        Attempts standard encoding with retries; on final failure, falls back to token-based encoding.
         """
         if not text or not text.strip():
             logger.warning("Empty text provided for encoding")
             return None
 
         max_retries = 3
-        current_try = 0
-
-        while current_try < max_retries:
+        for attempt in range(max_retries):
             try:
-                with logging.getLogger('sentence_transformers').handlers[0].lock:
-                    encoded = self.encoder.encode(text, convert_to_tensor=True)
-                    return encoded.to(self.device)
-            except torch.cuda.OutOfMemoryError as e:
-                current_try += 1
-                logger.warning(f"GPU OOM on try {current_try}, attempting memory cleanup")
-                torch.cuda.empty_cache()
-                if current_try == max_retries:
-                    logger.error("GPU memory error persisted after retries")
-                    raise
+                # Standard encoding attempt
+                encoded = self.encoder.encode(text, convert_to_tensor=True)
+                return encoded.to(self.device)
             except Exception as e:
-                logger.error(f"Encoding error: {str(e)}")
-                # Fallback to simpler encoding if possible
-                try:
-                    fallback = self.encoder.encode(text, convert_to_tensor=False)
-                    return torch.tensor(fallback, device=self.device)
-                except Exception as fallback_e:
-                    raise ValueError(f"Both primary and fallback encoding failed: {str(fallback_e)}")
-            time.sleep(0.1 * current_try)  # Exponential backoff
+                logger.warning(f"Encoding attempt {attempt+1}/{max_retries} failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    # Final fallback: try simpler token-based encoding
+                    try:
+                        tokens = self.tokenizer(text, truncation=True, max_length=512, return_tensors="pt")
+                        return tokens['input_ids'].to(self.device)
+                    except Exception as e2:
+                        logger.error(f"Final encoding attempt failed: {str(e2)}")
+                        return None
+            time.sleep(0.1 * (attempt + 1))
+        return None
 
     def _generate_response(self, prompt: str) -> str:
         try:
@@ -258,7 +253,6 @@ class NeuralRetriever:
         Enhanced context chunking with robust error handling and validation.
         """
         try:
-            # Input validation with detailed logging
             if not isinstance(context, str):
                 logger.error("Invalid context type provided")
                 return []
@@ -269,7 +263,6 @@ class NeuralRetriever:
                 logger.warning("Context too short for meaningful processing")
                 return []
 
-            # Enhanced sentence splitting using regex for punctuation
             sentences = []
             for sent in re.split(r'[.!?]', context):
                 cleaned = sent.strip()
@@ -279,11 +272,10 @@ class NeuralRetriever:
                 logger.warning("No valid sentences extracted from context")
                 return []
 
-            # Chunk processing with overlap handling
             chunks = []
             current_chunk = []
             current_length = 0
-            overlap_buffer = []  # For maintaining overlap between chunks
+            overlap_buffer = []
 
             for idx, sentence in enumerate(self._process_batch(sentences)):
                 try:
@@ -293,7 +285,6 @@ class NeuralRetriever:
                         logger.warning(f"Tokenization failed, using fallback: {e}")
                         sentence_tokens = len(sentence.split())
 
-                    # Check if adding this sentence would exceed chunk size
                     if current_length + sentence_tokens > self.chunk_size and current_chunk:
                         overlap_text = ' '.join(overlap_buffer[-self.overlap:]) if overlap_buffer else ''
                         chunk_text = ' '.join(current_chunk)
@@ -311,19 +302,15 @@ class NeuralRetriever:
                             'end_idx': idx - 1,
                             'overlap_text': overlap_text
                         })
-                        # Reset for next chunk, maintaining overlap
                         current_chunk = overlap_buffer[-self.overlap:] if overlap_buffer else []
                         current_length = sum(len(self.tokenizer.encode(s)) for s in current_chunk)
-
                     current_chunk.append(sentence)
                     overlap_buffer.append(sentence)
                     current_length += sentence_tokens
-
                 except Exception as e:
                     logger.error(f"Error processing sentence {idx}: {e}")
                     continue
 
-            # Handle final chunk
             if current_chunk:
                 try:
                     chunk_text = ' '.join(current_chunk)
@@ -334,11 +321,10 @@ class NeuralRetriever:
                         'sentences': current_chunk,
                         'start_idx': len(sentences) - len(current_chunk),
                         'end_idx': len(sentences) - 1,
-                        'overlap_text': ''  # Last chunk has no following overlap
+                        'overlap_text': ''
                     })
                 except Exception as e:
                     logger.error(f"Error processing final chunk: {e}")
-
             return chunks
 
         except Exception as e:

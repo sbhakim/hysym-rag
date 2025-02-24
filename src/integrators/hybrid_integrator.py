@@ -207,11 +207,16 @@ class HybridIntegrator:
 
             symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
 
+            # Call the alignment layer to fuse embeddings.
             aligned_emb, confidence, debug_info = self.alignment_layer(
                 symbolic_emb,
                 neural_emb,
                 rule_confidence=query_complexity
             )
+            # Apply minimum confidence threshold
+            MIN_CONFIDENCE = 0.1
+            if confidence < MIN_CONFIDENCE:
+                confidence = MIN_CONFIDENCE
 
             fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, aligned_emb,
                                                               confidence)
