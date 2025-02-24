@@ -363,9 +363,6 @@ class GraphSymbolicReasoner:
     def process_query(self, query: str) -> List[str]:
         """
         Process a query using symbolic reasoning with improved error handling and multi-hop support.
-        This method has been updated to ensure that both query and rule embeddings are aligned
-        to the target dimension (e.g., 768) before similarity computations.
-        Also uses an adaptive similarity threshold based on the number of valid rules.
         """
         try:
             # Encode and align query embedding
@@ -396,6 +393,10 @@ class GraphSymbolicReasoner:
                     self.logger.warning(
                         f"Dimension mismatch before cos_sim: query_emb shape={query_embedding.shape}, rule_emb shape={self.rule_embeddings.shape}")  # ADDED
                     return ["No symbolic match found due to dimension mismatch."]  # ADDED
+
+                # Ensure query_embedding is 2D for cosine_sim
+                if query_embedding.dim() == 1: # ADDED - Reshape if 1D
+                    query_embedding = query_embedding.unsqueeze(0) # ADDED - make it [1, embedding_dim]
 
                 similarities = util.cos_sim(query_embedding,
                                             self.rule_embeddings.squeeze(1)).flatten()  # Squeeze rule embeddings
@@ -444,7 +445,6 @@ class GraphSymbolicReasoner:
     def _some_graph_traversal(self, query_embedding: torch.Tensor) -> List[str]:
         """
         Multi-hop traversal using BFS to extract a meaningful path from the knowledge graph.
-        It finds the best starting node based on similarity and performs a BFS traversal up to max_hops.
         """
         if not self.graph.nodes or self.rule_embeddings is None:
             return []
@@ -458,6 +458,10 @@ class GraphSymbolicReasoner:
             self.logger.warning(
                 f"Dimension mismatch before cos_sim in traversal: query_emb shape={query_embedding.shape}, rule_emb shape={self.rule_embeddings.shape}")  # ADDED
             return []  # Fallback empty path
+
+        # Ensure query_embedding is 2D for cosine_sim
+        if query_embedding.dim() == 1: # ADDED - Reshape if 1D
+            query_embedding = query_embedding.unsqueeze(0) # ADDED - make it [1, embedding_dim]
 
         similarities = util.cos_sim(query_embedding,
                                     self.rule_embeddings.squeeze(1)).flatten()  # Squeeze rule_embeddings
