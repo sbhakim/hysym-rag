@@ -1,5 +1,4 @@
 # src/reasoners/networkx_symbolic_reasoner.py
-
 import json
 import spacy
 import networkx as nx
@@ -18,7 +17,6 @@ from src.utils.dimension_manager import DimensionalityManager
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
 
 class GraphSymbolicReasoner:
     """
@@ -137,47 +135,47 @@ class GraphSymbolicReasoner:
                     self.keyword_index[keyword].append(rule_id)
 
             try:
+                # Combine response or source_text with keywords for richer context
                 if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
                     self.logger.debug(f"Rule ID: {rule_id} Original rule embedding shape: {rule['embedding'].shape}")
-                    # Ensure the tensor is 2D
-                    if rule['embedding'].dim() == 1:
-                        rule_embedding = rule['embedding'].unsqueeze(0)
-                    else:
-                        rule_embedding = rule['embedding']
+                    rule_embedding = rule['embedding'].unsqueeze(0) if rule['embedding'].dim() == 1 else rule[
+                        'embedding']
+                elif 'source_text' in rule and rule['source_text'].strip():
+                    rule_text = rule['source_text']
+                    if 'keywords' in rule:
+                        rule_text += " " + " ".join(rule['keywords'])
+                    rule_embedding = self.embedder.encode(rule_text, convert_to_tensor=True).to(self.device)
+                    rule_embedding = rule_embedding.unsqueeze(0) if rule_embedding.dim() == 1 else rule_embedding
+                elif 'response' in rule and rule['response'].strip():
+                    rule_text = rule['response']
+                    if 'keywords' in rule:
+                        rule_text += " " + " ".join(rule['keywords'])
+                    rule_embedding = self.embedder.encode(rule_text, convert_to_tensor=True).to(self.device)
+                    rule_embedding = rule_embedding.unsqueeze(0) if rule_embedding.dim() == 1 else rule_embedding
+                else:
+                    continue
 
-                    current_embedding = self.dim_manager.align_embeddings(rule_embedding.to(self.device), "rule")
-                    self.logger.debug(f"Rule ID: {rule_id} Aligned rule embedding shape: {current_embedding.shape}")
+                current_embedding = self.dim_manager.align_embeddings(rule_embedding.to(self.device), "rule")
+                self.logger.debug(f"Rule ID: {rule_id} Aligned rule embedding shape: {current_embedding.shape}")
 
-                    # Set embedding_dim if not already set; otherwise, validate consistency
-                    if embedding_dim is None:
-                        embedding_dim = current_embedding.shape[-1]
-                    elif current_embedding.shape[-1] != embedding_dim:
-                        self.logger.warning(
-                            f"Rule {rule_id} embedding dimension mismatch. Expected {embedding_dim}, got {current_embedding.shape[-1]}"
-                        )
-                        continue
+                # Set embedding_dim if not already set; otherwise, validate consistency
+                if embedding_dim is None:
+                    embedding_dim = current_embedding.shape[-1]
+                elif current_embedding.shape[-1] != embedding_dim:
+                    self.logger.warning(
+                        f"Rule {rule_id} embedding dimension mismatch. Expected {embedding_dim}, got {current_embedding.shape[-1]}"
+                    )
+                    continue
 
-                    # Validate final target dimension
-                    if current_embedding.shape[-1] != self.dim_manager.target_dim:
-                        self.logger.warning(
-                            f"Rule {rule_id} embedding dimension {current_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}")
-                        continue
+                # Validate final target dimension
+                if current_embedding.shape[-1] != self.dim_manager.target_dim:
+                    self.logger.warning(
+                        f"Rule {rule_id} embedding dimension {current_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}")
+                    continue
 
-                    rule['embedding'] = current_embedding
-                    valid_rule_ids.append(rule_id)
-                    rule_embeddings_list.append(current_embedding)
-                elif 'source_text' in rule:
-                    rule_embedding = self.embedder.encode(rule['source_text'], convert_to_tensor=True).to(self.device)
-                    current_embedding = self.dim_manager.align_embeddings(rule_embedding, "rule")
-                    self.logger.debug(
-                        f"Rule ID: {rule_id} Aligned rule embedding (from source_text) shape: {current_embedding.shape}")
-                    if current_embedding.shape[-1] != self.dim_manager.target_dim:
-                        self.logger.warning(
-                            f"Rule {rule_id} embedding (from source_text) dimension {current_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}. Skipping rule.")
-                        continue
-                    rule['embedding'] = current_embedding
-                    valid_rule_ids.append(rule_id)
-                    rule_embeddings_list.append(current_embedding)
+                rule['embedding'] = current_embedding
+                valid_rule_ids.append(rule_id)
+                rule_embeddings_list.append(current_embedding)
             except Exception as e:
                 self.logger.error(f"Error processing rule {rule_id}: {e}")
                 continue
@@ -186,7 +184,7 @@ class GraphSymbolicReasoner:
         if rule_embeddings_list:
             try:
                 # Stack embeddings to create a tensor with shape [num_valid_rules, target_dim]
-                self.rule_embeddings = torch.stack(rule_embeddings_list).to(self.device)
+                self.rule_embeddings = torch.cat(rule_embeddings_list).to(self.device)  # Updated to torch.cat
                 self.logger.info(f"Rule embeddings tensor created with shape: {self.rule_embeddings.shape}")
             except Exception as e:
                 self.logger.error(f"Error stacking rule embeddings: {e}")
@@ -195,7 +193,8 @@ class GraphSymbolicReasoner:
             self.rule_embeddings = None
 
         self.logger.info(
-            f"Rule index built successfully with {len(self.rules)} rules. Final count of valid rules: {len(self.rule_ids)}")
+            f"Rule index built successfully with {len(self.rules)} rules. \n" # Added line break for readability
+            f"Final count of valid rules: {len(self.rule_ids)}")
 
     def build_graph(self):
         """
@@ -242,6 +241,7 @@ class GraphSymbolicReasoner:
     def _validate_rule_structure(self, rule: Dict) -> bool:
         """
         Enhanced rule validation with support for different rule types.
+        Accepts rules with either a precomputed 'embedding', non-empty 'source_text', or non-empty 'response'.
         """
         try:
             if not isinstance(rule, dict):
@@ -258,9 +258,13 @@ class GraphSymbolicReasoner:
 
             required_fields = {"keywords", "response"}
             if all(field in rule and isinstance(rule[field], (str, list)) for field in required_fields):
-                if "confidence" not in rule:
-                    rule["confidence"] = self._calculate_rule_confidence(rule)
-                return True
+                # Accept rule if it has either a valid 'embedding' or non-empty 'source_text' or non-empty 'response'
+                if "embedding" in rule:
+                    return isinstance(rule["embedding"], torch.Tensor)
+                if "source_text" in rule and isinstance(rule["source_text"], str) and rule["source_text"].strip():
+                    return True
+                if "response" in rule and isinstance(rule["response"], str) and rule["response"].strip():
+                    return True
             return False
         except Exception as e:
             self.logger.error(f"Error in rule validation: {str(e)}")
@@ -359,7 +363,9 @@ class GraphSymbolicReasoner:
     def process_query(self, query: str) -> List[str]:
         """
         Process a query using symbolic reasoning with improved error handling and multi-hop support.
-        Additionally, tracks reasoning chain metrics.
+        This method has been updated to ensure that both query and rule embeddings are aligned
+        to the target dimension (e.g., 768) before similarity computations.
+        Also uses an adaptive similarity threshold based on the number of valid rules.
         """
         try:
             # Encode and align query embedding
@@ -376,14 +382,38 @@ class GraphSymbolicReasoner:
                 raise ValueError(
                     f"Query embedding dimension {query_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}")
 
-            # New multi-hop logic: retrieve a list of rule IDs representing each hop.
+            # Use adaptive threshold: if few valid rules, use a higher threshold
+            adaptive_threshold = max(self.match_threshold, 0.3 if len(self.rule_ids) < 10 else 0.2)
+
+            # If rule embeddings are available, compute cosine similarity directly
+            if self.rule_embeddings is not None:
+                if not isinstance(self.rule_embeddings, torch.Tensor) or self.rule_embeddings.dim() < 2:  # Added check
+                    self.logger.warning(f"Invalid rule_embeddings format for query {query}. Falling back to default.")
+                    return ["No symbolic match found."]  # Fallback
+
+                # Add shape check before cosine similarity # ADDED
+                if query_embedding.shape[-1] != self.rule_embeddings.shape[-1]:  # ADDED
+                    self.logger.warning(
+                        f"Dimension mismatch before cos_sim: query_emb shape={query_embedding.shape}, rule_emb shape={self.rule_embeddings.shape}")  # ADDED
+                    return ["No symbolic match found due to dimension mismatch."]  # ADDED
+
+                similarities = util.cos_sim(query_embedding,
+                                            self.rule_embeddings.squeeze(1)).flatten()  # Squeeze rule embeddings
+
+                matching_indices = (similarities >= adaptive_threshold).nonzero(as_tuple=False).flatten().tolist()
+                if matching_indices:
+                    responses = [self.rules[self.rule_ids[idx]]['response'] for idx in matching_indices]
+                    logger.info(f"Found {len(responses)} symbolic responses via direct matching.")
+                    return responses
+                else:
+                    logger.info("No symbolic match found via direct similarity.")
+
+            # Fallback: use multi-hop logic if direct matching did not return any responses
             multi_hop_paths = self._some_graph_traversal(query_embedding)
             all_hop_embeddings = []
             for rule_id in multi_hop_paths:
-                # Each rule has an embedding; add new dimension for stacking.
                 hop_emb = self.rules[rule_id]['embedding']
                 all_hop_embeddings.append(hop_emb.unsqueeze(0))  # shape [1, embedding_dim]
-
             if all_hop_embeddings:
                 # Stack along a new dimension to produce shape [1, hop_count, embedding_dim]
                 multi_hop_emb = torch.cat(all_hop_embeddings, dim=0).unsqueeze(0)
@@ -391,7 +421,6 @@ class GraphSymbolicReasoner:
                 # Fallback: use query_embedding with dummy hop dimension => [1, 1, embedding_dim]
                 multi_hop_emb = query_embedding.unsqueeze(0).unsqueeze(0)
 
-            # Use the multi-hop embeddings to traverse the graph.
             responses = self.traverse_graph_from_multi_hop(multi_hop_emb)
 
             # --- Track reasoning chain metrics ---
@@ -400,14 +429,12 @@ class GraphSymbolicReasoner:
                 'reasoning_path': responses
             }
             self.reasoning_metrics['chains'].append(chain_info)
-
             self._update_reasoning_metrics(responses)
 
             if not responses:
-                logger.info("No symbolic match found.")
+                logger.info("No symbolic match found in multi-hop traversal.")
                 return ["No symbolic match found."]
-
-            logger.info(f"Found {len(responses)} symbolic responses.")
+            logger.info(f"Found {len(responses)} symbolic responses via multi-hop traversal.")
             return responses
 
         except Exception as e:
@@ -416,11 +443,34 @@ class GraphSymbolicReasoner:
 
     def _some_graph_traversal(self, query_embedding: torch.Tensor) -> List[str]:
         """
-        Dummy graph traversal to simulate multi-hop path retrieval.
-        Replace this with your actual multi-hop traversal logic.
-        Returns a list of rule IDs.
+        Multi-hop traversal using BFS to extract a meaningful path from the knowledge graph.
+        It finds the best starting node based on similarity and performs a BFS traversal up to max_hops.
         """
-        return self.rule_ids
+        if not self.graph.nodes or self.rule_embeddings is None:
+            return []
+
+        if not isinstance(self.rule_embeddings, torch.Tensor) or self.rule_embeddings.dim() < 2:  # Added check
+            self.logger.warning(f"Invalid rule_embeddings format for traversal. Falling back to empty path.")
+            return []  # Fallback
+
+        # Add shape check before cosine similarity # ADDED
+        if query_embedding.shape[-1] != self.rule_embeddings.shape[-1]:  # ADDED
+            self.logger.warning(
+                f"Dimension mismatch before cos_sim in traversal: query_emb shape={query_embedding.shape}, rule_emb shape={self.rule_embeddings.shape}")  # ADDED
+            return []  # Fallback empty path
+
+        similarities = util.cos_sim(query_embedding,
+                                    self.rule_embeddings.squeeze(1)).flatten()  # Squeeze rule_embeddings
+
+        if similarities.numel() == 0:
+            return []
+        start_idx = torch.argmax(similarities).item()
+        start_node = self.rule_ids[start_idx]
+        # Perform BFS traversal from the starting node with a depth limit
+        bfs_tree = nx.bfs_tree(self.graph, source=start_node, depth_limit=self.max_hops)
+        traversal_path = list(bfs_tree.nodes())
+        self.logger.debug(f"Multi-hop BFS traversal path: {traversal_path}")
+        return traversal_path
 
     def traverse_graph_from_multi_hop(self, multi_hop_emb: torch.Tensor) -> List[str]:
         """

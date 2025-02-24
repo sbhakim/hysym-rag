@@ -1,5 +1,4 @@
-# src/knowledge_integrator.py
-
+#src/knowledge_integrator.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,28 +8,27 @@ from typing import Tuple, Optional, List
 from src.utils.device_manager import DeviceManager
 from src.utils.dimension_manager import DimensionalityManager
 
-# Configure logging to DEBUG level to capture detailed logs
+#Configure logging to DEBUG level to capture detailed logs
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-
 class AlignmentLayer(nn.Module):
     def __init__(
-            self,
-            sym_dim: int = 384,
-            neural_dim: int = 768,
-            target_dim: int = 768,
-            num_heads: int = 4,  # unused right now.
-            dropout: float = 0.1,
-            device: Optional[torch.device] = None,
-            dim_manager: Optional[DimensionalityManager] = None
-    ):
+        self,
+        sym_dim: int,  # Corrected: Added to __init__ signature
+        neural_dim: int,  # Corrected: Added to __init__ signature
+        target_dim: int = 768,
+        num_heads: int = 4,  # unused right now.
+        dropout: float = 0.1,
+        device: Optional[torch.device] = None,
+        dim_manager: Optional[DimensionalityManager] = None
+        ):
         """
         Enhanced alignment layer with dynamic dimension handling, confidence-weighted fusion,
         and reasoning chain tracking for academic evaluation.
         """
-        super(AlignmentLayer, self).__init__()
+        super().__init__() # Corrected: Use super().__init__() to properly initialize nn.Module
         self.device = device if device is not None else DeviceManager.get_device()
         self.head_dim = 64
         self.num_heads = num_heads  # currently unused
@@ -111,22 +109,24 @@ class AlignmentLayer(nn.Module):
             sym_projected = self.sym_projection(sym_proj_input)
             neural_projected = self.neural_projection(neural_proj_input)
             logger.debug(f"Symbolic Projected Shape: {sym_projected.shape}")  # Expected: [batch, hidden_dim]
-            logger.debug(f"Neural Projected Shape: {neural_projected.shape}")    # Expected: [batch, hidden_dim]
+            logger.debug(f"Neural Projected Shape: {neural_projected.shape}")  # Expected: [batch, hidden_dim]
 
             # Reshape for multi-head attention: [batch, tokens, num_heads, head_dim]
             # (Assuming single token for now)
             sym_heads = sym_projected.view(batch_size, -1, self.num_heads, self.head_dim)
             neural_heads = neural_projected.view(batch_size, -1, self.num_heads, self.head_dim)
             logger.debug(f"Symbolic Heads Shape: {sym_heads.shape}")  # Expected: [batch, 1, num_heads, head_dim]
-            logger.debug(f"Neural Heads Shape: {neural_heads.shape}")    # Expected: [batch, 1, num_heads, head_dim]
+            logger.debug(f"Neural Heads Shape: {neural_heads.shape}")  # Expected: [batch, 1, num_heads, head_dim]
 
             # Compute attention scores and weights. Key matrix multiplication happens here.
             attention_scores = torch.matmul(sym_heads, neural_heads.transpose(-2, -1)) / self.scale
-            logger.debug(f"Attention Scores shape: {attention_scores.shape}") # Expected: [batch, num_heads, 1, 1]
+            logger.debug(f"Attention Scores shape: {attention_scores.shape}")  # Expected: [batch, num_heads, 1, 1]
             attention_weights = F.softmax(attention_scores, dim=-1)
-            attended_features = torch.matmul(attention_weights, neural_heads) # Expected output: [batch, num_heads, 1, head_dim]
-            attended_features = attended_features.view(batch_size, -1, self.hidden_dim) # Expected output: [batch, 1, hidden_dim]
-            logger.debug(f"Attended features shape: {attended_features.shape}") # Expected: [batch, 1, hidden_dim]
+            attended_features = torch.matmul(attention_weights,
+                                            neural_heads)  # Expected output: [batch, num_heads, 1, head_dim]
+            attended_features = attended_features.view(batch_size, -1,
+                                                    self.hidden_dim)  # Expected output: [batch, 1, hidden_dim]
+            logger.debug(f"Attended features shape: {attended_features.shape}")  # Expected: [batch, 1, hidden_dim]
 
             return attended_features, attention_weights
 
@@ -144,7 +144,8 @@ class AlignmentLayer(nn.Module):
         hop_count = embeddings.size(1)
         return ["Symbolic response" for _ in range(hop_count)]
 
-    def _track_reasoning_chain(self, query_embedding: torch.Tensor, response_embedding: torch.Tensor, chain_info: Optional[dict] = None) -> dict:
+    def _track_reasoning_chain(self, query_embedding: torch.Tensor, response_embedding: torch.Tensor,
+                            chain_info: Optional[dict] = None) -> dict:
         """
         Track reasoning chain metrics for academic analysis.
         Returns a dictionary with 'chain_length', 'confidence', and 'depth'.
@@ -185,7 +186,8 @@ class AlignmentLayer(nn.Module):
             self._log_memory_usage("after_projection")
 
             if attended_features.size(-1) != self.hidden_dim:
-                logger.warning(f"Attended features dimension mismatch: {attended_features.size(-1)} vs {self.hidden_dim}")
+                logger.warning(
+                    f"Attended features dimension mismatch: {attended_features.size(-1)} vs {self.hidden_dim}")
 
             attended_features = self._ensure_device(attended_features, neural_emb.device)
             neural_emb = self._ensure_device(neural_emb, attended_features.device)
@@ -200,12 +202,16 @@ class AlignmentLayer(nn.Module):
 
             aligned_embedding = self.alignment_projection(combined)
             context_score = self.context_analyzer(aligned_embedding)
+            rule_score = self.rule_confidence_gate(aligned_embedding)  # Get rule_score
+
+            # Tuned confidence calculation (incorporating rule_confidence)
+            base_confidence = (
+                                        context_score + rule_score) / 2  # Base confidence from context and rule gates
+            fusion_confidence = torch.clamp(base_confidence + 0.2, 0.3, 0.9)  # Apply clamp and bias
             if rule_confidence is not None:
-                rule_score = self.rule_confidence_gate(aligned_embedding)
-                dynamic_confidence = (context_score + rule_score) / 2
-            else:
-                dynamic_confidence = context_score
-            confidence_score = dynamic_confidence
+                fusion_confidence = fusion_confidence + rule_confidence * 0.1  # Rule context boost
+
+            confidence_score = fusion_confidence  # Use fusion_confidence
 
             # Apply a minimum confidence threshold of 0.1 to avoid zero values.
             MIN_CONFIDENCE = 0.1
@@ -213,7 +219,8 @@ class AlignmentLayer(nn.Module):
 
             self._log_memory_usage("after_alignment")
 
-            fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
+            fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (
+                        1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
 
             # --- Reasoning Chain Metrics Tracking ---
             # Create a basic chain_info dictionary using a dummy traversal.
@@ -239,10 +246,14 @@ class AlignmentLayer(nn.Module):
                 'context_score': context_score.mean().item(),
                 'chain_length': chain_length,
                 'inference_depth': inference_depth,
-                'chain_confidence': chain_conf
+                'chain_confidence': chain_conf,
+                'rule_score': rule_score.mean().item(),  # Include rule_score in debug info
+                'base_confidence': base_confidence.mean().item(),  # Include base_confidence
+                'fusion_confidence': fusion_confidence.mean().item()  # Include fusion_confidence
+
             }
             if rule_confidence is not None:
-                debug_info['rule_score'] = rule_score.mean().item()
+                debug_info['rule_confidence_input'] = rule_confidence  # Include rule_confidence_input if available
 
             logger.info(f"Alignment completed successfully. Confidence: {chain_conf:.4f}")
             self._log_memory_usage("end_forward")

@@ -189,6 +189,19 @@ class HybridIntegrator:
         combined += f"Final Answer: {results[-1]}"
         return combined
 
+    def _assess_symbolic_contribution(self, symbolic_result: Union[List[str], str]) -> float:
+        """
+        Assess the quality/quantity of symbolic matches.
+        Returns a contribution score capped at 0.3.
+        """
+        if isinstance(symbolic_result, list) and symbolic_result:
+            # If the first element indicates no match, return 0.
+            if symbolic_result[0].strip().lower().startswith("no symbolic match"):
+                return 0.0
+            num_matches = len(symbolic_result)
+            return min(0.3, num_matches * 0.1)
+        return 0.0
+
     def _fuse_symbolic_neural(self, query: str, symbolic_result: Union[List[str], str], neural_answer: str,
                               query_complexity: float = 0.5) -> Tuple[str, float, Dict]:
         try:
@@ -208,16 +221,16 @@ class HybridIntegrator:
             symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
 
             # Call the alignment layer to fuse embeddings.
-            aligned_emb, confidence, debug_info = self.alignment_layer(
+            aligned_emb, base_confidence, debug_info = self.alignment_layer(
                 symbolic_emb,
                 neural_emb,
                 rule_confidence=query_complexity
             )
-            # Apply minimum confidence threshold
-            MIN_CONFIDENCE = 0.1
-            if confidence < MIN_CONFIDENCE:
-                confidence = MIN_CONFIDENCE
-
+            # Assess symbolic contribution
+            symbolic_contribution = self._assess_symbolic_contribution(symbolic_result)
+            # Adjust confidence: increase weight of symbolic contribution and set a higher minimum
+            confidence = (base_confidence + 0.1 + symbolic_contribution * 1.5) * 2
+            confidence = max(0.2, min(1.0, confidence))  # Raise minimum from 0.1 to 0.2
             fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, aligned_emb,
                                                               confidence)
             self._update_fusion_metrics(confidence, query_complexity, debug_info)

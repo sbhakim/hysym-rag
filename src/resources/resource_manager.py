@@ -14,7 +14,6 @@ from .adaptive_manager import AdaptiveManager
 
 logger = logging.getLogger("ResourceManager")
 
-
 class ResourceManager:
     """
     Enhanced resource manager for HySym-RAG that tracks CPU, GPU, and memory usage.
