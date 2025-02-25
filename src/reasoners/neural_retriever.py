@@ -36,6 +36,7 @@ class NeuralRetriever:
         if device is None:
             device = DeviceManager.get_device()
         self.device = device
+        self.logger = logger # Added self.logger = logger
 
         ProgressManager.disable_progress()
         transformers_logging.set_verbosity_error()
@@ -84,15 +85,68 @@ class NeuralRetriever:
             if not isinstance(context, str) or not isinstance(question, str):
                 raise ValueError("Context and question must be strings")
 
-            if isinstance(symbolic_guidance, str):
-                symbolic_guidance = [{"response": symbolic_guidance}]
-            elif symbolic_guidance and not isinstance(symbolic_guidance, list):
-                symbolic_guidance = [{"response": str(symbolic_guidance)}]
+            # Standardize symbolic guidance format
+            formatted_guidance = []
             if symbolic_guidance:
-                symbolic_guidance = [
-                    rule if isinstance(rule, dict) else {"response": str(rule)}
-                    for rule in symbolic_guidance
-                ]
+                self.logger.info(f"Processing {len(symbolic_guidance)} symbolic guidance items")
+
+                # Define domains specific to your application
+                domain_keywords = {
+                    "deforestation": ["forest", "tree", "biodiversity", "erosion", "carbon", "soil"],
+                    "climate": ["temperature", "global warming", "carbon dioxide", "climate change", "greenhouse"],
+                    "water": ["water", "rain", "precipitation", "cycle", "drought", "flood"]
+                }
+
+                for rule in symbolic_guidance:
+                    # Handle string rules
+                    if isinstance(rule, str):
+                        rule_text = rule.strip()
+                        if not rule_text:
+                            continue
+
+                        # Heuristic to classify string type
+                        domain_confidence = 0.7  # Default
+                        for domain, keywords in domain_keywords.items():
+                            if any(keyword in rule_text.lower() for keyword in keywords):
+                                domain_confidence = 0.85  # Higher confidence for domain-related rules
+                                break
+
+                        formatted_guidance.append({
+                            "response": rule_text,
+                            "confidence": domain_confidence
+                        })
+
+                    # Handle dictionary rules
+                    elif isinstance(rule, dict):
+                        # Case 1: Already has response key
+                        if "response" in rule and rule["response"]:
+                            formatted_guidance.append({
+                                "response": rule["response"],
+                                "confidence": rule.get("confidence", 0.8)
+                            })
+                        else:
+                            # Case 2: Extract response from other fields
+                            response_text = None
+                            for key in ["statement", "text", "source_text", "content"]:
+                                if key in rule and rule[key]:
+                                    response_text = rule[key]
+                                    break
+
+                            if response_text:
+                                formatted_guidance.append({
+                                    "response": response_text,
+                                    "confidence": rule.get("confidence", 0.8)
+                                })
+                            else:
+                                self.logger.warning(f"Could not extract response from rule: {rule}")
+
+            # Log guidance statistics
+            if formatted_guidance:
+                self.logger.info(f"Successfully formatted {len(formatted_guidance)} guidance rules for retrieval")
+                avg_confidence = sum(rule.get("confidence", 0) for rule in formatted_guidance) / len(formatted_guidance)
+                self.logger.info(f"Average guidance confidence: {avg_confidence:.2f}")
+            else:
+                self.logger.info("No valid guidance rules found for retrieval")
 
             # Validate context before processing
             if isinstance(context, str) and context.strip():
@@ -121,7 +175,7 @@ class NeuralRetriever:
             relevant_chunks = self._get_relevant_chunks(
                 question_embedding,
                 context_chunks,
-                symbolic_guidance
+                formatted_guidance # Use formatted_guidance here - FIX applied!
             )
             if not relevant_chunks:
                 logger.warning("No relevant chunks found; using full context as fallback.")
@@ -137,7 +191,7 @@ class NeuralRetriever:
             prompt = self._create_enhanced_prompt(
                 question,
                 relevant_chunks,
-                symbolic_guidance
+                formatted_guidance # Use formatted_guidance here - FIX applied!
             )
 
             inputs_pt = self.tokenizer(
@@ -362,8 +416,9 @@ class NeuralRetriever:
                 if symbolic_guidance:
                     guidance_boost = self._calculate_guidance_boost(chunk, symbolic_guidance)
                     sim += guidance_boost
-                scored_chunks.append((sim, chunk))
-            scored_chunks.sort(key=lambda x: x[0], reverse=True)
+                scored_chunks.append((sim, chunk))  # Correct Indentation - Inside the loop
+
+            scored_chunks.sort(key=lambda x: x[0], reverse=True)  # Correct Indentation - After the loop
             relevant_chunks = [chunk for sim, chunk in scored_chunks if sim > 0]
             if not relevant_chunks and scored_chunks:
                 logger.warning("No relevant chunks found, using top chunk as fallback.")
@@ -372,6 +427,7 @@ class NeuralRetriever:
         except Exception as e:
             logger.error(f"Error processing chunks: {str(e)}")
             return [chunks[0]] if chunks else []
+
 
     def _calculate_guidance_boost(self,
                                   chunk: Dict,

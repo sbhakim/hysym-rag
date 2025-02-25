@@ -19,7 +19,8 @@ class DimensionalityManager:
     def __init__(self, target_dim: int = 768, device: Optional[torch.device] = None):
         self.target_dim = target_dim
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.alignment_cache: Dict[str, nn.Module] = {}
+        # Registry for adapters keyed by a string of source and input_dim
+        self.adapter_registry: Dict[str, nn.Module] = {}
         self.mismatch_counts: Dict[str, int] = defaultdict(int)
         # Validation layer for explicit 384 to 768 conversion
         self.validation_layer = nn.Sequential(
@@ -33,63 +34,64 @@ class DimensionalityManager:
         """
         Register a pre-initialized adapter module for a given source.
         """
-        self.alignment_cache[name] = adapter.to(self.device)
+        self.adapter_registry[name] = adapter.to(self.device)
         logger.info(f"Adapter registered for {name} with target_dim {self.target_dim}")
+
+    def get_adapter(self, source: str, current_dim: int) -> nn.Module:
+        """
+        Returns a linear adapter from current_dim to target_dim.
+        If one does not exist for the given source, create and register one.
+        """
+        key = f"{source}_{current_dim}_to_{self.target_dim}"
+        if key not in self.adapter_registry:
+            adapter = nn.Linear(current_dim, self.target_dim).to(self.device)
+            self.adapter_registry[key] = adapter
+            logger.info(f"[DEBUG] Created new adapter for {source}: {current_dim} -> {self.target_dim}")
+        return self.adapter_registry[key]
+
+    def align_and_log(self, tensor: torch.Tensor, source: str) -> torch.Tensor:
+        """
+        Align tensor to target_dim if necessary.
+        Logs the dimensions before and after alignment for easier debugging.
+        """
+        if tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0)
+        original_shape = tensor.shape
+        logger.debug(f"[DEBUG] {source} tensor original shape: {original_shape}")
+        if tensor.size(-1) == self.target_dim:
+            logger.debug(f"[DEBUG] {source} tensor already aligned: {original_shape}")
+            return tensor.to(self.device)
+        if tensor.size(-1) == 384:
+            logger.debug(f"[DEBUG] Aligning {source} tensor from 384 to {self.target_dim} using validation_layer")
+            aligned_tensor = self.validation_layer(tensor.to(self.device))
+            logger.debug(f"[DEBUG] {source} tensor aligned: {original_shape} -> {aligned_tensor.shape}")
+            return aligned_tensor
+        adapter = self.get_adapter(source, tensor.size(-1))
+        aligned_tensor = adapter(tensor.to(self.device))
+        logger.debug(f"[DEBUG] {source} tensor aligned using adapter: {original_shape} -> {aligned_tensor.shape}")
+        return aligned_tensor
 
     def align_embeddings(self,
                          embedding: torch.Tensor,
                          source: str,
-                         return_confidence: bool = False) -> torch.Tensor:
+                         return_confidence: bool = False,
+                         already_aligned: bool = False) -> torch.Tensor:
         """
-        Enhanced embedding alignment with adaptive projection, improved validation, and error handling.
+        Enhanced embedding alignment.
+        If already_aligned is True, returns the tensor immediately.
+        Otherwise, delegates to align_and_log for consistent alignment.
+        If return_confidence is True, returns a tuple (aligned_embedding, confidence).
         """
         try:
-            # Ensure embedding is at least 2D.
-            if embedding.dim() == 1:
-                embedding = embedding.unsqueeze(0)
-
-            input_dim = embedding.size(-1)
-            logger.debug(
-                f"Aligning embedding from source '{source}', original dim={input_dim}, target_dim={self.target_dim}, current embedding shape: {embedding.shape}"
-            )
-
-            # If already aligned, return immediately.
-            if input_dim == self.target_dim:
-                logger.debug(f"Embedding from source '{source}' already aligned (dim={input_dim}).")
+            if already_aligned:
+                logger.debug(f"Embedding from source '{source}' is marked as already aligned; skipping alignment.")
                 return (embedding, 1.0) if return_confidence else embedding
-
-            # Use registered adapter if available.
-            if source in self.alignment_cache:
-                adapter = self.alignment_cache[source]
-                logger.debug(f"Using registered adapter for source '{source}'.")
-                if embedding.dim() == 1:
-                    embedding = embedding.unsqueeze(0)  # Ensure 2D input for adapter
-                aligned = adapter(embedding)
-                if aligned.shape[-1] != self.target_dim:
-                    raise ValueError(
-                        f"Aligned embedding dimension {aligned.shape[-1]} from source '{source}' does not match target {self.target_dim}"
-                    )
-                logger.debug(f"Aligned embedding shape using adapter: {aligned.shape}")
-                return aligned
-
-            # Special handling for symbolic embeddings (input_dim == 384).
-            if input_dim == 384:
-                logger.debug(
-                    f"Aligning symbolic embedding from source '{source}' (dim=384) to target dim {self.target_dim} using validation_layer."
-                )
-                aligned = self.validation_layer(embedding)
-                logger.debug(f"Aligned embedding shape using validation_layer: {aligned.shape}")
-                return aligned
-
-            # Dynamic projection for unknown dimensions.
-            logger.debug(
-                f"Aligning embedding from source '{source}' (dim={input_dim}) to target dim {self.target_dim} using dynamic projection."
-            )
-            projection = self._create_projection(input_dim)
-            projected_embedding = projection(embedding)
-            logger.debug(f"Aligned embedding shape using dynamic projection: {projected_embedding.shape}")
-            return projected_embedding
-
+            aligned = self.align_and_log(embedding, source)
+            if return_confidence:
+                confidence = self._calculate_alignment_confidence(embedding, aligned)
+                logger.debug(f"[DEBUG] Alignment confidence for source '{source}': {confidence:.4f}")
+                return aligned, confidence
+            return aligned
         except Exception as e:
             logger.error(f"Error in alignment for source '{source}': {str(e)}")
             raise
@@ -104,7 +106,6 @@ class DimensionalityManager:
             nn.ReLU(),
             nn.Dropout(0.1)
         )
-        # Initialize weights with smart scaling
         with torch.no_grad():
             std = (2.0 / (input_dim + self.target_dim)) ** 0.5
             projection[0].weight.data.normal_(0.0, std)
@@ -118,7 +119,6 @@ class DimensionalityManager:
         """
         with torch.no_grad():
             if original.size(-1) != aligned.size(-1):
-                # Create a temporary projector if dimensions differ (should not happen if correctly configured).
                 projector = nn.Linear(original.size(-1), aligned.size(-1)).to(original.device)
                 original = projector(original)
                 logger.warning("Dimension mismatch in _calculate_alignment_confidence, using temporary projector.")
@@ -130,6 +130,6 @@ class DimensionalityManager:
         Returns statistics about registered adapters and dimension mismatches.
         """
         return {
-            "total_adapters": len(self.alignment_cache),
+            "total_adapters": len(self.adapter_registry),
             "mismatch_counts": dict(self.mismatch_counts)
         }

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
 import logging
 import json
+import time
 from pathlib import Path
 import torch
 import pandas as pd
@@ -70,7 +71,8 @@ class MetricsCollector:
             'path_choices': [],
             'step_accuracy': [],
             'inference_depth': [],
-            'fact_coverage': []
+            'fact_coverage': [],
+            'chains': []  # To store complete reasoning chain info
         }
         # Component performance tracking (per component: execution_time, success_rate, error_rate, resource_usage)
         self.component_metrics = defaultdict(lambda: {
@@ -247,6 +249,21 @@ class MetricsCollector:
                 'mean': 0.0, 'std': 0.0,
                 'distribution': {'histogram': [], 'bin_edges': []}
             }
+        # --- New: Reasoning Chain Metrics ---
+        chain_lengths = self.reasoning_metrics.get('chain_length', [])
+        if not chain_lengths and self.reasoning_metrics.get('chains'):
+            chain_lengths = [chain.get('chain_length', len(chain.get('steps', [])))
+                             for chain in self.reasoning_metrics['chains']]
+        if chain_lengths:
+            stats['reasoning_chains'] = {
+                'mean_length': float(np.mean(chain_lengths)),
+                'max_length': float(max(chain_lengths)),
+                'std_length': float(np.std(chain_lengths))
+            }
+        else:
+            stats['reasoning_chains'] = {
+                'mean_length': 0.0, 'max_length': 0, 'std_length': 0.0
+            }
         return stats
 
     def _calculate_success_rate(self, path_metrics: List[Dict[str, Any]]) -> float:
@@ -355,7 +372,6 @@ class MetricsCollector:
             if values:
                 mean_val = float(np.mean(values))
                 peak_val = float(np.max(values))
-                # Prevent negative efficiency scores; if peak is zero, set score to None.
                 efficiency_score = max(0.0, 1 - (mean_val / peak_val)) if peak_val != 0 else None
                 efficiency_metrics[resource] = {
                     'mean_usage': mean_val,
@@ -406,7 +422,6 @@ class MetricsCollector:
         """
         ablation_analysis = {}
         for component, results in self.ablation_results.items():
-            # Ensure results exist and contain both baseline and modified
             if not results or 'baseline_report' not in results or 'modified_report' not in results:
                 ablation_analysis[component] = {"error": "No results or incomplete results"}
                 continue
@@ -415,7 +430,6 @@ class MetricsCollector:
             ablated = results['modified_report']
 
             impact_metrics = {}
-            # Compare mean values from baseline and ablated reports
             for metric_key in baseline:
                 if (metric_key in ablated
                     and isinstance(baseline[metric_key], dict)
@@ -424,10 +438,7 @@ class MetricsCollector:
                     and 'mean' in ablated[metric_key]):
                     base_val = baseline[metric_key]['mean']
                     abl_val = ablated[metric_key]['mean']
-                    if abs(base_val) > 1e-9:
-                        relative_change = (abl_val - base_val) / base_val
-                    else:
-                        relative_change = 0.0
+                    relative_change = (abl_val - base_val) / base_val if abs(base_val) > 1e-9 else 0.0
                     impact_metrics[f'{metric_key}_impact'] = relative_change
                 else:
                     impact_metrics[f'{metric_key}_impact'] = "metric_unavailable"
@@ -435,16 +446,12 @@ class MetricsCollector:
         return ablation_analysis
 
     def _calculate_significance(self, baseline_vals: List[float], ablated_vals: List[float]) -> Dict[str, float]:
-        """
-        Calculate significance between baseline and ablated metrics.
-        """
         if len(baseline_vals) < 2 or len(ablated_vals) < 2:
             return {}
         t_stat, p_value = stats.ttest_rel(baseline_vals, ablated_vals)
         return {'t_statistic': float(t_stat), 'p_value': float(p_value)}
 
     def _run_statistical_tests(self) -> Dict[str, Any]:
-        """Run comprehensive statistical analysis."""
         tests = {}
         for metric, values in self.statistical_data.items():
             if len(values) >= 2:
@@ -459,17 +466,12 @@ class MetricsCollector:
         return tests
 
     def _calculate_correlations(self) -> Dict[str, float]:
-        """Calculate correlations among different metrics."""
-        # Placeholder implementation
         return {"correlation_coefficient": 0.5}
 
     def _perform_regression_analysis(self) -> Dict[str, Any]:
-        """Perform regression analysis on selected metrics."""
-        # Placeholder implementation
         return {"slope": 0.1, "intercept": 0.0, "r_squared": 0.6}
 
     def _calculate_confidence_intervals(self) -> Dict[str, Dict[str, float]]:
-        """Calculate confidence intervals for key metrics."""
         confidence_intervals = {}
         for metric, values in self.statistical_data.items():
             if len(values) >= 2:
@@ -487,10 +489,6 @@ class MetricsCollector:
         return confidence_intervals
 
     def _calculate_efficiency_trends(self) -> Dict[str, float]:
-        """
-        Calculate resource usage trends across queries.
-        This computes the difference between the last and first recorded usage.
-        """
         trends = {"cpu": 0.0, "memory": 0.0, "gpu": 0.0}
         query_metrics_list = list(self.metrics['query_metrics'].values())
         if len(query_metrics_list) < 2:
@@ -504,9 +502,6 @@ class MetricsCollector:
         return trends
 
     def _save_metrics(self) -> None:
-        """
-        Save current metrics to disk.
-        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         metrics_file = self.metrics_dir / f"metrics_{self.experiment_name}_{timestamp}.json"
         try:
@@ -517,9 +512,6 @@ class MetricsCollector:
             self.logger.error(f"Error saving metrics: {str(e)}")
 
     def get_real_time_metrics(self) -> Dict[str, Any]:
-        """
-        Get real-time metrics for monitoring.
-        """
         return {
             'current_query_count': self.query_count,
             'average_processing_time': float(np.mean(self.metrics['timing']['processing_times']))
@@ -537,9 +529,6 @@ class MetricsCollector:
     def _calculate_performance_metrics(self,
                                        prediction: str,
                                        ground_truth: str) -> Dict[str, float]:
-        """
-        Calculate detailed performance metrics for a prediction.
-        """
         return {
             'exact_match': float(prediction == ground_truth),
             'char_error_rate': self._calculate_char_error_rate(prediction, ground_truth),
@@ -549,10 +538,6 @@ class MetricsCollector:
         }
 
     def _calculate_char_error_rate(self, prediction: str, ground_truth: str) -> float:
-        """
-        Calculate character error rate between prediction and ground truth
-        using a simple Levenshtein distance.
-        """
         def levenshtein(s1, s2):
             if len(s1) < len(s2):
                 return levenshtein(s2, s1)
@@ -571,3 +556,47 @@ class MetricsCollector:
 
         distance = levenshtein(prediction, ground_truth)
         return distance / max(len(ground_truth), 1)
+
+    def get_integration_metrics(self) -> Dict[str, Any]:
+        if not self.integration_metrics['reasoning_steps']:
+            return {
+                'alignment_quality': {'mean': 0.0, 'std': 0.0},
+                'reasoning_depth': {'avg_steps': 0.0, 'max_steps': 0},
+                'fusion_quality': {'mean': 0.0, 'std': 0.0}
+            }
+        return {
+            'alignment_quality': {
+                'mean': float(np.mean(self.integration_metrics['alignment_scores'])),
+                'std': float(np.std(self.integration_metrics['alignment_scores']))
+            },
+            'reasoning_depth': {
+                'avg_steps': float(np.mean(self.integration_metrics['reasoning_steps'])),
+                'max_steps': max(self.integration_metrics['reasoning_steps'])
+            },
+            'fusion_quality': {
+                'mean': float(np.mean(self.integration_metrics['fusion_quality'])),
+                'std': float(np.std(self.integration_metrics['fusion_quality']))
+            }
+        }
+
+    def _get_symbolic_guidance(self, symbolic_result: List[str], hop: Dict[str, Any]) -> List[str]:
+        return symbolic_result
+
+    def _encode_text(self, text: str) -> torch.Tensor:
+        from sentence_transformers import SentenceTransformer
+        embedder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+        return embedder.encode(text, convert_to_tensor=True).to(self.device)
+
+    def _generate_cache_key(self, query: str, context: str) -> str:
+        return f"{hash(query)}_{hash(context)}"
+
+    def _get_cache(self, key: str) -> Optional[Tuple[str, str]]:
+        if key in self.cache:
+            result, timestamp = self.cache[key]
+            if time.time() - timestamp < self.cache_ttl:
+                return result
+            del self.cache[key]
+        return None
+
+    def _set_cache(self, key: str, result: Tuple[str, str]):
+        self.cache[key] = (result, time.time())

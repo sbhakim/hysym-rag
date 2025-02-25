@@ -1,4 +1,5 @@
-#src/knowledge_integrator.py
+# src/knowledge_integrator.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,33 +9,49 @@ from typing import Tuple, Optional, List
 from src.utils.device_manager import DeviceManager
 from src.utils.dimension_manager import DimensionalityManager
 
-#Configure logging to DEBUG level to capture detailed logs
+# Configure logging to DEBUG level to capture detailed logs
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+
 class AlignmentLayer(nn.Module):
     def __init__(
-        self,
-        sym_dim: int,  # Corrected: Added to __init__ signature
-        neural_dim: int,  # Corrected: Added to __init__ signature
-        target_dim: int = 768,
-        num_heads: int = 4,  # unused right now.
-        dropout: float = 0.1,
-        device: Optional[torch.device] = None,
-        dim_manager: Optional[DimensionalityManager] = None
-        ):
+            self,
+            sym_dim: int,  # Corrected: Added to __init__ signature
+            neural_dim: int,  # Corrected: Added to __init__ signature
+            target_dim: int = 768,
+            num_heads: int = 4,  # unused right now.
+            dropout: float = 0.1,
+            device: Optional[torch.device] = None,
+            dim_manager: Optional[DimensionalityManager] = None,
+            # New hyperparameters for confidence calculation:
+            scaling_factor: float = 9.0,
+            base_confidence_value: float = 0.3,
+            context_weight: float = 0.3,
+            rule_weight: float = 0.3,
+            min_confidence: float = 0.5,
+            max_confidence: float = 0.95
+    ):
         """
         Enhanced alignment layer with dynamic dimension handling, confidence-weighted fusion,
         and reasoning chain tracking for academic evaluation.
         """
-        super().__init__() # Corrected: Use super().__init__() to properly initialize nn.Module
+        super().__init__()
         self.device = device if device is not None else DeviceManager.get_device()
         self.head_dim = 64
         self.num_heads = num_heads  # currently unused
         self.hidden_dim = self.head_dim * num_heads
         self.target_dim = target_dim
-        self.dim_manager = dim_manager or DimensionalityManager(target_dim=target_dim, device=device)
+        self.dim_manager = dim_manager or DimensionalityManager(target_dim=target_dim, device=self.device)
+
+        # New hyperparameters for adaptive confidence calculation
+        self.scaling_factor = scaling_factor
+        self.base_confidence_value = base_confidence_value
+        self.context_weight = context_weight
+        self.rule_weight = rule_weight
+        self.min_confidence = min_confidence
+        self.max_confidence = max_confidence
 
         # New projection adapters: project from target_dim (768) to hidden_dim (256)
         self.sym_projection_adapter = nn.Linear(target_dim, self.hidden_dim)
@@ -123,9 +140,9 @@ class AlignmentLayer(nn.Module):
             logger.debug(f"Attention Scores shape: {attention_scores.shape}")  # Expected: [batch, num_heads, 1, 1]
             attention_weights = F.softmax(attention_scores, dim=-1)
             attended_features = torch.matmul(attention_weights,
-                                            neural_heads)  # Expected output: [batch, num_heads, 1, head_dim]
+                                             neural_heads)  # Expected output: [batch, num_heads, 1, head_dim]
             attended_features = attended_features.view(batch_size, -1,
-                                                    self.hidden_dim)  # Expected output: [batch, 1, hidden_dim]
+                                                       self.hidden_dim)  # Expected output: [batch, 1, hidden_dim]
             logger.debug(f"Attended features shape: {attended_features.shape}")  # Expected: [batch, 1, hidden_dim]
 
             return attended_features, attention_weights
@@ -145,7 +162,7 @@ class AlignmentLayer(nn.Module):
         return ["Symbolic response" for _ in range(hop_count)]
 
     def _track_reasoning_chain(self, query_embedding: torch.Tensor, response_embedding: torch.Tensor,
-                            chain_info: Optional[dict] = None) -> dict:
+                               chain_info: Optional[dict] = None) -> dict:
         """
         Track reasoning chain metrics for academic analysis.
         Returns a dictionary with 'chain_length', 'confidence', and 'depth'.
@@ -176,10 +193,12 @@ class AlignmentLayer(nn.Module):
             Tuple[torch.Tensor, float, Optional[dict]]:
         try:
             self._log_memory_usage("start_forward")
+
+            # Validate and ensure device placement for inputs
             sym_emb = self._validate_and_prepare_input(sym_emb, "Symbolic")
             neural_emb = self._validate_and_prepare_input(neural_emb, "Neural")
-
-            sym_emb = self._ensure_device(sym_emb, neural_emb.device)
+            sym_emb = self._ensure_device(sym_emb)
+            neural_emb = self._ensure_device(neural_emb)
             self._log_memory_usage("after_device_placement")
 
             attended_features, attention_weights = self.dynamic_project(sym_emb, neural_emb)
@@ -189,8 +208,8 @@ class AlignmentLayer(nn.Module):
                 logger.warning(
                     f"Attended features dimension mismatch: {attended_features.size(-1)} vs {self.hidden_dim}")
 
-            attended_features = self._ensure_device(attended_features, neural_emb.device)
-            neural_emb = self._ensure_device(neural_emb, attended_features.device)
+            attended_features = self._ensure_device(attended_features)
+            neural_emb = self._ensure_device(neural_emb)
             # Project neural embedding to hidden_dim space:
             neural_proj = self.neural_projection_adapter(neural_emb)
             neural_proj = self.neural_projection(neural_proj)
@@ -203,24 +222,49 @@ class AlignmentLayer(nn.Module):
             aligned_embedding = self.alignment_projection(combined)
             context_score = self.context_analyzer(aligned_embedding)
             rule_score = self.rule_confidence_gate(aligned_embedding)  # Get rule_score
+            context_score_val = context_score.mean().item()
+            rule_score_val = rule_score.mean().item()
 
-            # Tuned confidence calculation (incorporating rule_confidence)
-            base_confidence = (
-                                        context_score + rule_score) / 2  # Base confidence from context and rule gates
-            fusion_confidence = torch.clamp(base_confidence + 0.2, 0.3, 0.9)  # Apply clamp and bias
+
+            # --- Enhanced Adaptive Confidence Calculation ---
+            # Use hyperparameters from the class attributes
+            # Calculate base confidence from context and rule gates
+            base_confidence = self.base_confidence_value + (
+                    context_score_val * self.context_weight) + (
+                                      rule_score_val * self.rule_weight)
+
+            # Calculate semantic similarity between symbolic and neural embeddings
+            sim_score = F.cosine_similarity(sym_emb.view(1, -1), neural_emb.view(1, -1)).item()
+            # Apply logarithmic scaling with the tunable scaling factor
+            scaled_sim = self.base_confidence_value + self.context_weight * math.log(
+                1 + self.scaling_factor * sim_score)
+
+            # Adaptive boost based on similarity
+            adaptive_boost = 0.1 + (scaled_sim * 0.2)
+
+            # Combine base confidence and adaptive boost, with floor and ceiling limits
+            fusion_confidence_tensor = torch.tensor(base_confidence + adaptive_boost, device=self.device)
+            fusion_confidence = torch.clamp(fusion_confidence_tensor, self.min_confidence, self.max_confidence)
+
+            # Apply rule confidence impact if provided
             if rule_confidence is not None:
-                fusion_confidence = fusion_confidence + rule_confidence * 0.1  # Rule context boost
+                rule_boost = rule_confidence * 0.2
+                fusion_confidence = torch.min(
+                    torch.tensor(self.max_confidence, device=self.device),
+                    fusion_confidence + rule_boost
+                )
 
-            confidence_score = fusion_confidence  # Use fusion_confidence
+            confidence_score = fusion_confidence
 
-            # Apply a minimum confidence threshold of 0.1 to avoid zero values.
-            MIN_CONFIDENCE = 0.1
-            confidence_score = torch.max(confidence_score, torch.tensor(MIN_CONFIDENCE, device=confidence_score.device))
+            logger.info(f"Alignment confidence calculation: sim_score={sim_score:.4f}, scaled_sim={scaled_sim:.4f}, "
+                        f"context_score={context_score_val:.4f}, rule_score={rule_score_val:.4f}, "
+                        f"base_confidence={base_confidence:.4f}, adaptive_boost={adaptive_boost:.4f}, "
+                        f"final_confidence={confidence_score.item():.4f}")
 
             self._log_memory_usage("after_alignment")
 
             fused_embedding = confidence_score.unsqueeze(-1) * aligned_embedding + (
-                        1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
+                    1 - confidence_score.unsqueeze(-1)) * neural_emb.unsqueeze(1)
 
             # --- Reasoning Chain Metrics Tracking ---
             # Create a basic chain_info dictionary using a dummy traversal.
@@ -243,21 +287,20 @@ class AlignmentLayer(nn.Module):
                 'fused_emb_shape': list(fused_embedding.shape),
                 'attended_features_shape': list(attended_features.shape),
                 'combined_shape': list(combined.shape),
-                'context_score': context_score.mean().item(),
+                'context_score': context_score_val,
                 'chain_length': chain_length,
                 'inference_depth': inference_depth,
                 'chain_confidence': chain_conf,
-                'rule_score': rule_score.mean().item(),  # Include rule_score in debug info
-                'base_confidence': base_confidence.mean().item(),  # Include base_confidence
-                'fusion_confidence': fusion_confidence.mean().item()  # Include fusion_confidence
-
+                'rule_score': rule_score_val,
+                'base_confidence': base_confidence,
+                'fusion_confidence': fusion_confidence.item()
             }
             if rule_confidence is not None:
-                debug_info['rule_confidence_input'] = rule_confidence  # Include rule_confidence_input if available
+                debug_info['rule_confidence_input'] = rule_confidence
 
-            logger.info(f"Alignment completed successfully. Confidence: {chain_conf:.4f}")
+            logger.info(f"Alignment completed successfully. Confidence: {confidence_score.item():.4f}") # Corrected logging here
             self._log_memory_usage("end_forward")
-            return fused_embedding, chain_conf, debug_info
+            return fused_embedding, confidence_score.item(), debug_info # Corrected return here
 
         except Exception as e:
             logger.error(f"Unexpected error in forward pass: {str(e)}")

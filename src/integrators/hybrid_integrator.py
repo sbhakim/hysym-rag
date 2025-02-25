@@ -48,10 +48,11 @@ class HybridIntegrator:
             'fusion_quality': [],
             'reasoning_steps': [],
             'step_success': [],
+            'path_lengths': [],
             'resource_usage': defaultdict(list)
         }
         self.fusion_metrics = defaultdict(list)
-        self.reasoning_chains = defaultdict(list)
+        self.reasoning_chains = defaultdict(dict)
         self.cache = {}
         self.cache_ttl = cache_ttl
 
@@ -92,8 +93,8 @@ class HybridIntegrator:
         else:
             filtered_context = self.rg_retriever.filter_context_by_rules(context, symbolic_guidance)
         neural_answer = self.neural.retrieve_answer(filtered_context, query,
-                                                     symbolic_guidance=symbolic_guidance,
-                                                     query_complexity=0.5)
+                                                    symbolic_guidance=symbolic_guidance,
+                                                    query_complexity=0.5)
         fused_answer, confidence, debug_info = self._fuse_symbolic_neural(
             query, symbolic_result, neural_answer, query_complexity=0.5
         )
@@ -110,6 +111,7 @@ class HybridIntegrator:
                 reasoning_chain = self.query_expander.decompose_query(query)
             else:
                 reasoning_chain = self._extract_reasoning_chain(query, context)
+
             if not reasoning_chain:
                 self.logger.warning("Could not extract reasoning chain")
                 return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
@@ -118,20 +120,17 @@ class HybridIntegrator:
             current_context = context
             accumulated_knowledge = ""
 
+            # Process each hop in the reasoning chain
             for hop_idx, hop in enumerate(reasoning_chain):
-                # Get symbolic guidance for this hop
                 symbolic_guidance = self._get_symbolic_guidance(symbolic_result, hop)
-                # Update context with accumulated knowledge
                 enriched_context = current_context
                 if accumulated_knowledge:
                     enriched_context = f"{current_context}\n\nPrevious findings:\n{accumulated_knowledge}"
-                # Filter context for this hop
                 filtered_context = self.rg_retriever.filter_context_by_rules(
                     enriched_context,
                     symbolic_guidance,
                     query_complexity=0.7
                 )
-                # Get hop response using both symbolic and neural components
                 hop_response = self.neural.retrieve_answer(
                     filtered_context,
                     hop['question'],
@@ -146,26 +145,68 @@ class HybridIntegrator:
                         'context_used': filtered_context
                     })
                     accumulated_knowledge += f"\nStep {hop_idx + 1}: {hop_response}"
-                    # Optionally update current_context for subsequent hops
                     current_context += " " + hop_response
 
-            # Combine hop responses into a final answer
+            # If no intermediate results, fallback to single-hop processing
+            if not intermediate_results:
+                self.logger.warning(f"No intermediate results for query: {query}")
+                return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
+
+            # Create a structured representation of the reasoning chain
+            reasoning_chain_info = {
+                'chain_id': hash(query),
+                'query': query,
+                'chain_length': len(intermediate_results),
+                'hop_count': len(reasoning_chain),
+                'steps': [],
+                'overall_confidence': 0.0
+            }
+
+            # Calculate confidence scores for each hop and track them
+            hop_confidences = []
+            for idx, (hop, res) in enumerate(zip(reasoning_chain, intermediate_results)):
+                base_conf = 0.5 + (0.1 * idx)
+                response_length = len(res.get('response', '').split())
+                length_boost = min(0.2, response_length / 500)  # Cap at 0.2
+                hop_conf = min(0.95, base_conf + length_boost)
+                hop_confidences.append(hop_conf)
+                reasoning_chain_info['steps'].append({
+                    'hop_idx': idx,
+                    'question': hop.get('question', ''),
+                    'response': res.get('response', ''),
+                    'confidence': hop_conf,
+                    'type': 'multi_hop'
+                })
+            if hop_confidences:
+                reasoning_chain_info['overall_confidence'] = sum(hop_confidences) / len(hop_confidences)
+
+            # Store metrics in integration_metrics
+            self.integration_metrics['reasoning_steps'].append(len(reasoning_chain))
+            self.integration_metrics['path_lengths'].append(len(intermediate_results))
+            if not self.integration_metrics.get('chain_lengths'):
+                self.integration_metrics['chain_lengths'] = []
+            if not self.integration_metrics.get('chain_confidences'):
+                self.integration_metrics['chain_confidences'] = []
+            if not self.integration_metrics.get('inference_depths'):
+                self.integration_metrics['inference_depths'] = []
+            self.integration_metrics['chain_lengths'].append(reasoning_chain_info['chain_length'])
+            self.integration_metrics['chain_confidences'].append(reasoning_chain_info['overall_confidence'])
+            self.integration_metrics['inference_depths'].append(reasoning_chain_info['hop_count'])
+
+            # Store the reasoning chain
+            self.reasoning_chains[reasoning_chain_info['chain_id']] = reasoning_chain_info
+
             final_answer = self._combine_hop_results(
                 [res['response'] for res in intermediate_results],
                 reasoning_chain
             )
 
-            # Update integration metrics
-            self.integration_metrics['reasoning_steps'].append(len(reasoning_chain))
-            if len(reasoning_chain) > 0:
-                self.integration_metrics['step_success'].append(len(intermediate_results) / len(reasoning_chain))
-            else:
-                self.integration_metrics['step_success'].append(0)
-
-            # Final fusion with symbolic knowledge
             fused_answer, confidence, debug_info = self._fuse_symbolic_neural(
                 query, symbolic_result, final_answer, query_complexity=0.7
             )
+
+            debug_info['reasoning_chain'] = reasoning_chain_info
+
             return (fused_answer, "hybrid")
 
         except Exception as e:
@@ -195,7 +236,6 @@ class HybridIntegrator:
         Returns a contribution score capped at 0.3.
         """
         if isinstance(symbolic_result, list) and symbolic_result:
-            # If the first element indicates no match, return 0.
             if symbolic_result[0].strip().lower().startswith("no symbolic match"):
                 return 0.0
             num_matches = len(symbolic_result)
@@ -220,17 +260,28 @@ class HybridIntegrator:
 
             symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
 
-            # Call the alignment layer to fuse embeddings.
-            aligned_emb, base_confidence, debug_info = self.alignment_layer(
-                symbolic_emb,
-                neural_emb,
-                rule_confidence=query_complexity
-            )
-            # Assess symbolic contribution
+            try:
+                aligned_emb, base_confidence, debug_info = self.alignment_layer(
+                    symbolic_emb,
+                    neural_emb,
+                    rule_confidence=query_complexity
+                )
+            except Exception as e:
+                self.logger.warning(f"Alignment layer error: {str(e)}. Using fallback values.")
+                aligned_emb = neural_emb
+                base_confidence = 0.4
+                debug_info = {"error": str(e), "fallback": True}
+
+            if base_confidence <= 0.0:
+                base_confidence = 0.4
+
+            confidence = (base_confidence + 0.2)
+            confidence = min(1.0, confidence)
+
             symbolic_contribution = self._assess_symbolic_contribution(symbolic_result)
-            # Adjust confidence: increase weight of symbolic contribution and set a higher minimum
-            confidence = (base_confidence + 0.1 + symbolic_contribution * 1.5) * 2
-            confidence = max(0.2, min(1.0, confidence))  # Raise minimum from 0.1 to 0.2
+            confidence = (confidence + symbolic_contribution * 1.5)
+            confidence = max(0.3, min(1.0, confidence))
+
             fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, aligned_emb,
                                                               confidence)
             self._update_fusion_metrics(confidence, query_complexity, debug_info)
@@ -317,3 +368,5 @@ class HybridIntegrator:
 
     def _set_cache(self, key: str, result: Tuple[str, str]):
         self.cache[key] = (result, time.time())
+
+

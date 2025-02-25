@@ -165,6 +165,18 @@ class ResourceManager:
             if len(self.usage_history[key]) > self.history_window_size:
                 self.usage_history[key].pop(0)
 
+    def _calculate_trend(self, values: List[float]) -> float:
+        """
+        Calculate the trend (slope) over a list of values using linear regression.
+        Returns 0.0 if there are fewer than 2 values.
+        """
+        if len(values) < 2:
+            return 0.0
+        x = np.arange(len(values))
+        y = np.array(values)
+        slope = np.polyfit(x, y, 1)[0]
+        return slope
+
     def optimize_resources(self) -> Dict[str, float]:
         """
         Calculate optimal resource allocations based on current usage and
@@ -173,14 +185,54 @@ class ResourceManager:
         with self._lock:
             current_usage = self.check_resources()
             optimal_allocations = {}
+
+            # Calculate resource usage trends over recent history (last 5 samples)
+            usage_trends = {}
+            for resource, values in self.usage_history.items():
+                if len(values) >= 5:
+                    usage_trends[resource] = self._calculate_trend(values[-5:])
+                else:
+                    usage_trends[resource] = 0.0
+
+            # Get query complexity trend if available from the adaptive manager
+            complexity_data = self.adaptive_manager.statistical_data.get('complexity', [])
+            if len(complexity_data) >= 5:
+                complexity_trend = self._calculate_trend(complexity_data[-5:])
+            else:
+                complexity_trend = 0.0
+
+            # Process each resource with adaptive optimization
             for resource, usage in current_usage.items():
                 base_threshold = self.thresholds.get(resource, {}).get("base_threshold", 0.8)
                 adjustment_factor = self.thresholds.get(resource, {}).get("adjustment_factor", 0.1)
-                if usage > base_threshold:
-                    new_target = max(0.0, base_threshold - adjustment_factor)
+
+                # Calculate dynamic factor based on resource type and trends
+                if resource == 'gpu' and complexity_trend > 0.05:
+                    # If complexity is trending up, be more conservative with GPU
+                    dynamic_factor = adjustment_factor * (1 + complexity_trend * 2)
+                    dynamic_factor = min(0.25, dynamic_factor)  # Cap at 0.25
+                elif resource == 'cpu' and usage_trends.get('gpu', 0) > 0.1:
+                    # If GPU usage is trending up, prepare CPU for potential offloading
+                    dynamic_factor = adjustment_factor * 0.5  # Less aggressive CPU optimization
                 else:
-                    new_target = base_threshold
+                    dynamic_factor = adjustment_factor
+
+                # Calculate target with more aggressive thresholds
+                if usage > base_threshold * 0.9:
+                    new_target = max(0.0, base_threshold - dynamic_factor)
+                else:
+                    # Add small headroom for unexpected spikes
+                    new_target = min(base_threshold, usage + 0.05)
                 optimal_allocations[resource] = new_target
+
+            # Cross-resource balancing: if GPU target is high and CPU target is low, adjust accordingly
+            if 'cpu' in optimal_allocations and 'gpu' in optimal_allocations:
+                cpu_target = optimal_allocations['cpu']
+                gpu_target = optimal_allocations['gpu']
+                if gpu_target > 0.7 and cpu_target < 0.4:
+                    optimal_allocations['gpu'] = max(0.6, gpu_target - 0.1)
+                    optimal_allocations['cpu'] = min(0.7, cpu_target + 0.2)
+                    self.logger.info("Balancing workload from GPU to CPU")
             return optimal_allocations
 
     def optimize_query_processing(self, query_complexity: float, current_usage: Dict[str, float]) -> Dict[str, Any]:
