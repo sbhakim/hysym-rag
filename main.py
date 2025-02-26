@@ -29,10 +29,12 @@ import os
 import json
 import torch
 import warnings
-import logging
 import time
 from collections import defaultdict
 import torch.nn as nn
+import logging
+import urllib3
+urllib3.disable_warnings()
 
 # Set up basic logging for all components
 logging.basicConfig(
@@ -90,8 +92,14 @@ if __name__ == "__main__":
     ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
     logging.getLogger('transformers').setLevel(logging.ERROR)
     logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
     logging.getLogger('DimensionalityManager').setLevel(logging.DEBUG)
     logger.setLevel(logging.DEBUG)
+
+    # Disable HTTP connection pool warnings
+    requests_log = logging.getLogger("urllib3.connectionpool")
+    requests_log.setLevel(logging.WARNING)
+    requests_log.propagate = False
 
     # 1. Load configuration
     print("Loading configuration...")
