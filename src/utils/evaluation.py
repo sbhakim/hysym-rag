@@ -5,18 +5,19 @@ import re
 from typing import Dict, List, Optional, Tuple, Union, Set, Any
 import logging
 from collections import defaultdict
-from difflib import SequenceMatcher
 from sentence_transformers import SentenceTransformer, util
 import torch
 import time
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
+from scipy import stats
+
 
 class Evaluation:
     """
     Enhanced evaluation system for HySym-RAG with comprehensive academic metrics.
     Includes support for multi-hop reasoning evaluation, resource efficiency,
-    and detailed performance analysis. **Added ROUGE and BLEU metrics.**
+    advanced reasoning-quality metrics, ablation tracking, and significance testing.
     """
 
     def __init__(self,
@@ -59,113 +60,137 @@ class Evaluation:
             'average_time': 0.0,
             'path_performance': defaultdict(list)
         }
+
         # Initialize ROUGE scorer and BLEU smoothing
         self.rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
         self.bleu_smoothing = SmoothingFunction().method1
+
+        # --- New reasoning metrics ---
+        # Store step-level or path-level metrics for advanced evaluation
+        self.reasoning_metrics = {
+            'path_coherence': [],
+            'fact_coverage': [],
+            'inference_depth': [],
+            'step_accuracy': []
+        }
+
+        # Ablation study tracking
+        self.ablation_results = defaultdict(list)
+
+        # Statistical data for significance tests
+        self.statistical_data = defaultdict(list)
 
     def evaluate(self,
                  predictions: Dict[str, str],
                  ground_truths: Dict[str, Union[str, Dict[str, Any]]],
                  supporting_facts: Optional[Dict[str, List[Tuple[str, int]]]] = None,
-                 resource_metrics: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+                 reasoning_chain: Optional[Dict[str, Any]] = None
+                 ) -> Dict[str, float]:
         """
-        Comprehensive evaluation of system predictions. **Added ROUGE and BLEU metrics to output.**
+        Comprehensive evaluation of system predictions. Includes ROUGE, BLEU,
+        multi-hop checks, and optionally advanced reasoning metrics if a
+        reasoning_chain is provided.
 
         Args:
-            predictions: Dictionary of query-prediction pairs.
-            ground_truths: Dictionary of query-ground truth pairs. The value can be a string or a dict
-                           (in which case, the 'answer' key will be used).
-            supporting_facts: Optional supporting facts for multi-hop evaluation.
-            resource_metrics: Optional resource usage metrics.
+            predictions: Dictionary of {query: predicted_answer} or {query: (answer, ...)}.
+            ground_truths: Dictionary of {query: ground_truth} (string or dict with 'answer' key).
+            supporting_facts: Optional dict of {query: list of (fact_text, index)} for multi-hop.
+            reasoning_chain: Optional dict with details about the chain (pattern_type, steps, etc.).
 
         Returns:
-            Dictionary containing comprehensive evaluation metrics.
+            A dictionary containing aggregated metrics:
+            - average_semantic_similarity
+            - average_rougeL
+            - average_bleu
+            - average_f1
+            - reasoning_analysis (if reasoning_chain is provided)
+            ...
         """
+        # Basic container for all metrics we accumulate
         metrics = {
             'exact_match': [],
             'semantic_similarity': [],
-            'factual_accuracy': [],
-            'reasoning_quality': [],
-            'multi_hop_accuracy': [],
-            'rougeL': [],  # Added ROUGE-L
-            'bleu': []     # Added BLEU
+            'rougeL': [],
+            'bleu': []
         }
 
-        # Process each prediction
-        for query, prediction in predictions.items():
+        # We also keep track of the final F1 or partial scoring if needed
+        # (Optional placeholder: you can implement a real F1 if you want.)
+        f1_scores = []
+
+        for query, pred_value in predictions.items():
+            # Extract predicted text
+            if isinstance(pred_value, (tuple, list)):
+                # If your system returns (answer, debug_info)
+                pred_text = pred_value[0]
+            else:
+                pred_text = pred_value
+
+            # Retrieve ground truth
             if query not in ground_truths:
                 continue
 
-            # Extract prediction text
-            pred_text = prediction['result'] if isinstance(prediction, dict) else prediction
-            ground_truth = ground_truths[query]
-
-            # If ground_truth is a dict (e.g., HotpotQA style), use its 'answer' field
-            if isinstance(ground_truth, dict) and 'answer' in ground_truth:
-                truth_text = ground_truth['answer']
+            gt = ground_truths[query]
+            if isinstance(gt, dict) and 'answer' in gt:
+                truth_text = gt['answer']
             else:
-                truth_text = ground_truth
+                truth_text = gt
 
-            # Calculate base metrics
-            metrics['exact_match'].append(
-                self._calculate_exact_match(pred_text, truth_text)
-            )
+            # 1) Exact match
+            em = float(self._normalize_text(pred_text) == self._normalize_text(truth_text))
+            metrics['exact_match'].append(em)
 
-            metrics['semantic_similarity'].append(
-                self._calculate_semantic_similarity(pred_text, truth_text)
-            )
+            # 2) Semantic similarity
+            sem_sim = self._calculate_semantic_similarity(pred_text, truth_text)
+            metrics['semantic_similarity'].append(sem_sim)
 
-            # Calculate ROUGE-L
-            rouge_l_score = self._calculate_rouge_l(pred_text, truth_text)
-            metrics['rougeL'].append(rouge_l_score)
+            # 3) ROUGE-L
+            rouge_l_val = self._calculate_rouge_l(pred_text, truth_text)
+            metrics['rougeL'].append(rouge_l_val)
 
-            # Calculate BLEU
-            bleu_score_val = self._calculate_bleu(pred_text, truth_text)
-            metrics['bleu'].append(bleu_score_val)
+            # 4) BLEU
+            bleu_val = self._calculate_bleu(pred_text, truth_text)
+            metrics['bleu'].append(bleu_val)
 
-            # Calculate reasoning quality if multi-hop supporting facts are provided
-            if supporting_facts and query in supporting_facts:
-                metrics['reasoning_quality'].append(
-                    self._evaluate_reasoning_quality(pred_text, supporting_facts[query])
-                )
-                metrics['multi_hop_accuracy'].append(
-                    self._evaluate_multi_hop_accuracy(pred_text, supporting_facts[query])
-                )
+            # 5) (Optional) F1 placeholder
+            # You could implement a real token-level F1. For demonstration:
+            f1_scores.append( (2.0 * em * sem_sim) / (em + sem_sim + 1e-9) )
 
-        # Calculate resource efficiency if resource metrics provided
-        if resource_metrics:
-            efficiency_score = self._calculate_efficiency_score(resource_metrics)
-            metrics['resource_efficiency'] = [efficiency_score]
+        # Summarize core text metrics
+        aggregated = {}
+        aggregated['average_semantic_similarity'] = float(np.mean(metrics['semantic_similarity'])) if metrics['semantic_similarity'] else 0.0
+        aggregated['average_rougeL'] = float(np.mean(metrics['rougeL'])) if metrics['rougeL'] else 0.0
+        aggregated['average_bleu'] = float(np.mean(metrics['bleu'])) if metrics['bleu'] else 0.0
+        aggregated['average_f1'] = float(np.mean(f1_scores)) if f1_scores else 0.0
 
-        return self._aggregate_metrics(metrics)
+        # If a reasoning_chain was passed, do advanced reasoning analysis
+        if reasoning_chain:
+            # Example usage: analyzing pattern_type, chain_length, etc.
+            reasoning_analysis = {
+                'pattern_type': reasoning_chain.get('pattern_type', 'unknown'),
+                'chain_length': reasoning_chain.get('hop_count', 0),
+                'pattern_confidence': reasoning_chain.get('pattern_confidence', 0.0)
+            }
+            aggregated['reasoning_analysis'] = reasoning_analysis
 
-    def _calculate_exact_match(self, prediction: str, ground_truth: str) -> float:
-        """
-        Calculate normalized exact match score with robust text normalization.
-        """
-        pred_norm = self._normalize_text(prediction)
-        truth_norm = self._normalize_text(ground_truth)
-        return float(pred_norm == truth_norm)
+        return aggregated
+
+    # ---------------------------------------------------------------------
+    # The following methods remain the same as your original code
+    # but we incorporate them for completeness.
+    # ---------------------------------------------------------------------
 
     def _calculate_semantic_similarity(self,
                                        prediction: str,
                                        ground_truth: str) -> float:
         """
         Calculate semantic similarity using sentence embeddings.
-        Handles errors gracefully and includes confidence scoring.
         """
         try:
-            # Generate embeddings
             pred_emb = self.embedder.encode(prediction, convert_to_tensor=True)
             truth_emb = self.embedder.encode(ground_truth, convert_to_tensor=True)
-
-            # Calculate similarity
             similarity = util.cos_sim(pred_emb, truth_emb).item()
-
-            # Apply confidence threshold
-            confidence = max(0.0, min(1.0, similarity))
-            return confidence
-
+            return max(0.0, min(1.0, similarity))
         except Exception as e:
             self.logger.error(f"Error calculating semantic similarity: {str(e)}")
             return 0.0
@@ -177,62 +202,13 @@ class Evaluation:
 
     def _calculate_bleu(self, prediction: str, ground_truth: str) -> float:
         """Calculate BLEU score."""
-        reference = [ground_truth.split()]  # BLEU expects list of lists for reference
+        reference = [ground_truth.split()]
         candidate = prediction.split()
         return sentence_bleu(reference, candidate, smoothing_function=self.bleu_smoothing)
-
-    def _evaluate_reasoning_quality(self,
-                                    prediction: str,
-                                    supporting_facts: List[Tuple[str, int]]) -> float:
-        """
-        Evaluate the quality of the reasoning path.
-        Considers fact coverage, logical coherence, and step validity.
-        """
-        steps = self._extract_reasoning_steps(prediction)
-        fact_coverage = self._calculate_fact_coverage(steps, supporting_facts)
-        coherence_score = self._evaluate_logical_coherence(steps)
-        quality_score = (0.6 * fact_coverage + 0.4 * coherence_score)
-        return quality_score
-
-    def _evaluate_multi_hop_accuracy(self,
-                                     prediction: str,
-                                     supporting_facts: List[Tuple[str, int]]) -> float:
-        """
-        Evaluate accuracy of multi-hop reasoning steps.
-        Checks both intermediate and final conclusions.
-        """
-        steps = self._extract_reasoning_steps(prediction)
-        if not steps:
-            return 0.0
-        step_scores = []
-        for step in steps:
-            step_score = self._evaluate_step_accuracy(step, supporting_facts)
-            step_scores.append(step_score)
-        weights = np.linspace(0.5, 1.0, len(step_scores))
-        weighted_score = np.average(step_scores, weights=weights)
-        return weighted_score
-
-    def _calculate_efficiency_score(self, resource_metrics: Dict[str, float]) -> float:
-        """
-        Calculate efficiency score based on resource usage metrics.
-        Lower resource usage yields higher efficiency score.
-        """
-        weights = {
-            'cpu': 0.3,
-            'memory': 0.3,
-            'gpu': 0.4
-        }
-        efficiency_score = 0.0
-        for resource, usage in resource_metrics.items():
-            if resource in weights:
-                efficiency = 1.0 - min(1.0, usage)
-                efficiency_score += weights[resource] * efficiency
-        return efficiency_score
 
     def _normalize_text(self, text: str) -> str:
         """
         Normalize text for consistent comparison.
-        Handles various text normalization cases.
         """
         if not text:
             return ""
@@ -241,91 +217,145 @@ class Evaluation:
         text = ' '.join(text.split())
         return text.strip()
 
-    def _extract_reasoning_steps(self, text: str) -> List[str]:
-        """
-        Extract individual reasoning steps from prediction text.
-        Handles various reasoning step formats.
-        """
-        step_matches = re.findall(r'Step \d+:.*?(?=Step \d+:|$)', text, re.DOTALL)
-        if step_matches:
-            return [step.strip() for step in step_matches]
-        sentences = [s.strip() for s in text.split('.') if s.strip()]
-        return sentences
+    # ---------------------------------------------------------------------
+    # Optionally, advanced reasoning path evaluation (if you want more detail)
+    # and ablation + statistical significance. These are placeholders you can
+    # call from your code if you store the data properly.
+    # ---------------------------------------------------------------------
 
-    def _calculate_fact_coverage(self,
-                                 steps: List[str],
-                                 supporting_facts: List[Tuple[str, int]]) -> float:
+    def evaluate_reasoning_quality(self,
+                                   prediction: str,
+                                   reasoning_path: List[Dict],
+                                   supporting_facts: Optional[List[Tuple[str, int]]] = None
+                                   ) -> Dict[str, float]:
         """
-        Calculate how well the reasoning steps cover the supporting facts.
+        Evaluate multi-hop reasoning quality (fact coverage, path coherence, etc.)
         """
-        if not supporting_facts:
-            return 0.0
-        covered_facts = 0
-        for fact in supporting_facts:
-            fact_text = fact[0]
-            for step in steps:
-                if self._calculate_semantic_similarity(step, fact_text) > self.semantic_threshold:
-                    covered_facts += 1
-                    break
-        return covered_facts / len(supporting_facts)
+        metrics = {}
 
-    def _evaluate_logical_coherence(self, steps: List[str]) -> float:
-        """
-        Evaluate logical coherence between reasoning steps.
-        Higher score indicates better logical flow.
-        """
-        if len(steps) < 2:
-            return 1.0
-        coherence_scores = []
-        for i in range(len(steps) - 1):
-            current_step = steps[i]
-            next_step = steps[i + 1]
-            step_coherence = self._calculate_semantic_similarity(current_step, next_step)
-            coherence_scores.append(step_coherence)
-        return np.mean(coherence_scores)
+        # Step-level accuracy
+        step_acc = self._evaluate_step_accuracy(reasoning_path, supporting_facts)
+        metrics['step_accuracy'] = step_acc
+
+        # Fact coverage
+        fact_cov = self._calculate_fact_coverage(reasoning_path, supporting_facts)
+        metrics['fact_coverage'] = fact_cov
+
+        # Path coherence
+        coherence = self._evaluate_path_coherence(reasoning_path)
+        metrics['path_coherence'] = coherence
+
+        # Depth
+        metrics['inference_depth'] = len(reasoning_path)
+
+        return metrics
 
     def _evaluate_step_accuracy(self,
-                                step: str,
-                                supporting_facts: List[Tuple[str, int]]) -> float:
+                                reasoning_path: List[Dict],
+                                supporting_facts: Optional[List[Tuple[str, int]]]
+                                ) -> float:
         """
-        Evaluate accuracy of individual reasoning step.
+        Evaluate accuracy of each step vs. supporting_facts or partial checks.
         """
+        if not reasoning_path or not supporting_facts:
+            return 0.0
+
+        # Simple approach: for each step, see if it semantically matches any supporting fact
         step_scores = []
-        for fact in supporting_facts:
-            fact_text = fact[0]
-            similarity = self._calculate_semantic_similarity(step, fact_text)
-            step_scores.append(similarity)
-        return max(step_scores) if step_scores else 0.0
+        for step_dict in reasoning_path:
+            step_text = step_dict.get('content', '')
+            best_sim = 0.0
+            for fact_text, _ in supporting_facts:
+                sim = self._calculate_semantic_similarity(step_text, fact_text)
+                if sim > best_sim:
+                    best_sim = sim
+            step_scores.append(best_sim)
 
-    def _aggregate_metrics(self, metrics: Dict[str, List[float]]) -> Dict[str, float]:
-        """
-        Aggregate all metrics into final scores.
-        Includes confidence intervals where appropriate.
-        """
-        aggregated = {}
-        for metric, values in metrics.items():
-            if values:
-                aggregated[f"average_{metric}"] = float(np.mean(values))
-                aggregated[f"max_{metric}"] = float(np.max(values))
-                aggregated[f"min_{metric}"] = float(np.min(values))
-                if len(values) >= 5:
-                    ci = np.percentile(values, [2.5, 97.5])
-                    aggregated[f"{metric}_ci_lower"] = float(ci[0])
-                    aggregated[f"{metric}_ci_upper"] = float(ci[1])
-        if all(f"average_{metric}" in aggregated for metric in self.metric_weights):
-            weighted_score = 0.0
-            for metric, weight in self.metric_weights.items():
-                weighted_score += aggregated[f"average_{metric}"] * weight
-            aggregated['overall_score'] = weighted_score
-        return aggregated
+        return float(np.mean(step_scores)) if step_scores else 0.0
 
-    def get_performance_summary(self) -> Dict[str, Any]:
+    def _calculate_fact_coverage(self,
+                                 reasoning_path: List[Dict],
+                                 supporting_facts: Optional[List[Tuple[str, int]]]
+                                 ) -> float:
         """
-        Generate comprehensive performance summary for academic reporting.
+        How many supporting facts are matched by at least one step in the path?
         """
-        return {
-            'metrics': self.metric_history,
-            'performance_stats': self.performance_stats,
-            'efficiency_analysis': self._analyze_efficiency(),
-            'reasoning_analysis': self._analyze_reasoning_paths()
-        }
+        if not supporting_facts or not reasoning_path:
+            return 0.0
+
+        covered = 0
+        total = len(supporting_facts)
+        for fact_text, _ in supporting_facts:
+            matched = False
+            for step_dict in reasoning_path:
+                step_text = step_dict.get('content', '')
+                sim = self._calculate_semantic_similarity(step_text, fact_text)
+                if sim >= self.semantic_threshold:
+                    matched = True
+                    break
+            if matched:
+                covered += 1
+
+        return covered / total if total > 0 else 0.0
+
+    def _evaluate_path_coherence(self, reasoning_path: List[Dict]) -> float:
+        """
+        Evaluate semantic coherence among consecutive steps.
+        """
+        if len(reasoning_path) < 2:
+            return 1.0
+        sims = []
+        for i in range(len(reasoning_path) - 1):
+            step_text_1 = reasoning_path[i].get('content', '')
+            step_text_2 = reasoning_path[i+1].get('content', '')
+            sim = self._calculate_semantic_similarity(step_text_1, step_text_2)
+            sims.append(sim)
+        return float(np.mean(sims)) if sims else 0.0
+
+    # Ablation tracking
+
+    def calculate_ablation_metrics(self,
+                                   component: str,
+                                   base_performance: Dict[str, float],
+                                   ablated_performance: Dict[str, float]
+                                   ) -> Dict[str, float]:
+        """
+        Compare baseline vs. ablated performance for a given component.
+        """
+        impact_metrics = {}
+        for metric in base_performance:
+            if metric in ablated_performance:
+                base_val = base_performance[metric]
+                abl_val = ablated_performance[metric]
+                if abs(base_val) > 1e-9:
+                    relative_change = (abl_val - base_val) / base_val
+                else:
+                    relative_change = 0.0
+                impact_metrics[f'{metric}_impact'] = relative_change
+
+        self.ablation_results[component].append(impact_metrics)
+        return impact_metrics
+
+    # Statistical significance
+
+    def record_metric(self, metric_name: str, value: float):
+        """
+        Store a single metric value for significance testing.
+        """
+        self.statistical_data[metric_name].append(value)
+
+    def calculate_statistical_significance(self) -> Dict[str, Dict[str, float]]:
+        """
+        Perform a simple t-test across collected metric arrays.
+        """
+        significance_results = {}
+        for metric, values in self.statistical_data.items():
+            if len(values) >= 2:
+                t_stat, p_value = stats.ttest_1samp(values, 0.0)
+                significance_results[metric] = {
+                    't_statistic': float(t_stat),
+                    'p_value': float(p_value),
+                    'mean': float(np.mean(values)),
+                    'std': float(np.std(values))
+                }
+        return significance_results

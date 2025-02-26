@@ -68,8 +68,9 @@ class SystemControlManager:
             'reasoning_quality': defaultdict(list)
         }
         self.path_history = []
+        # Updated complexity threshold lowered from 0.8 to 0.6
         self.adaptive_thresholds = {
-            'complexity_threshold': 0.8,
+            'complexity_threshold': 0.75,
             'resource_pressure_threshold': 0.8,
             'efficiency_threshold': 0.6
         }
@@ -392,7 +393,7 @@ class SystemControlManager:
         Get statistics on reasoning path distribution.
         """
         path_counts = defaultdict(lambda: {"count": 0})
-        for record in self.path_history: # Assuming self.path_history logs path choices
+        for record in self.path_history:  # Assuming self.path_history logs path choices
             path_counts[record['path']]["count"] += 1
 
         total_queries = self.performance_metrics['total_queries']

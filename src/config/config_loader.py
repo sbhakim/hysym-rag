@@ -56,6 +56,15 @@ class ConfigLoader:
             with open(config_file, "r") as file:
                 config = yaml.safe_load(file)
 
+            if 'alignment' not in config:
+                config['alignment'] = {
+                    'target_dim': 768,  # Default values
+                    'num_heads': 4,
+                    'dropout': 0.1,
+                    'sym_dim': 384,
+                    'neural_dim': 768
+                }
+
             # Apply environment overrides
             config = ConfigLoader._apply_env_overrides(config, env_prefix)
 

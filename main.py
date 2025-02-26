@@ -1,8 +1,13 @@
 # main.py
 
 from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
+from src.reasoners.networkx_symbolic_reasoning_metrics import (
+    extract_reasoning_pattern,
+    get_reasoning_metrics
+)
 from src.reasoners.neural_retriever import NeuralRetriever
 from src.integrators.hybrid_integrator import HybridIntegrator
+from src.utils.dimension_manager import DimensionalityManager
 from src.utils.rule_extractor import RuleExtractor
 from src.queries.query_logger import QueryLogger
 from src.resources.resource_manager import ResourceManager
@@ -15,6 +20,8 @@ from src.app import App
 from src.system.system_control_manager import SystemControlManager, UnifiedResponseAggregator
 from src.utils.metrics_collector import MetricsCollector
 from src.utils.device_manager import DeviceManager
+from src.ablation_study import run_ablation_study
+from src.utils.progress import tqdm, ProgressManager
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
@@ -25,12 +32,20 @@ import warnings
 import logging
 import time
 from collections import defaultdict
+import torch.nn as nn
+
+# Set up basic logging for all components
+logging.basicConfig(
+    level=logging.DEBUG,  # Set log level to DEBUG to capture dimension alignment logs
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
+ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 def load_hotpotqa(hotpotqa_path, max_samples=None):
     """
@@ -72,12 +87,18 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
 if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
 
+    ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
+    logging.getLogger('transformers').setLevel(logging.ERROR)
+    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+    logging.getLogger('DimensionalityManager').setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+
     # 1. Load configuration
     print("Loading configuration...")
     config = ConfigLoader.load_config("src/config/config.yaml")
     model_name = config["model_name"]
 
-    # 2. Acquire a unified device from DeviceManager (optional, but recommended for consistency)
+    # 2. Acquire a unified device from DeviceManager
     device = DeviceManager.get_device()
 
     # 3. Initialize Resource Manager
@@ -88,37 +109,58 @@ if __name__ == "__main__":
         history_window_size=100
     )
 
-    # ----------------------------------------------------------------
-    # 4. (Optional) We skip extracting rules from deforestation.txt.
-    #    Instead, ensure 'data/rules.json' exists but is empty or minimal.
-    # ----------------------------------------------------------------
+    # 4. Initialize Dimensionality Manager (FIRST - Before other components!)
+    print("Initializing Dimensionality Manager...")
+    dimensionality_manager = DimensionalityManager(target_dim=config['alignment']['target_dim'], device=device)
+    # Register a query adapter: project from 384 to 768 dimensions
+    query_adapter = nn.Linear(384, 768).to(device)
+    dimensionality_manager.register_adapter('query', query_adapter)
+
+    # 5. Ensure that 'data/rules.json' exists (empty or minimal)
     rules_path = "data/rules.json"
     if not os.path.exists(rules_path):
         with open(rules_path, "w", encoding="utf-8") as f:
             json.dump([], f)
     print(f"Loading existing rules from {rules_path} (initially empty or minimal).")
 
-    # 5. Initialize the Graph-Based Symbolic Reasoner
+    # 6. Initialize the Graph-Based Symbolic Reasoner (Pass dim_manager)
     print("Initializing Graph-Based Symbolic Reasoner...")
-    symbolic = GraphSymbolicReasoner(
-        rules_file=rules_path,
-        match_threshold=0.25,
-        max_hops=5,
-        embedding_model='all-MiniLM-L6-v2',
-        device=device  # <-- Only if your GraphSymbolicReasoner supports a 'device' param
-    )
+    try:
+        # Adjusted match_threshold to 0.1 to leverage enhanced rule matching improvements
+        symbolic = GraphSymbolicReasoner(
+            rules_file=rules_path,
+            match_threshold=0.1,
+            max_hops=5,
+            embedding_model='all-MiniLM-L6-v2',
+            device=device,
+            dim_manager=dimensionality_manager  # PASS dim_manager HERE
+        )
+        if hasattr(symbolic, 'rules') and symbolic.rules:
+            print(f"Loaded {len(symbolic.rules)} rules successfully")
+        else:
+            print("Warning: No rules loaded in symbolic reasoner")
+    except Exception as e:
+        print(f"Error initializing symbolic reasoner: {str(e)}")
+        print("Continuing with empty rule set...")
+        symbolic = GraphSymbolicReasoner(
+            rules_file=rules_path,
+            match_threshold=0.1,
+            max_hops=5,
+            embedding_model='all-MiniLM-L6-v2',
+            device=device,
+            dim_manager=dimensionality_manager  # PASS dim_manager HERE (in fallback as well)
+        )
 
-    # 6. Initialize the Neural Retriever
+    # 7. Initialize the Neural Retriever
     print("Initializing Neural Retriever...")
     neural = NeuralRetriever(
         model_name,
         use_quantization=False,
-        device=device  # <-- Only if your NeuralRetriever supports a 'device' param
+        device=device
     )
 
-    # 7. Additional components
+    # 8. Additional components
     print("Initializing support components...")
-    logger = logging.getLogger(__name__)  # Standard logger for warnings
     query_logger = QueryLogger()
     feedback_manager = FeedbackManager()
     print("Initializing QueryExpander...")
@@ -126,10 +168,9 @@ if __name__ == "__main__":
         complexity_config="src/config/complexity_rules.yaml"
     )
     print("Initializing RuleExtractor...")
-    rule_extractor = RuleExtractor()  # Instantiate RuleExtractor
+    rule_extractor = RuleExtractor()
     print("Loading evaluation dataset...")
 
-    # Decide whether to load HotpotQA
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
     max_hotpot_samples = 4
@@ -137,13 +178,11 @@ if __name__ == "__main__":
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
         ground_truths = {}
-
-        # Build rules from HotpotQA contexts and store ground truths
         for i, sample in enumerate(test_queries):
             new_rules = rule_extractor.extract_hotpot_facts(sample["context"], min_confidence=0.7)
             if new_rules:
                 try:
-                    symbolic.add_dynamic_rules(new_rules)
+                    symbolic.add_dynamic_rules(new_rules)  # This should now work without error
                 except AttributeError as e:
                     logger.warning(f"Could not track new rules automatically (missing method?): {str(e)}")
             ground_truths[sample["query"]] = sample["answer"]
@@ -154,17 +193,17 @@ if __name__ == "__main__":
 
     evaluator = Evaluation()
 
-    # 8. Create Hybrid Integrator
+    # 9. Create Hybrid Integrator (Pass dim_manager)
     print("Creating Hybrid Integrator...")
     integrator = HybridIntegrator(
-        symbolic,
-        neural,
-        resource_manager,
-        expander,
-        # device=device  # <-- Only if your HybridIntegrator supports a 'device' param
+        symbolic_reasoner=symbolic,  # Use 'symbolic_reasoner' instead of just 'symbolic'
+        neural_retriever=neural,     # Use 'neural_retriever' instead of just 'neural'
+        resource_manager=resource_manager,
+        query_expander=expander,
+        dim_manager=dimensionality_manager  # PASS dim_manager HERE
     )
 
-    # 9. System Control - Initialize MetricsCollector and pass it to SystemControlManager
+    # 10. Initialize System Control Components
     print("Initializing System Control Components...")
     aggregator = UnifiedResponseAggregator(include_explanations=True)
     metrics_collector = MetricsCollector()
@@ -177,7 +216,7 @@ if __name__ == "__main__":
         max_query_time=10
     )
 
-    # 10. Initialize Application
+    # 11. Initialize Application
     print("Initializing Application...")
     feedback_handler = FeedbackHandler(feedback_manager)
     app = App(
@@ -191,7 +230,7 @@ if __name__ == "__main__":
         system_manager=system_manager
     )
 
-    # 11. Possibly load a knowledge base for neural context
+    # 12. Load knowledge base for neural context (if available)
     kb_path = "data/small_knowledge_base.txt"
     if os.path.exists(kb_path):
         with open(kb_path, "r") as kb_file:
@@ -205,7 +244,7 @@ if __name__ == "__main__":
         the_answer = q_info.get("answer", None)
         forced_path = q_info.get("forced_path", None)
         data_type = q_info.get("type", "ground_truth_available")
-        supporting_facts = q_info.get("supporting_facts", None)  # Get supporting facts
+        supporting_facts = q_info.get("supporting_facts", None)
 
         print(f"\nProcessing Query: {query}")
         print(f"Query Type: {data_type}")
@@ -229,19 +268,32 @@ if __name__ == "__main__":
                 for key in final_metrics
             }
 
-            # Collect enhanced query metrics
+            prediction_val = final_answer.get('result', '')
+            if isinstance(prediction_val, tuple):
+                prediction_val = prediction_val[0]
+
+            # Instead of symbolic.extract_reasoning_pattern(...), we call the standalone function
+            # from networkx_symbolic_reasoning_metrics, if we want a 'pattern_type' in our metrics:
+            if final_answer.get('reasoning_path') is not None:
+                pattern_dict = extract_reasoning_pattern(
+                    query,
+                    final_answer.get('reasoning_path', []),
+                    symbolic.rules
+                )
+                pattern_type_val = pattern_dict.get('pattern_type', 'unknown')
+            else:
+                pattern_type_val = 'unknown'
+
             metrics_collector.collect_query_metrics(
                 query=query,
-                prediction=final_answer[0] if isinstance(final_answer, tuple) else final_answer,
+                prediction=prediction_val,
                 ground_truth=the_answer,
-                reasoning_path=(symbolic.extract_reasoning_pattern(query, final_answer.get('reasoning_path', []))
-                                .get('pattern_type', 'unknown') if hasattr(symbolic, "extract_reasoning_pattern") else 'unknown'),
+                reasoning_path=pattern_type_val,  # pass the pattern_type
                 processing_time=time.time() - initial_time,
                 resource_usage=resource_delta,
                 complexity_score=complexity
             )
 
-            # Track component performance (if available)
             if isinstance(final_answer, dict):
                 metrics_collector.component_metrics['symbolic']['execution_time'].append(
                     final_answer.get('symbolic_time', 0.0)
@@ -268,15 +320,25 @@ if __name__ == "__main__":
             print("-" * 20)
 
             if data_type == "ground_truth_available" and the_answer is not None:
-                reasoning_chain = symbolic.extract_reasoning_pattern(
-                    query,
-                    final_answer.get('reasoning_path', [])
-                )
+                # Similarly, if we want a "reasoning_chain" from that path:
+                if final_answer.get('reasoning_path') is not None:
+                    chain_dict = extract_reasoning_pattern(
+                        query,
+                        final_answer.get('reasoning_path', []),
+                        symbolic.rules
+                    )
+                else:
+                    chain_dict = {}  # fallback if no path
+
+                eval_pred_text = final_answer.get('result', '')
+                if isinstance(eval_pred_text, tuple):
+                    eval_pred_text = eval_pred_text[0]
+
                 eval_metrics = evaluator.evaluate(
-                    predictions={query: final_answer[0]},
+                    predictions={query: eval_pred_text},
                     ground_truths={query: the_answer},
                     supporting_facts={query: supporting_facts},
-                    reasoning_chain=reasoning_chain
+                    reasoning_chain=chain_dict
                 )
                 print("\nEvaluation Metrics:")
                 print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
@@ -294,7 +356,21 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing query: {str(e)}")
 
-    # 12. Optional Comparison Experiment
+    # Pass the dimensionality_manager to the ablation study
+    ablation_results = run_ablation_study(
+        rules_path=rules_path,
+        device=device,
+        neural=neural,
+        expander=expander,
+        aggregator=aggregator,
+        resource_manager=resource_manager,
+        system_manager=system_manager,
+        dimensionality_manager=dimensionality_manager,  # Pass dim_manager
+        context=context
+    )
+
+    metrics_collector.ablation_results = ablation_results
+
     print("\n=== Comparison Experiment (Sample) ===")
     comparison_queries = ["Compare and contrast the film adaptations of 'Pride and Prejudice'."]
     header = f"{'Query':<50} | {'Mode':<15} | {'CPU Δ (%)':<10} | {'Memory Δ (%)':<15} | {'GPU Δ (%)':<10} | {'Response'}"
@@ -348,30 +424,37 @@ if __name__ == "__main__":
         percentage = (count / total_queries) * 100 if total_queries > 0 else 0
         print(f"- {path}: {percentage:.1f}%")
 
-    # Enhanced Academic Analysis Display
     print("\n=== Comprehensive Academic Analysis ===")
     academic_report = metrics_collector.generate_academic_report()
 
     print("\nPerformance Analysis:")
-    print(f"- Average Processing Time: {academic_report['performance_metrics']['processing_time']['mean']:.2f}s")
-    print(f"- 95th Percentile Time: {academic_report['performance_metrics']['processing_time']['percentile_95']:.2f}s")
+    if 'performance_metrics' in academic_report:
+        perf = academic_report['performance_metrics']
+        if 'processing_time' in perf and 'mean' in perf['processing_time']:
+            print(f"- Average Processing Time: {perf['processing_time']['mean']:.2f}s")
+        if 'processing_time' in perf and 'percentile_95' in perf['processing_time']:
+            print(f"- 95th Percentile Time: {perf['processing_time']['percentile_95']:.2f}s")
 
     print("\nReasoning Analysis:")
     if 'reasoning_analysis' in academic_report:
         ra = academic_report['reasoning_analysis']
-        print(f"- Average Chain Length: {ra.get('chain_characteristics', {}).get('avg_length', 0.0):.2f}")
-        print(f"- Average Confidence: {ra.get('chain_characteristics', {}).get('avg_confidence', 0.0):.2f}")
-        print(f"- Average Inference Depth: {ra.get('chain_characteristics', {}).get('avg_inference_depth', 0.0):.2f}")
+        cc = ra.get('chain_characteristics', {})
+        print(f"- Average Chain Length: {cc.get('avg_length', 0.0):.2f}")
+        print(f"- Average Confidence: {cc.get('avg_confidence', 0.0):.2f}")
+        print(f"- Average Inference Depth: {cc.get('avg_inference_depth', 0.0):.2f}")
 
     print("\nResource Efficiency:")
     if 'efficiency_metrics' in academic_report:
         em = academic_report['efficiency_metrics']
         for resource, metrics in em.items():
             if resource != 'trends':
+                efficiency_score_val = metrics.get('efficiency_score')
+                if efficiency_score_val is None:
+                    efficiency_score_val = 0.0
                 print(f"- {resource.capitalize()}:")
                 print(f"  * Mean Usage: {metrics.get('mean_usage', 0.0)*100:.1f}%")
                 print(f"  * Peak Usage: {metrics.get('peak_usage', 0.0)*100:.1f}%")
-                print(f"  * Efficiency Score: {metrics.get('efficiency_score', 0.0):.2f}")
+                print(f"  * Efficiency Score: {efficiency_score_val:.2f}")
 
     print("\nStatistical Analysis:")
     if 'statistical_analysis' in academic_report:
@@ -383,51 +466,10 @@ if __name__ == "__main__":
                 print(f"  * p-value: {stats['p_value']:.3f}")
                 print(f"  * effect size: {stats.get('effect_size', 0.0):.2f}")
 
-    # Optional Ablation Study Section with Enhanced Reporting
-    print("\n=== Ablation Study ===")
-    ablation_results = defaultdict(dict)
-    ablation_configs = [
-        {'name': 'No Pattern Analysis', 'disable_patterns': True},
-        {'name': 'Limited Hops', 'max_hops': 2},
-        {'name': 'High Threshold', 'match_threshold': 0.5}
-    ]
-    for config in ablation_configs:
-        config_name = config['name']
-        print(f"\nTesting Configuration: {config_name}")
-        try:
-            # Run baseline
-            baseline_result = system_manager.process_query_with_fallback(
-                "What are the environmental effects of deforestation?",
-                context
-            )
-            baseline_metrics = metrics_collector.get_real_time_metrics()
-
-            # Run modified version using a modified symbolic reasoner
-            modified_symbolic = GraphSymbolicReasoner(
-                rules_file=rules_path,
-                match_threshold=config.get('match_threshold', 0.25),
-                max_hops=config.get('max_hops', 5),
-                embedding_model='all-MiniLM-L6-v2'
-                # device=device  # <-- Only if GraphSymbolicReasoner can accept 'device'
-            )
-            modified_result = modified_symbolic.process_query(
-                "What are the environmental effects of deforestation?"
-            )
-            modified_metrics = metrics_collector.get_real_time_metrics()
-
-            ablation_results[config_name] = {
-                'baseline': baseline_metrics,
-                'modified': modified_metrics
-            }
-
-            print("\nPerformance Comparison:")
-            print(f"Baseline processing time: {baseline_metrics['average_processing_time']:.2f}s")
-            print(f"Modified processing time: {modified_metrics['average_processing_time']:.2f}s")
-        except Exception as e:
-            print(f"Error in ablation study for {config_name}: {str(e)}")
-
     print("\n=== System Performance Summary (Extended) ===")
-    pattern_metrics = symbolic.get_reasoning_metrics()
+    # Replacing the old call: symbolic.get_reasoning_metrics()
+    # with the new get_reasoning_metrics(...) that takes symbolic.reasoning_metrics
+    pattern_metrics = get_reasoning_metrics(symbolic.reasoning_metrics)
     print(f"- Average Chain Length: {pattern_metrics['path_analysis']['average_length']:.2f}")
     print(f"- Average Confidence: {pattern_metrics['confidence_analysis']['mean_confidence']:.2f}")
     print("\nPattern Distribution:")

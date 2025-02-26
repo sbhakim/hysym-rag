@@ -1,266 +1,666 @@
 [
     {
-        "timestamp": "2025-02-21T01:49:30.044339",
-        "query": "Were Scott Derrickson and Ed Wood of the same nationality?",
-        "result": {
-            "result": [
-                "No symbolic match found."
-            ],
-            "processing_time": 0.005301237106323242,
-            "resource_usage": {
-                "cpu": 0.125,
-                "memory": 0.0,
-                "gpu": 0.0002442598925256334
-            },
-            "reasoning_path": "symbolic",
-            "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 12.5% | - memory: 0.0% | - gpu: 0.0%"
-        },
-        "source": "hybrid",
-        "complexity": 0.8571428060531616,
-        "processing_time": null,
-        "success": true,
-        "resource_usage": {
-            "cpu": -3.8,
-            "memory": 0.0,
-            "gpu": 0.02,
-            "efficiency_score": 1.0113
-        },
-        "performance_metrics": {
-            "processing_time": null,
-            "success": true,
-            "resource_efficiency": 2.132
-        }
-    },
-    {
-        "timestamp": "2025-02-21T01:49:30.059346",
-        "query": "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?",
-        "result": {
-            "result": [
-                "No symbolic match found."
-            ],
-            "processing_time": 0.00774073600769043,
-            "resource_usage": {
-                "cpu": 0.125,
-                "memory": 0.0,
-                "gpu": 0.0
-            },
-            "reasoning_path": "symbolic",
-            "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.008s | Resource Utilization: | - cpu: 12.5% | - memory: 0.0% | - gpu: 0.0%"
-        },
-        "source": "hybrid",
-        "complexity": 0.9391304522752761,
-        "processing_time": null,
-        "success": true,
-        "resource_usage": {
-            "cpu": -36.4,
-            "memory": 0.0,
-            "gpu": 0.0,
-            "efficiency_score": 1.1092
-        },
-        "performance_metrics": {
-            "processing_time": null,
-            "success": true,
-            "resource_efficiency": 11.92
-        }
-    },
-    {
-        "timestamp": "2025-02-21T01:49:30.077292",
-        "query": "What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",
-        "result": {
-            "result": [
-                "No symbolic match found."
-            ],
-            "processing_time": 0.004350185394287109,
-            "resource_usage": {
-                "cpu": 0.133,
-                "memory": 0.0,
-                "gpu": 0.0
-            },
-            "reasoning_path": "symbolic",
-            "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.004s | Resource Utilization: | - cpu: 13.3% | - memory: 0.0% | - gpu: 0.0%"
-        },
-        "source": "hybrid",
-        "complexity": 0.8984374464489518,
-        "processing_time": null,
-        "success": true,
-        "resource_usage": {
-            "cpu": -34.1,
-            "memory": 0.0,
-            "gpu": 0.0,
-            "efficiency_score": 1.1023
-        },
-        "performance_metrics": {
-            "processing_time": null,
-            "success": true,
-            "resource_efficiency": 11.23
-        }
-    },
-    {
-        "timestamp": "2025-02-21T01:49:30.087771",
-        "query": "Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?",
-        "result": {
-            "result": [
-                "No symbolic match found."
-            ],
-            "processing_time": 0.004808664321899414,
-            "resource_usage": {
-                "cpu": 0.2,
-                "memory": 0.0,
-                "gpu": 0.0
-            },
-            "reasoning_path": "symbolic",
-            "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 20.0% | - memory: 0.0% | - gpu: 0.0%"
-        },
-        "source": "hybrid",
-        "complexity": 0.8666665568947792,
-        "processing_time": null,
-        "success": true,
-        "resource_usage": {
-            "cpu": -27.8,
-            "memory": 0.0,
-            "gpu": 0.0,
-            "efficiency_score": 1.0834
-        },
-        "performance_metrics": {
-            "processing_time": null,
-            "success": true,
-            "resource_efficiency": 9.34
-        }
-    },
-    {
-        "timestamp": "2025-02-21T02:01:25.991542",
+        "timestamp": "2025-02-25T22:03:59.976384",
         "query": "Who scored the first touchdown of the game?",
         "result": {
             "result": [
-                "No symbolic match found."
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
             ],
-            "processing_time": 0.13135099411010742,
+            "processing_time": 0.019647598266601562,
             "resource_usage": {
-                "cpu": 0.055,
-                "memory": 0.010000000000000009,
-                "gpu": 0.003663898387884723
+                "cpu": 0.0036044999999999966,
+                "memory": 0.00030000000000002247,
+                "gpu": 7.327796775769002e-05
             },
             "reasoning_path": "symbolic",
             "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.131s | Resource Utilization: | - cpu: 5.5% | - memory: 1.0% | - gpu: 0.4%"
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.020s | Resource Utilization: | - cpu: 0.4% | - memory: 0.0% | - gpu: 0.0%"
         },
         "source": "hybrid",
         "complexity": 0.7636363863945007,
         "processing_time": null,
         "success": true,
         "resource_usage": {
-            "cpu": -4.0,
-            "memory": 1.0,
-            "gpu": 0.37,
-            "efficiency_score": 1.0075
+            "cpu": -2.04,
+            "memory": 0.05,
+            "gpu": 0.01,
+            "efficiency_score": 1.0059
         },
         "performance_metrics": {
             "processing_time": null,
             "success": true,
-            "resource_efficiency": 1.752
+            "resource_efficiency": 1.593
         }
     },
     {
-        "timestamp": "2025-02-21T02:01:26.007502",
+        "timestamp": "2025-02-25T22:03:59.995790",
         "query": "How many field goals did Kris Brown kick?",
         "result": {
             "result": [
-                "No symbolic match found."
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
             ],
-            "processing_time": 0.005845785140991211,
+            "processing_time": 0.0066530704498291016,
             "resource_usage": {
-                "cpu": 0.11800000000000001,
-                "memory": 0.0,
-                "gpu": 0.0
+                "cpu": 0.009602685820500001,
+                "memory": 0.00015774569999993382,
+                "gpu": 3.853094772821031e-05
             },
             "reasoning_path": "symbolic",
             "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: 11.8% | - memory: 0.0% | - gpu: 0.0%"
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.007s | Resource Utilization: | - cpu: 1.0% | - memory: 0.0% | - gpu: 0.0%"
         },
         "source": "hybrid",
         "complexity": 0.7636363863945007,
         "processing_time": null,
         "success": true,
         "resource_usage": {
-            "cpu": -29.0,
-            "memory": 0.0,
-            "gpu": 0.0,
-            "efficiency_score": 1.087
+            "cpu": -3.02,
+            "memory": 0.03,
+            "gpu": 0.01,
+            "efficiency_score": 1.0089
         },
         "performance_metrics": {
             "processing_time": null,
             "success": true,
-            "resource_efficiency": 9.7
+            "resource_efficiency": 1.893
         }
     },
     {
-        "timestamp": "2025-02-21T02:01:26.021588",
+        "timestamp": "2025-02-25T22:04:00.014844",
         "query": "Which team won the game?",
         "result": {
             "result": [
-                "No symbolic match found."
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
             ],
-            "processing_time": 0.007930517196655273,
+            "processing_time": 0.0063474178314208984,
             "resource_usage": {
-                "cpu": -0.15899999999999997,
-                "memory": 0.0,
-                "gpu": 0.0
+                "cpu": 0.0017210463840960089,
+                "memory": 1.8558623859299406e-05,
+                "gpu": 4.533127469397158e-06
             },
             "reasoning_path": "symbolic",
             "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.008s | Resource Utilization: | - cpu: -15.9% | - memory: 0.0% | - gpu: 0.0%"
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: 0.2% | - memory: 0.0% | - gpu: 0.0%"
         },
         "source": "hybrid",
         "complexity": 0.625,
         "processing_time": null,
         "success": true,
         "resource_usage": {
-            "cpu": -26.7,
+            "cpu": -4.45,
             "memory": 0.0,
             "gpu": 0.0,
-            "efficiency_score": 1.0801
+            "efficiency_score": 1.0133
         },
         "performance_metrics": {
             "processing_time": null,
             "success": true,
-            "resource_efficiency": 9.01
+            "resource_efficiency": 2.335
         }
     },
     {
-        "timestamp": "2025-02-21T02:01:26.035231",
+        "timestamp": "2025-02-25T22:04:00.032558",
         "query": "How many field goals did both teams kick in the first half?",
         "result": {
             "result": [
-                "No symbolic match found."
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
             ],
-            "processing_time": 0.0041310787200927734,
+            "processing_time": 0.005662679672241211,
             "resource_usage": {
-                "cpu": 0.16699999999999998,
-                "memory": 0.0,
-                "gpu": 0.0
+                "cpu": 0.007303929386042504,
+                "memory": 2.1834035384138417e-06,
+                "gpu": 5.333179136091104e-07
             },
             "reasoning_path": "symbolic",
             "retries": 0,
-            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.004s | Resource Utilization: | - cpu: 16.7% | - memory: 0.0% | - gpu: 0.0%"
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: 0.7% | - memory: 0.0% | - gpu: 0.0%"
         },
         "source": "hybrid",
         "complexity": 0.8399999499320985,
         "processing_time": null,
         "success": true,
         "resource_usage": {
-            "cpu": -40.7,
+            "cpu": -4.23,
             "memory": 0.0,
             "gpu": 0.0,
-            "efficiency_score": 1.1221
+            "efficiency_score": 1.0127
         },
         "performance_metrics": {
             "processing_time": null,
             "success": true,
-            "resource_efficiency": 13.21
+            "resource_efficiency": 2.269
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:09:31.884756",
+        "query": "Who scored the first touchdown of the game?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.01222991943359375,
+            "resource_usage": {
+                "cpu": 0.005303999999999996,
+                "memory": 0.00029999999999996696,
+                "gpu": 7.327796775769002e-05
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.012s | Resource Utilization: | - cpu: 0.5% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.7636363863945007,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -1.67,
+            "memory": 0.05,
+            "gpu": 0.01,
+            "efficiency_score": 1.0048
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 1.482
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:09:31.903848",
+        "query": "How many field goals did Kris Brown kick?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.007224082946777344,
+            "resource_usage": {
+                "cpu": 0.025728730296000007,
+                "memory": 0.00015774569999993382,
+                "gpu": 3.853094772821031e-05
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.007s | Resource Utilization: | - cpu: 2.6% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.7636363863945007,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -2.0,
+            "memory": 0.03,
+            "gpu": 0.01,
+            "efficiency_score": 1.0059
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 1.587
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:09:31.920800",
+        "query": "Which team won the game?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.005810260772705078,
+            "resource_usage": {
+                "cpu": 0.013588669390594096,
+                "memory": 1.8558623859299406e-05,
+                "gpu": 4.533127469397158e-06
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: 1.4% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.625,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -4.93,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.0148
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 2.479
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:09:31.938785",
+        "query": "How many field goals did both teams kick in the first half?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.00538945198059082,
+            "resource_usage": {
+                "cpu": 0.20623457336513396,
+                "memory": 2.1834035384138417e-06,
+                "gpu": 5.333179136091104e-07
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 20.6% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8399999499320985,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": 8.16,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 0.9755
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": -1.448
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:11:06.024803",
+        "query": "Were Scott Derrickson and Ed Wood of the same nationality?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species",
+                "Scott Derrickson: Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer.  ",
+                "\"\nWoodson, Arkansas: Woodson is a census-designated place (CDP) in Pulaski County, Arkansas, in the United States.  ",
+                "Tyler Bates (born June 5, 1965) is an American musician, music producer, and composer for films, television, and video games.  ",
+                "Adam Collis: Adam Collis is an American filmmaker and actor.  ",
+                "Conrad Brooks: Conrad Brooks (born Conrad Biedrzycki on January 3, 1931 in Baltimore, Maryland) is an American actor.  ",
+                "He moved to Hollywood, California in 1948 to pursue a career in acting.  ",
+                "The film was directed by Scott Derrickson, who wrote it with Jon Spaihts and C. Robert Cargill, and stars Benedict Cumberbatch as Stephen Strange, along with Chiwetel Ejiofor, Rachel McAdams, Benedict Wong, Michael Stuhlbarg, Benjamin Bratt, Scott Adkins, Mads Mikkelsen, and Tilda Swinton.  ",
+                "Meet Corliss Archer (TV series): Meet Corliss Archer is an American television sitcom that aired on CBS (July 13, 1951 - August 10, 1951) and in syndication via the Ziv Company from April to December 1954.  ",
+                "The program was an adaptation of the radio series of the same name, which was based on a series of short stories by F. Hugh Herbert.\n",
+                "Lord High Treasurer: The post of Lord High Treasurer or Lord Treasurer was an English government position and has been a British government position since the Acts of Union of 1707.  ",
+                "It is a sequel to the 1945 film \"Kiss and Tell\".  ",
+                "Secretary of State for Constitutional Affairs: The office of Secretary of State for Constitutional Affairs was a British Government position, created in 2003.  ",
+                "Andre Norton Award: The Andre Norton Award for Young Adult Science Fiction and Fantasy is an annual award presented by the Science Fiction and Fantasy Writers of America (SFWA) to the author of the best young adult or middle grade science fiction or fantasy book published in the United States in the preceding year.  ",
+                "Victoria Hanley: Victoria Hanley is an American young adult fantasy novelist.  ",
+                "The Divide trilogy: The Divide trilogy is a fantasy young adult novel trilogy by Elizabeth Kay, which takes place in an alternate universe.  ",
+                "Animorphs: Animorphs is a science fantasy series of young adult books written by Katherine Applegate and her husband Michael Grant, writing together under the name K. A. Applegate, and published by Scholastic.  ",
+                "Etiquette &amp; Espionage: Etiquette & Espionage is a young adult steampunk novel by Gail Carriger.  ",
+                "Its construction was a consequence of a complete reconstruction of the street by the French.\n"
+            ],
+            "processing_time": 0.009074687957763672,
+            "resource_usage": {
+                "cpu": 0.0024440999999999977,
+                "memory": 0.0,
+                "gpu": 7.327796775769002e-05
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.009s | Resource Utilization: | - cpu: 0.2% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8571428060531616,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -1.92,
+            "memory": 0.0,
+            "gpu": 0.01,
+            "efficiency_score": 1.0057
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 1.572
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:11:06.043317",
+        "query": "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species",
+                "Scott Derrickson: Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer.  ",
+                "\"\nWoodson, Arkansas: Woodson is a census-designated place (CDP) in Pulaski County, Arkansas, in the United States.  ",
+                "Tyler Bates (born June 5, 1965) is an American musician, music producer, and composer for films, television, and video games.  ",
+                "Adam Collis: Adam Collis is an American filmmaker and actor.  ",
+                "Conrad Brooks: Conrad Brooks (born Conrad Biedrzycki on January 3, 1931 in Baltimore, Maryland) is an American actor.  ",
+                "He moved to Hollywood, California in 1948 to pursue a career in acting.  ",
+                "The film was directed by Scott Derrickson, who wrote it with Jon Spaihts and C. Robert Cargill, and stars Benedict Cumberbatch as Stephen Strange, along with Chiwetel Ejiofor, Rachel McAdams, Benedict Wong, Michael Stuhlbarg, Benjamin Bratt, Scott Adkins, Mads Mikkelsen, and Tilda Swinton.  ",
+                "Meet Corliss Archer (TV series): Meet Corliss Archer is an American television sitcom that aired on CBS (July 13, 1951 - August 10, 1951) and in syndication via the Ziv Company from April to December 1954.  ",
+                "The program was an adaptation of the radio series of the same name, which was based on a series of short stories by F. Hugh Herbert.\n",
+                "Lord High Treasurer: The post of Lord High Treasurer or Lord Treasurer was an English government position and has been a British government position since the Acts of Union of 1707.  ",
+                "It is a sequel to the 1945 film \"Kiss and Tell\".  ",
+                "Secretary of State for Constitutional Affairs: The office of Secretary of State for Constitutional Affairs was a British Government position, created in 2003.  ",
+                "Andre Norton Award: The Andre Norton Award for Young Adult Science Fiction and Fantasy is an annual award presented by the Science Fiction and Fantasy Writers of America (SFWA) to the author of the best young adult or middle grade science fiction or fantasy book published in the United States in the preceding year.  ",
+                "Victoria Hanley: Victoria Hanley is an American young adult fantasy novelist.  ",
+                "The Divide trilogy: The Divide trilogy is a fantasy young adult novel trilogy by Elizabeth Kay, which takes place in an alternate universe.  ",
+                "Animorphs: Animorphs is a science fantasy series of young adult books written by Katherine Applegate and her husband Michael Grant, writing together under the name K. A. Applegate, and published by Scholastic.  ",
+                "Etiquette &amp; Espionage: Etiquette & Espionage is a young adult steampunk novel by Gail Carriger.  ",
+                "Its construction was a consequence of a complete reconstruction of the street by the French.\n"
+            ],
+            "processing_time": 0.00487828254699707,
+            "resource_usage": {
+                "cpu": 0.14196584592089995,
+                "memory": 0.0,
+                "gpu": 3.853094772821031e-05
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 14.2% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.9391304522752761,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": 7.02,
+            "memory": 0.0,
+            "gpu": 0.01,
+            "efficiency_score": 0.9789
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": -1.11
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:11:06.064624",
+        "query": "What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species",
+                "Scott Derrickson: Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer.  ",
+                "\"\nWoodson, Arkansas: Woodson is a census-designated place (CDP) in Pulaski County, Arkansas, in the United States.  ",
+                "Tyler Bates (born June 5, 1965) is an American musician, music producer, and composer for films, television, and video games.  ",
+                "Adam Collis: Adam Collis is an American filmmaker and actor.  ",
+                "Conrad Brooks: Conrad Brooks (born Conrad Biedrzycki on January 3, 1931 in Baltimore, Maryland) is an American actor.  ",
+                "He moved to Hollywood, California in 1948 to pursue a career in acting.  ",
+                "The film was directed by Scott Derrickson, who wrote it with Jon Spaihts and C. Robert Cargill, and stars Benedict Cumberbatch as Stephen Strange, along with Chiwetel Ejiofor, Rachel McAdams, Benedict Wong, Michael Stuhlbarg, Benjamin Bratt, Scott Adkins, Mads Mikkelsen, and Tilda Swinton.  ",
+                "Meet Corliss Archer (TV series): Meet Corliss Archer is an American television sitcom that aired on CBS (July 13, 1951 - August 10, 1951) and in syndication via the Ziv Company from April to December 1954.  ",
+                "The program was an adaptation of the radio series of the same name, which was based on a series of short stories by F. Hugh Herbert.\n",
+                "Lord High Treasurer: The post of Lord High Treasurer or Lord Treasurer was an English government position and has been a British government position since the Acts of Union of 1707.  ",
+                "It is a sequel to the 1945 film \"Kiss and Tell\".  ",
+                "Secretary of State for Constitutional Affairs: The office of Secretary of State for Constitutional Affairs was a British Government position, created in 2003.  ",
+                "Andre Norton Award: The Andre Norton Award for Young Adult Science Fiction and Fantasy is an annual award presented by the Science Fiction and Fantasy Writers of America (SFWA) to the author of the best young adult or middle grade science fiction or fantasy book published in the United States in the preceding year.  ",
+                "Victoria Hanley: Victoria Hanley is an American young adult fantasy novelist.  ",
+                "The Divide trilogy: The Divide trilogy is a fantasy young adult novel trilogy by Elizabeth Kay, which takes place in an alternate universe.  ",
+                "Animorphs: Animorphs is a science fantasy series of young adult books written by Katherine Applegate and her husband Michael Grant, writing together under the name K. A. Applegate, and published by Scholastic.  ",
+                "Etiquette &amp; Espionage: Etiquette & Espionage is a young adult steampunk novel by Gail Carriger.  ",
+                "Its construction was a consequence of a complete reconstruction of the street by the French.\n"
+            ],
+            "processing_time": 0.005836963653564453,
+            "resource_usage": {
+                "cpu": -0.05802741019325201,
+                "memory": 0.0,
+                "gpu": 4.533127469397158e-06
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: -5.8% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8984374464489518,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -12.36,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.0371
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 4.708
+        }
+    },
+    {
+        "timestamp": "2025-02-25T22:11:06.092639",
+        "query": "Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species",
+                "Scott Derrickson: Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer.  ",
+                "\"\nWoodson, Arkansas: Woodson is a census-designated place (CDP) in Pulaski County, Arkansas, in the United States.  ",
+                "Tyler Bates (born June 5, 1965) is an American musician, music producer, and composer for films, television, and video games.  ",
+                "Adam Collis: Adam Collis is an American filmmaker and actor.  ",
+                "Conrad Brooks: Conrad Brooks (born Conrad Biedrzycki on January 3, 1931 in Baltimore, Maryland) is an American actor.  ",
+                "He moved to Hollywood, California in 1948 to pursue a career in acting.  ",
+                "The film was directed by Scott Derrickson, who wrote it with Jon Spaihts and C. Robert Cargill, and stars Benedict Cumberbatch as Stephen Strange, along with Chiwetel Ejiofor, Rachel McAdams, Benedict Wong, Michael Stuhlbarg, Benjamin Bratt, Scott Adkins, Mads Mikkelsen, and Tilda Swinton.  ",
+                "Meet Corliss Archer (TV series): Meet Corliss Archer is an American television sitcom that aired on CBS (July 13, 1951 - August 10, 1951) and in syndication via the Ziv Company from April to December 1954.  ",
+                "The program was an adaptation of the radio series of the same name, which was based on a series of short stories by F. Hugh Herbert.\n",
+                "Lord High Treasurer: The post of Lord High Treasurer or Lord Treasurer was an English government position and has been a British government position since the Acts of Union of 1707.  ",
+                "It is a sequel to the 1945 film \"Kiss and Tell\".  ",
+                "Secretary of State for Constitutional Affairs: The office of Secretary of State for Constitutional Affairs was a British Government position, created in 2003.  ",
+                "Andre Norton Award: The Andre Norton Award for Young Adult Science Fiction and Fantasy is an annual award presented by the Science Fiction and Fantasy Writers of America (SFWA) to the author of the best young adult or middle grade science fiction or fantasy book published in the United States in the preceding year.  ",
+                "Victoria Hanley: Victoria Hanley is an American young adult fantasy novelist.  ",
+                "The Divide trilogy: The Divide trilogy is a fantasy young adult novel trilogy by Elizabeth Kay, which takes place in an alternate universe.  ",
+                "Animorphs: Animorphs is a science fantasy series of young adult books written by Katherine Applegate and her husband Michael Grant, writing together under the name K. A. Applegate, and published by Scholastic.  ",
+                "Etiquette &amp; Espionage: Etiquette & Espionage is a young adult steampunk novel by Gail Carriger.  ",
+                "Its construction was a consequence of a complete reconstruction of the street by the French.\n"
+            ],
+            "processing_time": 0.011388778686523438,
+            "resource_usage": {
+                "cpu": -0.006113346781825915,
+                "memory": 0.0,
+                "gpu": 5.333179136091104e-07
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.011s | Resource Utilization: | - cpu: -0.6% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8666665568947792,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -5.86,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.0176
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 2.758
+        }
+    },
+    {
+        "timestamp": "2025-02-25T23:08:39.554492",
+        "query": "Who scored the first touchdown of the game?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.016051054000854492,
+            "resource_usage": {
+                "cpu": 0.008244599999999998,
+                "memory": 0.00030000000000002247,
+                "gpu": 7.327796775769002e-05
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.016s | Resource Utilization: | - cpu: 0.8% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.7636363863945007,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": 13.23,
+            "memory": 0.05,
+            "gpu": 0.01,
+            "efficiency_score": 0.9601
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": -2.988
+        }
+    },
+    {
+        "timestamp": "2025-02-25T23:08:39.572461",
+        "query": "How many field goals did Kris Brown kick?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.005907297134399414,
+            "resource_usage": {
+                "cpu": -0.10791962105459998,
+                "memory": 0.00015774569999998933,
+                "gpu": 3.853094772821031e-05
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.006s | Resource Utilization: | - cpu: -10.8% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.7636363863945007,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": 20.82,
+            "memory": 0.03,
+            "gpu": 0.01,
+            "efficiency_score": 0.9374
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": -5.259
+        }
+    },
+    {
+        "timestamp": "2025-02-25T23:08:39.588842",
+        "query": "Which team won the game?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.0053212642669677734,
+            "resource_usage": {
+                "cpu": 0.0729881645025473,
+                "memory": 1.8558623859299406e-05,
+                "gpu": 4.533127469397158e-06
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.005s | Resource Utilization: | - cpu: 7.3% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.625,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": -11.42,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 1.0342
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": 4.426
+        }
+    },
+    {
+        "timestamp": "2025-02-25T23:08:39.608487",
+        "query": "How many field goals did both teams kick in the first half?",
+        "result": {
+            "result": [
+                "there is a loss of biodiversity",
+                "the soil becomes more prone to erosion",
+                "an increase in carbon dioxide (CO2) levels.",
+                "disruption of the natural water cycle",
+                "loss of habitat for native species"
+            ],
+            "processing_time": 0.007375955581665039,
+            "resource_usage": {
+                "cpu": -0.10370385543443977,
+                "memory": 2.1834035384138417e-06,
+                "gpu": 5.333179136091104e-07
+            },
+            "reasoning_path": "symbolic",
+            "retries": 0,
+            "explanation": "Reasoning Approach: symbolic | Processing Time: 0.007s | Resource Utilization: | - cpu: -10.4% | - memory: 0.0% | - gpu: 0.0%"
+        },
+        "source": "hybrid",
+        "complexity": 0.8399999499320985,
+        "processing_time": null,
+        "success": true,
+        "resource_usage": {
+            "cpu": 4.46,
+            "memory": 0.0,
+            "gpu": 0.0,
+            "efficiency_score": 0.9866
+        },
+        "performance_metrics": {
+            "processing_time": null,
+            "success": true,
+            "resource_efficiency": -0.338
         }
     }
 ]
