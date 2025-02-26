@@ -397,16 +397,38 @@ class GraphSymbolicReasoner:
             matching_indices = (similarities >= self.match_threshold).nonzero(as_tuple=False).flatten().tolist()
 
             if matching_indices:
+                # Sort matches by similarity and take top N most relevant
+                sorted_indices = sorted(
+                    matching_indices,
+                    key=lambda idx: similarities[idx].item(),
+                    reverse=True
+                )[:5]  # Limit to top 5 most relevant matches
+
                 responses = []
-                for idx in matching_indices:
-                    rule = self.rules.get(self.rule_ids[idx], {})
-                    if "response" in rule:
-                        responses.append(rule["response"])
-                    else:
-                        logger.warning(f"Rule {self.rule_ids[idx]} missing 'response' key.")
+                similarity_scores = []
+
+                for idx in sorted_indices:
+                    rule_id = self.rule_ids[idx]
+                    rule = self.rules.get(rule_id, {})
+                    sim_score = similarities[idx].item()
+
+                    # Only include rules with reasonable similarity
+                    if "response" in rule and sim_score >= self.match_threshold * 1.2:
+                        # Check if response is relevant to query
+                        if self._check_rule_relevance(rule.get("response", ""), query):
+                            responses.append(rule["response"])
+                            similarity_scores.append(sim_score)
+
                 if responses:
-                    logger.info(f"Found {len(responses)} symbolic responses via direct matching.")
-                    return responses
+                    logger.info(f"Found {len(responses)} relevant symbolic responses.")
+                    return {
+                        "response": responses,
+                        "similarities": similarity_scores,
+                        "preamble": f"Relevant background for: {query if isinstance(query, str) else 'the query'}"
+                    }
+                else:
+                    logger.info("No highly relevant symbolic matches found.")
+                    return {"response": ["No highly relevant symbolic match found."]}
             else:
                 logger.info("No symbolic match found via direct similarity.")
 
@@ -524,6 +546,31 @@ class GraphSymbolicReasoner:
         structure_score = len([ent for ent in doc.ents]) / max(1, len(response.split()))
         confidence_factors.append(structure_score)
         return float(np.mean(confidence_factors))
+
+    def _check_rule_relevance(self, rule_text: str, query: str) -> bool:
+        """Check if a rule is semantically relevant to the query."""
+        if isinstance(query, torch.Tensor):
+            return True  # Skip relevance check for tensor queries
+
+        # Extract key terms from query and rule
+        import re
+        query_terms = set(re.findall(r'\b\w{4,}\b', query.lower()))
+        rule_terms = set(re.findall(r'\b\w{4,}\b', rule_text.lower()))
+
+        # Check for overlap in key terms
+        common_terms = query_terms.intersection(rule_terms)
+        if len(common_terms) >= min(2, len(query_terms) / 3):
+            return True
+
+        # Fallback to embedding similarity for complex queries
+        try:
+            query_emb = self.embedder.encode(query, convert_to_tensor=True)
+            rule_emb = self.embedder.encode(rule_text, convert_to_tensor=True)
+            similarity = torch.nn.functional.cosine_similarity(query_emb, rule_emb, dim=0).item()
+            return similarity > 0.4  # Higher threshold for semantic similarity
+        except:
+            # If embedding comparison fails, be permissive
+            return len(query_terms) < 3 or len(rule_terms) < 3
 
     def _identify_rules_used(self, response: str) -> Set[str]:
         used_rules = set()

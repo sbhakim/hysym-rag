@@ -507,57 +507,64 @@ class NeuralRetriever:
         Create an enhanced prompt with better structure and guidance integration.
         """
         try:
-            valid_chunks = [c for c in chunks if isinstance(c, dict) and 'text' in c]
-            if not valid_chunks:
-                logger.warning("No valid chunks for prompt creation")
-                return self._create_fallback_prompt(question)
+            # Filter chunks and guidance for relevance to the question
+            question_lower = question.lower()
+            question_keywords = set(re.findall(r'\b\w{4,}\b', question_lower))
 
-            # Extract and deduplicate relevant context
+            # Only use chunks with sufficient relevance to query
+            relevant_chunks = []
+            for chunk in chunks:
+                chunk_text = chunk.get('text', '').lower()
+                chunk_keywords = set(re.findall(r'\b\w{4,}\b', chunk_text))
+                common_keywords = question_keywords.intersection(chunk_keywords)
+
+                # Only include chunk if it shares keywords with the question
+                if len(common_keywords) > 0 or len(question_keywords) < 3:
+                    relevant_chunks.append(chunk)
+
+            # Use filtered chunks, or all chunks if filtering removed too much
+            valid_chunks = relevant_chunks if len(relevant_chunks) >= 2 else chunks
             context_parts = []
-            seen_sentences = set()
             for chunk in valid_chunks:
                 chunk_text = chunk['text'].strip()
-                if not chunk_text:
-                    continue
+                if chunk_text:
+                    context_parts.append(chunk_text)
 
-                # Add only unique content
-                sentences = [s.strip() for s in chunk_text.split('.') if s.strip()]
-                for sentence in sentences:
-                    if sentence and sentence not in seen_sentences and len(sentence) > 10:
-                        context_parts.append(sentence)
-                        seen_sentences.add(sentence)
+            # Deduplicate context parts
+            unique_context = []
+            seen_segments = set()
+            for part in context_parts:
+                if part not in seen_segments:
+                    seen_segments.add(part)
+                    unique_context.append(part)
 
-            context = ". ".join(context_parts)
+            # Build context from unique parts
+            context = "\n\n".join(unique_context[:3])  # Limit to 3 parts for conciseness
 
-            # Process guidance rules to extract relevant information
+            # Filter symbolic guidance for relevance to query
             guidance_text = ""
             if symbolic_guidance:
                 valid_statements = []
-
                 for guide in symbolic_guidance:
                     if isinstance(guide, dict):
-                        # Try multiple keys to find content
-                        statement = None
-                        for key in [self.guidance_statement_key, 'response', 'text', 'content', 'source_text']:
-                            if key in guide and guide[key]:
-                                statement = guide[key]
-                                break
+                        statement = guide.get('response', '')
+                        if not statement and guide.get('text'):
+                            statement = guide.get('text')
 
-                        # Check confidence with fallback
-                        confidence = guide.get(self.guidance_confidence_key, 0.7)
+                        # Check if statement is relevant to the question
+                        if statement:
+                            statement_lower = statement.lower()
+                            statement_keywords = set(re.findall(r'\b\w{4,}\b', statement_lower))
+                            common_keywords = question_keywords.intersection(statement_keywords)
 
-                        if statement and confidence > 0.4:  # Lower threshold to include more guidance
-                            if statement not in valid_statements:  # Avoid duplicates
+                            # Only include if it shares keywords with the question
+                            if len(common_keywords) > 0:
                                 valid_statements.append(statement)
-                    elif isinstance(guide, str) and guide.strip():
-                        if guide not in valid_statements:
-                            valid_statements.append(guide)
 
                 if valid_statements:
-                    # Format guidance as bullet points for better integration
-                    guidance_text = "\n\nRelevant background:\n- " + "\n- ".join(valid_statements)
+                    guidance_text = "\nRelevant background:\n- " + "\n- ".join(valid_statements[:3])
 
-            # Create a more structured prompt with explicit instructions
+            # Create the final prompt
             prompt = (
                 f"Context:{guidance_text}\n\n"
                 f"{context}\n\n"
@@ -568,7 +575,7 @@ class NeuralRetriever:
             return prompt
         except Exception as e:
             logger.error(f"Error creating enhanced prompt: {e}")
-            return self._create_fallback_prompt(question)
+            return f"Question: {question}\nAnswer: "
 
     def _create_fallback_prompt(self, question: str) -> str:
         """

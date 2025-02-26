@@ -377,7 +377,7 @@ if __name__ == "__main__":
         context=context
     )
 
-    metrics_collector.ablation_results = ablation_results
+    metrics_collector.ablation_results = ablation_results.get('ablation_results', ablation_results)
 
     print("\n=== Comparison Experiment (Sample) ===")
     comparison_queries = ["Compare and contrast the film adaptations of 'Pride and Prejudice'."]

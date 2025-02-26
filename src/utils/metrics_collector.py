@@ -1,4 +1,4 @@
-#src/utils/metrics_collector.py
+# src/utils/metrics_collector.py
 
 import numpy as np
 from datetime import datetime, timedelta
@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 import pandas as pd
 from scipy import stats
+
 
 class MetricsCollector:
     """
@@ -72,7 +73,13 @@ class MetricsCollector:
             'step_accuracy': [],
             'inference_depth': [],
             'fact_coverage': [],
-            'chains': []  # To store complete reasoning chain info
+            'chains': [],  # To store complete reasoning chain info
+            'path_lengths': [],
+            'chain_lengths': [],
+            'match_confidences': [],
+            'hop_distributions': defaultdict(int),
+            'pattern_types': defaultdict(int),  # ADD THIS INITIALIZATION FOR pattern_types
+            'rule_utilization': defaultdict(int)  # Ensure rule_utilization is also initialized if used
         }
         # Component performance tracking (per component: execution_time, success_rate, error_rate, resource_usage)
         self.component_metrics = defaultdict(lambda: {
@@ -281,23 +288,23 @@ class MetricsCollector:
         return {
             'chain_characteristics': {
                 'avg_length': float(np.mean(self.reasoning_metrics['chain_length']))
-                                if self.reasoning_metrics['chain_length'] else 0.0,
+                if self.reasoning_metrics['chain_length'] else 0.0,
                 'avg_confidence': float(np.mean(self.reasoning_metrics['confidence_scores']))
-                                  if self.reasoning_metrics['confidence_scores'] else 0.0,
+                if self.reasoning_metrics['confidence_scores'] else 0.0,
                 'avg_inference_depth': float(np.mean(self.reasoning_metrics['inference_depth']))
-                                       if self.reasoning_metrics['inference_depth'] else 0.0
+                if self.reasoning_metrics['inference_depth'] else 0.0
             },
             'path_distribution': self._analyze_path_distribution(),
             'step_accuracy': {
                 'mean': float(np.mean(self.reasoning_metrics['step_accuracy']))
-                         if self.reasoning_metrics['step_accuracy'] else 0.0,
+                if self.reasoning_metrics['step_accuracy'] else 0.0,
                 'std': float(np.std(self.reasoning_metrics['step_accuracy']))
-                        if self.reasoning_metrics['step_accuracy'] else 0.0,
+                if self.reasoning_metrics['step_accuracy'] else 0.0,
                 'distribution': self._analyze_accuracy_distribution()
             },
             'fact_coverage': {
                 'mean': float(np.mean(self.reasoning_metrics['fact_coverage']))
-                         if self.reasoning_metrics['fact_coverage'] else 0.0,
+                if self.reasoning_metrics['fact_coverage'] else 0.0,
                 'by_complexity': self._analyze_coverage_by_complexity()
             }
         }
@@ -330,8 +337,8 @@ class MetricsCollector:
                 not self.path_complexities['query_complexity']):
             return {}
         for complexity, coverage in zip(
-            self.path_complexities['query_complexity'],
-            self.reasoning_metrics['fact_coverage']
+                self.path_complexities['query_complexity'],
+                self.reasoning_metrics['fact_coverage']
         ):
             bin_idx = int(complexity * 3)
             bin_idx = min(2, max(0, bin_idx))
@@ -355,13 +362,13 @@ class MetricsCollector:
         for component, metrics in self.component_metrics.items():
             component_analysis[component] = {
                 'avg_execution_time': float(np.mean(metrics['execution_time']))
-                                      if metrics['execution_time'] else 0.0,
+                if metrics['execution_time'] else 0.0,
                 'success_rate': float(np.mean(metrics['success_rate']))
-                                if metrics['success_rate'] else 0.0,
+                if metrics['success_rate'] else 0.0,
                 'error_rate': float(np.mean(metrics['error_rate']))
-                              if metrics['error_rate'] else 0.0,
+                if metrics['error_rate'] else 0.0,
                 'avg_resource_usage': float(np.mean(metrics['resource_usage']))
-                                      if metrics['resource_usage'] else 0.0
+                if metrics['resource_usage'] else 0.0
             }
         return component_analysis
 
@@ -432,10 +439,10 @@ class MetricsCollector:
             impact_metrics = {}
             for metric_key in baseline:
                 if (metric_key in ablated
-                    and isinstance(baseline[metric_key], dict)
-                    and isinstance(ablated[metric_key], dict)
-                    and 'mean' in baseline[metric_key]
-                    and 'mean' in ablated[metric_key]):
+                        and isinstance(baseline[metric_key], dict)
+                        and isinstance(ablated[metric_key], dict)
+                        and 'mean' in baseline[metric_key]
+                        and 'mean' in ablated[metric_key]):
                     base_val = baseline[metric_key]['mean']
                     abl_val = ablated[metric_key]['mean']
                     relative_change = (abl_val - base_val) / base_val if abs(base_val) > 1e-9 else 0.0
@@ -511,6 +518,24 @@ class MetricsCollector:
         except Exception as e:
             self.logger.error(f"Error saving metrics: {str(e)}")
 
+    def collect_component_metrics(self,
+                                  component: str,
+                                  execution_time: float,
+                                  success: bool = True,
+                                  error_rate: float = 0.0,
+                                  resource_usage: Optional[Dict[str, float]] = None):
+        """
+        Collect metrics for individual system components (symbolic, neural, etc.)
+        """
+        self.component_metrics[component]['execution_time'].append(execution_time)
+        self.component_metrics[component]['success_rate'].append(1.0 if success else 0.0)
+        self.component_metrics[component]['error_rate'].append(error_rate)
+
+        if resource_usage:
+            # Calculate average resource usage
+            avg_usage = sum(resource_usage.values()) / len(resource_usage) if resource_usage else 0.0
+            self.component_metrics[component]['resource_usage'].append(avg_usage)
+
     def get_real_time_metrics(self) -> Dict[str, Any]:
         return {
             'current_query_count': self.query_count,
@@ -533,7 +558,7 @@ class MetricsCollector:
             'exact_match': float(prediction == ground_truth),
             'char_error_rate': self._calculate_char_error_rate(prediction, ground_truth),
             'prediction_length_ratio': float(len(prediction) / len(ground_truth))
-                                       if len(ground_truth) != 0 else 0.0,
+            if len(ground_truth) != 0 else 0.0,
             'success': prediction == ground_truth
         }
 

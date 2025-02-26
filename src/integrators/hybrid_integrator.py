@@ -56,6 +56,12 @@ class HybridIntegrator:
         self.cache = {}
         self.cache_ttl = cache_ttl
 
+        # Track component execution times
+        self.component_times = {
+            "symbolic": 0.0,
+            "neural": 0.0
+        }
+
     def process_query(self, query: str, context: str, query_complexity: float = 0.5,
                       supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
         try:
@@ -63,12 +69,23 @@ class HybridIntegrator:
             cached_result = self._get_cache(cache_key)
             if cached_result:
                 return cached_result
+
+            # Track component timing
+            symbolic_start = time.time()
             symbolic_result = self._process_symbolic(query)
+            symbolic_time = time.time() - symbolic_start
+            self.component_times["symbolic"] = symbolic_time
+
             is_multi_hop = self._is_multi_hop_query(query)
+
+            neural_start = time.time()
             if is_multi_hop:
                 result = self._handle_multi_hop_query(query, context, symbolic_result, supporting_facts)
             else:
                 result = self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
+            neural_time = time.time() - neural_start
+            self.component_times["neural"] = neural_time
+
             self._set_cache(cache_key, result)
             return result
 
