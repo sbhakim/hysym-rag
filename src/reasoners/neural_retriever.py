@@ -175,7 +175,7 @@ class NeuralRetriever:
             relevant_chunks = self._get_relevant_chunks(
                 question_embedding,
                 context_chunks,
-                formatted_guidance  # Use formatted_guidance here - FIX applied!
+                formatted_guidance  # Use formatted_guidance for consistency
             )
             if not relevant_chunks:
                 logger.warning("No relevant chunks found; using full context as fallback.")
@@ -191,7 +191,7 @@ class NeuralRetriever:
             prompt = self._create_enhanced_prompt(
                 question,
                 relevant_chunks,
-                formatted_guidance  # Use formatted_guidance here - FIX applied!
+                formatted_guidance  # Use formatted_guidance for consistency
             )
 
             inputs_pt = self.tokenizer(
@@ -412,22 +412,44 @@ class NeuralRetriever:
         try:
             scored_chunks = []
             question_emb = question_embedding.view(-1)
+
+            # Process each chunk with proper scoring
             for chunk in chunks:
+                if 'embedding' not in chunk or chunk['embedding'] is None:
+                    continue
+
                 chunk_emb = chunk['embedding'].view(-1)
                 sim = util.cos_sim(chunk_emb.unsqueeze(0), question_emb.unsqueeze(0)).item()
+
+                # Add support score boost if available
                 if 'support_score' in chunk:
                     sim += chunk['support_score'] * self.support_boost
+
+                # Apply guidance boost with enhanced calculation
                 if symbolic_guidance:
                     guidance_boost = self._calculate_guidance_boost(chunk, symbolic_guidance)
                     sim += guidance_boost
-                scored_chunks.append((sim, chunk))  # Correct Indentation - Inside the loop
 
-            scored_chunks.sort(key=lambda x: x[0], reverse=True)  # Correct Indentation - After the loop
-            relevant_chunks = [chunk for sim, chunk in scored_chunks if sim > 0]
+                # Store the chunk with its similarity score
+                scored_chunks.append((sim, chunk))
+
+            # Sort chunks by similarity score
+            scored_chunks.sort(key=lambda x: x[0], reverse=True)
+
+            # Always include at least top 3 chunks to ensure sufficient context
+            top_chunks = [chunk for _, chunk in scored_chunks[:min(3, len(scored_chunks))]]
+
+            # Add additional chunks that meet the threshold
+            threshold_chunks = [chunk for sim, chunk in scored_chunks[min(3, len(scored_chunks)):] if sim > 0.3]
+
+            relevant_chunks = top_chunks + threshold_chunks
+
+            # Fallback if no relevant chunks found
             if not relevant_chunks and scored_chunks:
                 logger.warning("No relevant chunks found, using top chunk as fallback.")
                 relevant_chunks = [scored_chunks[0][1]]
-            return relevant_chunks[:max(1, self.top_k)]
+
+            return relevant_chunks[:max(3, self.top_k)]  # Ensure at least 3 chunks
         except Exception as e:
             logger.error(f"Error processing chunks: {str(e)}")
             return [chunks[0]] if chunks else []
@@ -437,9 +459,46 @@ class NeuralRetriever:
                                   guidance: List[Dict]) -> float:
         boost = 0.0
         chunk_text = chunk['text'].lower()
+
+        if not guidance:
+            return 0.0
+
+        # Calculate matches based on different rule formats
         for guide in guidance:
-            if guide.get(self.guidance_statement_key, '').lower() in chunk_text:
-                boost += guide.get(self.guidance_confidence_key, 0.5) * self.guidance_boost_multiplier
+            # Handle different rule formats
+            if isinstance(guide, dict):
+                # First try the specified statement key
+                statement = guide.get(self.guidance_statement_key, '')
+
+                # If not found, try alternative keys
+                if not statement and 'response' in guide:
+                    statement = guide.get('response', '')
+
+                # If still not found, try more alternatives
+                if not statement:
+                    for key in ['text', 'content', 'source_text']:
+                        if key in guide and guide[key]:
+                            statement = guide[key]
+                            break
+
+                # Get confidence with fallback
+                confidence = guide.get(self.guidance_confidence_key, 0.7)
+
+                # Check for statement in chunk
+                if statement and statement.lower() in chunk_text:
+                    boost += confidence * self.guidance_boost_multiplier
+
+                # Also check for partial keyword matches
+                elif statement:
+                    words = [w for w in statement.lower().split() if len(w) > 4]
+                    matches = sum(1 for word in words if word in chunk_text)
+                    if matches >= 2:  # At least 2 significant words match
+                        boost += (confidence * 0.7) * self.guidance_boost_multiplier
+
+            # Handle string guidance
+            elif isinstance(guide, str) and guide.lower() in chunk_text:
+                boost += 0.7 * self.guidance_boost_multiplier
+
         return min(boost, self.guidance_boost_limit)
 
     def _create_enhanced_prompt(self, question: str, chunks: List[Dict],
@@ -452,27 +511,58 @@ class NeuralRetriever:
             if not valid_chunks:
                 logger.warning("No valid chunks for prompt creation")
                 return self._create_fallback_prompt(question)
+
+            # Extract and deduplicate relevant context
             context_parts = []
+            seen_sentences = set()
             for chunk in valid_chunks:
                 chunk_text = chunk['text'].strip()
-                if chunk_text:
-                    context_parts.append(chunk_text)
-            context = "\n\n".join(context_parts)
+                if not chunk_text:
+                    continue
+
+                # Add only unique content
+                sentences = [s.strip() for s in chunk_text.split('.') if s.strip()]
+                for sentence in sentences:
+                    if sentence and sentence not in seen_sentences and len(sentence) > 10:
+                        context_parts.append(sentence)
+                        seen_sentences.add(sentence)
+
+            context = ". ".join(context_parts)
+
+            # Process guidance rules to extract relevant information
             guidance_text = ""
             if symbolic_guidance:
                 valid_statements = []
+
                 for guide in symbolic_guidance:
                     if isinstance(guide, dict):
-                        statement = guide.get(self.guidance_statement_key)
-                        confidence = guide.get(self.guidance_confidence_key, 0)
-                        if statement and confidence > 0.5:
-                            valid_statements.append(statement)
+                        # Try multiple keys to find content
+                        statement = None
+                        for key in [self.guidance_statement_key, 'response', 'text', 'content', 'source_text']:
+                            if key in guide and guide[key]:
+                                statement = guide[key]
+                                break
+
+                        # Check confidence with fallback
+                        confidence = guide.get(self.guidance_confidence_key, 0.7)
+
+                        if statement and confidence > 0.4:  # Lower threshold to include more guidance
+                            if statement not in valid_statements:  # Avoid duplicates
+                                valid_statements.append(statement)
+                    elif isinstance(guide, str) and guide.strip():
+                        if guide not in valid_statements:
+                            valid_statements.append(guide)
+
                 if valid_statements:
-                    guidance_text = "\nRelevant background:\n- " + "\n- ".join(valid_statements)
+                    # Format guidance as bullet points for better integration
+                    guidance_text = "\n\nRelevant background:\n- " + "\n- ".join(valid_statements)
+
+            # Create a more structured prompt with explicit instructions
             prompt = (
                 f"Context:{guidance_text}\n\n"
                 f"{context}\n\n"
                 f"Question: {question}\n"
+                f"Using the provided context, answer the question accurately and concisely.\n"
                 f"Answer: "
             )
             return prompt

@@ -88,11 +88,11 @@ class RuleGuidedRetriever:
             logger.info("Advanced RG-Retriever: No valid rule embeddings, skipping filtering.")
             return context
 
-        # Adaptive Threshold Calculation
+        # Adaptive Threshold Calculation with lower base for better recall
         similarity_threshold = self.base_similarity_threshold
         if self.adaptive_threshold:
-            similarity_threshold = self.base_similarity_threshold + (0.6 - self.base_similarity_threshold) * (
-                        1 - query_complexity)
+            # Lower the base threshold to capture more context
+            similarity_threshold = max(0.25, self.base_similarity_threshold * (1 - query_complexity * 0.5))
         logger.debug(f"Advanced RG-Retriever: Using similarity threshold: {similarity_threshold:.2f}")
 
         # Split context based on granularity
@@ -101,57 +101,55 @@ class RuleGuidedRetriever:
         else:
             context_segments = [seg.strip() for seg in context.split('.') if seg.strip()]
 
-        filtered_context_segments = []
+        # Track best segments with their scores
+        scored_segments = []
 
-        # Process each segment
+        # Process each segment and score it
         for segment in context_segments:
             try:
-                # Use encode with explicit device management
-                segment_embedding = self.encoder.encode(segment, convert_to_tensor=True, device=self.device)
-            except Exception as e:
-                logger.error(f"Error encoding segment '{segment[:50]}...': {e}")  # Log first 50 chars
-                continue
-
-            weighted_similarity_sum = 0.0
-            for rule_data in rule_embeddings_with_confidence:
-                rule_emb = rule_data['embedding']
-                rule_confidence = rule_data['confidence']
-                # No need for ensure_same_device here; embeddings created on the correct device above.
-                similarity = util.cos_sim(segment_embedding, rule_emb).item()
-                weighted_similarity_sum += similarity * rule_confidence
-
-            # Apply filtering
-            if weighted_similarity_sum >= similarity_threshold * len(rule_embeddings_with_confidence):
-                filtered_context_segments.append(segment)
-
-        # Fallback: if no segments passed, use the best matching segment.
-        if not filtered_context_segments and context_segments:
-            best_segment = None
-            best_score = -1.0
-            for segment in context_segments:
-                try:
-                    # Use encode with explicit device management
-                    segment_embedding = self.encoder.encode(segment, convert_to_tensor=True, device=self.device)
-                except Exception as e:
-                    logger.error(f"Error encoding segment (fallback) '{segment[:50]}...': {e}")
+                # Skip very short segments
+                if len(segment.strip()) < 10:
                     continue
 
-                weighted_similarity_sum = 0.0
+                # Use encode with explicit device management
+                segment_embedding = self.encoder.encode(segment, convert_to_tensor=True, device=self.device)
+
+                # Calculate weighted similarity across all rules
+                similarity_sum = 0
+                weight_sum = 0
+
                 for rule_data in rule_embeddings_with_confidence:
                     rule_emb = rule_data['embedding']
                     rule_confidence = rule_data['confidence']
-                    # No need for ensure_same_device here.
+                    # Calculate cosine similarity
                     similarity = util.cos_sim(segment_embedding, rule_emb).item()
-                    weighted_similarity_sum += similarity * rule_confidence
+                    similarity_sum += similarity * rule_confidence
+                    weight_sum += rule_confidence
 
-                if weighted_similarity_sum > best_score:
-                    best_score = weighted_similarity_sum
-                    best_segment = segment
+                if weight_sum > 0:
+                    avg_similarity = similarity_sum / weight_sum
+                    scored_segments.append((avg_similarity, segment))
 
-            if best_segment:
-                filtered_context_segments.append(best_segment)
-                logger.info(
-                    "Advanced RG-Retriever: No segments met the threshold; using best matching segment as fallback.")
+            except Exception as e:
+                logger.error(f"Error encoding segment '{segment[:50]}...': {e}")
+                continue
+
+        # Sort segments by similarity score
+        scored_segments.sort(reverse=True, key=lambda x: x[0])
+
+        # Always include at least the top 3 segments, regardless of threshold
+        filtered_context_segments = [segment for score, segment in scored_segments[:min(3, len(scored_segments))]]
+
+        # Add more segments that meet the threshold
+        threshold_segments = [segment for score, segment in scored_segments[min(3, len(scored_segments)):]
+                              if score >= similarity_threshold]
+
+        filtered_context_segments.extend(threshold_segments)
+
+        # Fallback: if still no segments, use original context segments
+        if not filtered_context_segments and context_segments:
+            logger.info("Advanced RG-Retriever: No matching segments found. Using top 3 context segments as fallback.")
+            filtered_context_segments = context_segments[:min(3, len(context_segments))]
 
         # Final Fallback: If even the best segment isn't found, return the original context.
         if not filtered_context_segments:

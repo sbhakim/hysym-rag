@@ -258,7 +258,30 @@ class HybridIntegrator:
     def _fuse_symbolic_neural(self, query: str, symbolic_result: Union[List[str], str], neural_answer: str,
                               query_complexity: float = 0.5) -> Tuple[str, float, Dict]:
         try:
-            symbolic_text = " ".join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result
+            # Extract top symbolic results with their confidence scores
+            if isinstance(symbolic_result, dict) and "response" in symbolic_result:
+                symbolic_text = "\n".join(symbolic_result["response"][:3])  # Take top 3 responses
+                confidences = symbolic_result.get("similarities", [0.7] * len(symbolic_result["response"][:3]))
+            else:
+                symbolic_text = " ".join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result
+                confidences = [0.6]  # Default confidence
+
+            # Generate enhanced neural prompt with symbolic guidance
+            if len(symbolic_text) > 10:  # Only if there's meaningful symbolic content
+                enhanced_neural_prompt = (
+                    f"Question: {query}\n\nRelevant facts from knowledge base:\n{symbolic_text}\n\n"
+                    f"Based on these facts and your knowledge, answer the question in detail: {query}"
+                )
+                # Re-query with enhanced prompt if neural_answer doesn't directly address the question
+                if not self._answer_addresses_query(neural_answer, query):
+                    try:
+                        new_answer = self.neural.retrieve_answer(symbolic_text, enhanced_neural_prompt)
+                        if len(new_answer) > len(neural_answer) * 0.7:  # Only use if substantial
+                            neural_answer = new_answer
+                    except Exception as e:
+                        self.logger.warning(f"Error in enhanced prompting: {e}")
+
+            # Get embeddings for symbolic and neural results
             symbolic_emb_raw = self._get_symbolic_embedding(symbolic_result)
             neural_emb_raw = self._get_neural_embedding(neural_answer)
 
@@ -273,6 +296,7 @@ class HybridIntegrator:
 
             symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
 
+            # Process through alignment layer with robust error handling
             try:
                 aligned_emb, base_confidence, debug_info = self.alignment_layer(
                     symbolic_emb,
@@ -285,16 +309,18 @@ class HybridIntegrator:
                 base_confidence = 0.4
                 debug_info = {"error": str(e), "fallback": True}
 
+            # Apply more realistic confidence calculation
             if base_confidence <= 0.0:
                 base_confidence = 0.4
 
-            confidence = (base_confidence + 0.2)
-            confidence = min(1.0, confidence)
+            # Adjust confidence to be more realistic
+            avg_symbolic_confidence = sum(confidences) / len(confidences) if confidences else 0.5
 
-            symbolic_contribution = self._assess_symbolic_contribution(symbolic_result)
-            confidence = (confidence + symbolic_contribution * 1.5)
-            confidence = max(0.3, min(1.0, confidence))
+            # More conservative confidence scoring
+            query_relevance = self._estimate_answer_relevance(query, neural_answer)
+            confidence = min(0.85, base_confidence * avg_symbolic_confidence * query_relevance)
 
+            # Generate the final response
             fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, aligned_emb,
                                                               confidence)
             self._update_fusion_metrics(confidence, query_complexity, debug_info)
@@ -362,6 +388,32 @@ class HybridIntegrator:
 
     def _get_symbolic_guidance(self, symbolic_result: List[str], hop: Dict[str, Any]) -> List[str]:
         return symbolic_result
+
+    def _answer_addresses_query(self, answer: str, query: str) -> bool:
+        """Check if the answer actually addresses the query."""
+        import re
+        # Basic check - neural answer should contain key terms from the query
+        query_terms = set(re.findall(r'\b\w{4,}\b', query.lower()))
+        answer_terms = set(re.findall(r'\b\w{4,}\b', answer.lower()))
+        common_terms = query_terms.intersection(answer_terms)
+        return len(common_terms) >= min(2, len(query_terms) / 2)
+
+    def _estimate_answer_relevance(self, query: str, answer: str) -> float:
+        """Estimate how relevant the answer is to the query."""
+        import re
+        query_terms = set(re.findall(r'\b\w{4,}\b', query.lower()))
+        answer_terms = set(re.findall(r'\b\w{4,}\b', answer.lower()))
+
+        if not query_terms or not answer_terms:
+            return 0.7  # Default value
+
+        common_terms = query_terms.intersection(answer_terms)
+        coverage = len(common_terms) / len(query_terms) if query_terms else 0
+
+        # Check answer length - penalize very short answers
+        length_factor = min(1.0, len(answer) / 100)
+
+        return min(0.95, (0.6 + coverage * 0.4) * length_factor)
 
     def _encode_text(self, text: str) -> torch.Tensor:
         from sentence_transformers import SentenceTransformer
