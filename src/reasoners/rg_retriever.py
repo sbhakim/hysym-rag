@@ -25,11 +25,11 @@ class RuleGuidedRetriever:
         self.adaptive_threshold = adaptive_threshold  # Flag for adaptive thresholding
         self.context_granularity = context_granularity  # "sentence" or "paragraph"
         self.device = DeviceManager.get_device()  # Use DeviceManager
-        self.encoder.to(self.device) # Move encoder to the managed device
+        self.encoder.to(self.device)  # Move encoder to the managed device
 
     def filter_context_by_rules(self, context: str, symbolic_guidance: List[Dict[str, Any]],
-                                 query_complexity: float = 0.5,
-                                 supporting_facts: Optional[List[Tuple[str, int]]] = None) -> str:
+                                query_complexity: float = 0.5,
+                                supporting_facts: Optional[List[Tuple[str, int]]] = None) -> str:
         """
         Filters the context based on semantic similarity to symbolic rules.
 
@@ -46,23 +46,43 @@ class RuleGuidedRetriever:
             logger.info("Advanced RG-Retriever: No rules provided, skipping filtering.")
             return context
 
+        # More flexible rule format handling
         rule_embeddings_with_confidence = []
         for rule in symbolic_guidance:
-            # Ensure consistent rule format (dictionaries with "response" key).
-            if isinstance(rule, dict) and "response" in rule:
-                rule_text = rule["response"]
-                rule_confidence = rule.get("confidence", 1.0)  # Default confidence
-            else:
-                logger.warning(f"Invalid rule format: {rule}. Skipping.")
-                continue
+            # Handle string rules
+            if isinstance(rule, str):
+                rule_text = rule.strip()
+                if not rule_text:
+                    continue
+                rule_confidence = 0.7  # Default confidence for string rules
+                try:
+                    rule_embedding = self.encoder.encode(rule_text, convert_to_tensor=True, device=self.device)
+                    rule_embeddings_with_confidence.append({'embedding': rule_embedding, 'confidence': rule_confidence})
+                except Exception as e:
+                    logger.debug(f"Error encoding rule: {e}")
+                    continue
+            # Handle dictionary rules
+            elif isinstance(rule, dict):
+                # Look for response content in multiple possible fields
+                rule_text = None
+                for field in ['response', 'statement', 'text', 'source_text', 'content']:
+                    if field in rule and rule[field]:
+                        rule_text = rule[field]
+                        break
 
-            try:
-                # Use encode with explicit device management
-                rule_embedding = self.encoder.encode(rule_text, convert_to_tensor=True, device=self.device)
-                rule_embeddings_with_confidence.append({'embedding': rule_embedding, 'confidence': rule_confidence})
-            except Exception as e:
-                logger.error(f"Error encoding rule '{rule_text}': {e}")
-                continue # Skip to the next rule if encoding fails.
+                if not rule_text:
+                    continue
+
+                rule_confidence = rule.get('confidence', 0.7)
+                try:
+                    rule_embedding = self.encoder.encode(rule_text, convert_to_tensor=True, device=self.device)
+                    rule_embeddings_with_confidence.append({'embedding': rule_embedding, 'confidence': rule_confidence})
+                except Exception as e:
+                    logger.debug(f"Error encoding rule: {e}")
+                    continue
+            else:
+                logger.warning(f"Unsupported rule format: {type(rule)}. Skipping.")
+                continue
 
         if not rule_embeddings_with_confidence:
             logger.info("Advanced RG-Retriever: No valid rule embeddings, skipping filtering.")
@@ -71,7 +91,8 @@ class RuleGuidedRetriever:
         # Adaptive Threshold Calculation
         similarity_threshold = self.base_similarity_threshold
         if self.adaptive_threshold:
-            similarity_threshold = self.base_similarity_threshold + (0.6 - self.base_similarity_threshold) * (1 - query_complexity)
+            similarity_threshold = self.base_similarity_threshold + (0.6 - self.base_similarity_threshold) * (
+                        1 - query_complexity)
         logger.debug(f"Advanced RG-Retriever: Using similarity threshold: {similarity_threshold:.2f}")
 
         # Split context based on granularity
@@ -88,7 +109,7 @@ class RuleGuidedRetriever:
                 # Use encode with explicit device management
                 segment_embedding = self.encoder.encode(segment, convert_to_tensor=True, device=self.device)
             except Exception as e:
-                logger.error(f"Error encoding segment '{segment[:50]}...': {e}") # Log first 50 chars
+                logger.error(f"Error encoding segment '{segment[:50]}...': {e}")  # Log first 50 chars
                 continue
 
             weighted_similarity_sum = 0.0
@@ -129,7 +150,8 @@ class RuleGuidedRetriever:
 
             if best_segment:
                 filtered_context_segments.append(best_segment)
-                logger.info("Advanced RG-Retriever: No segments met the threshold; using best matching segment as fallback.")
+                logger.info(
+                    "Advanced RG-Retriever: No segments met the threshold; using best matching segment as fallback.")
 
         # Final Fallback: If even the best segment isn't found, return the original context.
         if not filtered_context_segments:
@@ -142,9 +164,9 @@ class RuleGuidedRetriever:
         else:
             filtered_context = ". ".join(filtered_context_segments)
 
-        logger.info(f"Advanced RG-Retriever ({self.context_granularity.capitalize()}, Semantic): Context filtered (threshold={similarity_threshold:.2f}, adaptive={self.adaptive_threshold}). Original length: {len(context)}, Filtered length: {len(filtered_context)}")
+        logger.info(
+            f"Advanced RG-Retriever ({self.context_granularity.capitalize()}, Semantic): Context filtered (threshold={similarity_threshold:.2f}, adaptive={self.adaptive_threshold}). Original length: {len(context)}, Filtered length: {len(filtered_context)}")
         return filtered_context
-
 
 
 if __name__ == '__main__':
@@ -160,7 +182,7 @@ if __name__ == '__main__':
     sample_rules = [
         {"response": "Deforestation leads to soil erosion.", "confidence": 0.95},
         {"response": "Biodiversity is reduced by deforestation.", "confidence": 0.85},
-        {"response": "Climate change is linked to deforestation."} # Now consistent format
+        {"response": "Climate change is linked to deforestation."}  # Now consistent format
     ]
     sample_query_complexity = 0.7
 

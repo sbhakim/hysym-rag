@@ -183,15 +183,28 @@ class HybridIntegrator:
             # Store metrics in integration_metrics
             self.integration_metrics['reasoning_steps'].append(len(reasoning_chain))
             self.integration_metrics['path_lengths'].append(len(intermediate_results))
-            if not self.integration_metrics.get('chain_lengths'):
+
+            # Initialize metrics collections if they don't exist
+            if 'chain_lengths' not in self.integration_metrics:
                 self.integration_metrics['chain_lengths'] = []
-            if not self.integration_metrics.get('chain_confidences'):
+            if 'chain_confidences' not in self.integration_metrics:
                 self.integration_metrics['chain_confidences'] = []
-            if not self.integration_metrics.get('inference_depths'):
+            if 'inference_depths' not in self.integration_metrics:
                 self.integration_metrics['inference_depths'] = []
+
+            # Track detailed reasoning metrics for academic evaluation
             self.integration_metrics['chain_lengths'].append(reasoning_chain_info['chain_length'])
             self.integration_metrics['chain_confidences'].append(reasoning_chain_info['overall_confidence'])
             self.integration_metrics['inference_depths'].append(reasoning_chain_info['hop_count'])
+
+            # Also track reasoning metrics in symbolic reasoner for cross-component analysis
+            if hasattr(self.symbolic_reasoner, 'reasoning_metrics'):
+                self.symbolic_reasoner.reasoning_metrics['path_lengths'].append(reasoning_chain_info['chain_length'])
+                self.symbolic_reasoner.reasoning_metrics['match_confidences'].append(
+                    reasoning_chain_info['overall_confidence'])
+                hop_count = reasoning_chain_info['hop_count']
+                self.symbolic_reasoner.reasoning_metrics['hop_distributions'][hop_count] += 1
+                self.symbolic_reasoner.reasoning_metrics['pattern_types']['multi_hop'] += 1
 
             # Store the reasoning chain
             self.reasoning_chains[reasoning_chain_info['chain_id']] = reasoning_chain_info

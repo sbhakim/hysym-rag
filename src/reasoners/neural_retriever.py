@@ -36,7 +36,7 @@ class NeuralRetriever:
         if device is None:
             device = DeviceManager.get_device()
         self.device = device
-        self.logger = logger # Added self.logger = logger
+        self.logger = logger  # Added self.logger = logger
 
         ProgressManager.disable_progress()
         transformers_logging.set_verbosity_error()
@@ -175,7 +175,7 @@ class NeuralRetriever:
             relevant_chunks = self._get_relevant_chunks(
                 question_embedding,
                 context_chunks,
-                formatted_guidance # Use formatted_guidance here - FIX applied!
+                formatted_guidance  # Use formatted_guidance here - FIX applied!
             )
             if not relevant_chunks:
                 logger.warning("No relevant chunks found; using full context as fallback.")
@@ -191,7 +191,7 @@ class NeuralRetriever:
             prompt = self._create_enhanced_prompt(
                 question,
                 relevant_chunks,
-                formatted_guidance # Use formatted_guidance here - FIX applied!
+                formatted_guidance  # Use formatted_guidance here - FIX applied!
             )
 
             inputs_pt = self.tokenizer(
@@ -205,10 +205,14 @@ class NeuralRetriever:
                 try:
                     outputs = self.model.generate(
                         **inputs_pt,
-                        max_new_tokens=150,
+                        max_new_tokens=250,
                         num_return_sequences=1,
                         no_repeat_ngram_size=3,
-                        pad_token_id=self.tokenizer.eos_token_id
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9,
+                        eos_token_id=self.tokenizer.eos_token_id,
                     )
                 except Exception as model_e:
                     logger.error(f"Error during model generation: {model_e}")
@@ -225,7 +229,7 @@ class NeuralRetriever:
                 skip_special_tokens=True
             )
 
-            result = self._post_process_response(response)
+            result = self._ensure_complete_sentences(response)
             self.stats['processing_times'].append(time.time() - start_time)
             return result
 
@@ -254,7 +258,7 @@ class NeuralRetriever:
                 encoded = self.encoder.encode(text, convert_to_tensor=True)
                 return encoded.to(self.device)
             except Exception as e:
-                logger.warning(f"Encoding attempt {attempt+1}/{max_retries} failed: {str(e)}")
+                logger.warning(f"Encoding attempt {attempt + 1}/{max_retries} failed: {str(e)}")
                 if attempt == max_retries - 1:
                     # Final fallback: try simpler token-based encoding
                     try:
@@ -428,7 +432,6 @@ class NeuralRetriever:
             logger.error(f"Error processing chunks: {str(e)}")
             return [chunks[0]] if chunks else []
 
-
     def _calculate_guidance_boost(self,
                                   chunk: Dict,
                                   guidance: List[Dict]) -> float:
@@ -482,3 +485,16 @@ class NeuralRetriever:
         Create a minimal prompt when normal prompt creation fails.
         """
         return f"Question: {question}\nAnswer: "
+
+    def _ensure_complete_sentences(self, text: str) -> str:
+        """Ensure text ends with complete sentences."""
+        if not text:
+            return text
+
+        # If text doesn't end with sentence-ending punctuation, try to find the last complete sentence
+        if not text.rstrip().endswith(('.', '!', '?')):
+            last_period = max(text.rfind('.'), text.rfind('!'), text.rfind('?'))
+            if last_period > len(text) * 0.7:  # Only truncate if we've got most of the content
+                return text[:last_period + 1]
+
+        return text
