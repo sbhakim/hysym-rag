@@ -26,6 +26,7 @@ from src.utils.progress import tqdm, ProgressManager
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import os
+# os.environ['HYSYM_MEMORY_TRACKING'] = '1'  # Enable memory tracking for debugging
 import json
 import torch
 import warnings
@@ -195,7 +196,10 @@ if __name__ == "__main__":
                     logger.warning(f"Could not track new rules automatically (missing method?): {str(e)}")
             ground_truths[sample["query"]] = sample["answer"]
     else:
-        print("Warning: HotpotQA not found, and no fallback dataset provided.")
+        print("ERROR: HotpotQA dataset not found at", hotpotqa_path)
+        print("Please download the HotpotQA dataset and place it in the data directory.")
+        print("Alternatively, set use_hotpotqa=False to use the default test queries.")
+        # Either exit or use a minimal set of queries
         test_queries = []
         ground_truths = {}
 

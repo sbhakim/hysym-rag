@@ -1,5 +1,7 @@
 # src/reasoners/neural_retriever.py
 
+# src/reasoners/neural_retriever.py
+
 import re
 from transformers import AutoTokenizer, AutoModelForCausalLM, logging as transformers_logging
 from sentence_transformers import SentenceTransformer, util
@@ -11,12 +13,13 @@ from collections import defaultdict
 from src.utils.progress import tqdm, ProgressManager
 from src.utils.device_manager import DeviceManager
 import time
+import hashlib # Import hashlib for generating cache keys
 
 logger = logging.getLogger(__name__)
 
 
 class NeuralRetriever:
-    """Enhanced Neural Retriever with supporting facts awareness for HotpotQA."""
+    """Enhanced Neural Retriever with supporting facts awareness for HotpotQA and guidance caching."""
 
     def __init__(self,
                  model_name: str,
@@ -66,6 +69,9 @@ class NeuralRetriever:
         self.guidance_confidence_key = guidance_confidence_key
 
         self.stats = defaultdict(list)
+        # --- Caching Additions ---
+        self.guidance_cache = {}    # Cache for processed symbolic guidance
+        self.context_chunk_cache = {}  # Cache for context chunking results
 
         print(f"Model {model_name} loaded successfully!")
 
@@ -85,84 +91,42 @@ class NeuralRetriever:
             if not isinstance(context, str) or not isinstance(question, str):
                 raise ValueError("Context and question must be strings")
 
-            # Standardize symbolic guidance format
-            formatted_guidance = []
+            # --- Guidance Caching ---
+            guidance_key = None
             if symbolic_guidance:
-                self.logger.info(f"Processing {len(symbolic_guidance)} symbolic guidance items")
-
-                # Define domains specific to your application
-                domain_keywords = {
-                    "deforestation": ["forest", "tree", "biodiversity", "erosion", "carbon", "soil"],
-                    "climate": ["temperature", "global warming", "carbon dioxide", "climate change", "greenhouse"],
-                    "water": ["water", "rain", "precipitation", "cycle", "drought", "flood"]
-                }
-
-                for rule in symbolic_guidance:
-                    # Handle string rules
-                    if isinstance(rule, str):
-                        rule_text = rule.strip()
-                        if not rule_text:
-                            continue
-
-                        # Heuristic to classify string type
-                        domain_confidence = 0.7  # Default
-                        for domain, keywords in domain_keywords.items():
-                            if any(keyword in rule_text.lower() for keyword in keywords):
-                                domain_confidence = 0.85  # Higher confidence for domain-related rules
-                                break
-
-                        formatted_guidance.append({
-                            "response": rule_text,
-                            "confidence": domain_confidence
-                        })
-
-                    # Handle dictionary rules
-                    elif isinstance(rule, dict):
-                        # Case 1: Already has response key
-                        if "response" in rule and rule["response"]:
-                            formatted_guidance.append({
-                                "response": rule["response"],
-                                "confidence": rule.get("confidence", 0.8)
-                            })
-                        else:
-                            # Case 2: Extract response from other fields
-                            response_text = None
-                            for key in ["statement", "text", "source_text", "content"]:
-                                if key in rule and rule[key]:
-                                    response_text = rule[key]
-                                    break
-
-                            if response_text:
-                                formatted_guidance.append({
-                                    "response": response_text,
-                                    "confidence": rule.get("confidence", 0.8)
-                                })
-                            else:
-                                self.logger.warning(f"Could not extract response from rule: {rule}")
-
-            # Log guidance statistics
-            if formatted_guidance:
-                self.logger.info(f"Successfully formatted {len(formatted_guidance)} guidance rules for retrieval")
-                avg_confidence = sum(rule.get("confidence", 0) for rule in formatted_guidance) / len(formatted_guidance)
-                self.logger.info(f"Average guidance confidence: {avg_confidence:.2f}")
+                guidance_key = hashlib.sha256(str(symbolic_guidance).encode('utf-8')).hexdigest() # Robust hashing
+                if guidance_key in self.guidance_cache:
+                    formatted_guidance = self.guidance_cache[guidance_key]
+                    self.logger.info(f"Using cached guidance for key: {guidance_key}")
+                else:
+                    self.logger.info(f"Processing {len(symbolic_guidance)} symbolic guidance items")
+                    formatted_guidance = self._format_guidance(symbolic_guidance)
+                    self.guidance_cache[guidance_key] = formatted_guidance # Cache the processed guidance
             else:
-                self.logger.info("No valid guidance rules found for retrieval")
+                formatted_guidance = []
 
-            # Validate context before processing
-            if isinstance(context, str) and context.strip():
-                # Minimum length check (e.g., 10 characters)
-                if len(context.strip()) < 10:
-                    logger.warning("Context too short for meaningful processing")
-                    return "No relevant context found."
-                try:
-                    context_chunks = self._chunk_context(context)
-                    if not context_chunks:
+
+            # --- Context Chunking with Caching ---
+            context_key = hashlib.sha256(context.encode('utf-8')).hexdigest()  # Use a hash for the context key
+            if context_key in self.context_chunk_cache:
+                context_chunks = self.context_chunk_cache[context_key]
+                logger.info(f"Using cached context chunks for key: {context_key}")
+            else:
+                # Validate context before processing (existing logic)
+                if isinstance(context, str) and context.strip():
+                    if len(context.strip()) < 10: # Minimum length
+                        logger.warning("Context too short for meaningful processing")
                         return "No relevant context found."
-                except Exception as e:
-                    logger.error(f"Error chunking context: {str(e)}")
-                    return "Error processing context."
-            else:
-                return "Invalid context provided."
+                    try:
+                        context_chunks = self._chunk_context(context)
+                        if not context_chunks:
+                            return "No relevant context found."
+                        self.context_chunk_cache[context_key] = context_chunks  # Cache the chunks
+                    except Exception as e:
+                        logger.error(f"Error chunking context: {str(e)}")
+                        return "Error processing context."
+                else:
+                    return "Invalid context provided."
 
             if supporting_facts:
                 context_chunks = self._prioritize_supporting_facts(
@@ -175,7 +139,7 @@ class NeuralRetriever:
             relevant_chunks = self._get_relevant_chunks(
                 question_embedding,
                 context_chunks,
-                formatted_guidance  # Use formatted_guidance for consistency
+                formatted_guidance
             )
             if not relevant_chunks:
                 logger.warning("No relevant chunks found; using full context as fallback.")
@@ -187,11 +151,10 @@ class NeuralRetriever:
                     'end_idx': len(context.split('.')) - 1
                 }]
 
-            # Use the enhanced prompt creation method
             prompt = self._create_enhanced_prompt(
                 question,
                 relevant_chunks,
-                formatted_guidance  # Use formatted_guidance for consistency
+                formatted_guidance
             )
 
             inputs_pt = self.tokenizer(
@@ -241,6 +204,54 @@ class NeuralRetriever:
             logger.error(f"Error in retrieve_answer: {str(e)}")
             self.stats['errors'].append(str(e))
             return "Error retrieving answer."
+
+
+    def _format_guidance(self, symbolic_guidance: List[Dict]) -> List[Dict]:
+        """Formats and validates symbolic guidance, extracting confidence."""
+        formatted_guidance = []
+        domain_keywords = {  # Example domain keywords
+            "deforestation": ["forest", "tree", "biodiversity", "erosion", "carbon", "soil"],
+            "climate": ["temperature", "global warming", "carbon dioxide", "climate change", "greenhouse"],
+            "water": ["water", "rain", "precipitation", "cycle", "drought", "flood"]
+        }
+
+        for rule in symbolic_guidance:
+            if isinstance(rule, str):
+                rule_text = rule.strip()
+                if not rule_text:
+                    continue
+
+                # Basic domain-specific confidence boost (heuristic)
+                domain_confidence = 0.7  # Default
+                for domain, keywords in domain_keywords.items():
+                    if any(keyword in rule_text.lower() for keyword in keywords):
+                        domain_confidence = 0.85  # Higher confidence
+                        break
+
+                formatted_guidance.append({"response": rule_text, "confidence": domain_confidence})
+
+            elif isinstance(rule, dict):
+                # Use 'response' if available, otherwise try other keys
+                rule_text = rule.get("response")
+                if not rule_text:
+                    for key in ["statement", "text", "source_text", "content"]:
+                        if key in rule and rule[key]:
+                            rule_text = rule[key]
+                            break
+
+                if rule_text:
+                    formatted_guidance.append({
+                        "response": rule_text,
+                        "confidence": rule.get("confidence", 0.7)  # Default confidence
+                    })
+                else:
+                    logger.warning(f"Could not extract response from rule: {rule}")
+        if formatted_guidance:
+            self.logger.info(f"Successfully formatted {len(formatted_guidance)} guidance rules for retrieval")
+            avg_confidence = sum(rule.get("confidence", 0) for rule in formatted_guidance) / len(formatted_guidance)
+            self.logger.info(f"Average guidance confidence: {avg_confidence:.2f}")
+        return formatted_guidance
+
 
     def _encode_safely(self, text: str) -> Optional[torch.Tensor]:
         """

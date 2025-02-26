@@ -292,7 +292,7 @@ def _create_modified_system_manager(config, rules_path, device, neural, expander
 
     # Apply Dummy Reasoners for ablation
     if config.get('disable_neural', False):
-        modified_system_manager.hybrid_integrator.neural = DummyNeuralRetriever()
+        modified_system_manager.hybrid_integrator.neural_retriever = DummyNeuralRetriever()  # Fixed property name
     if config.get('disable_symbolic', False):
         modified_system_manager.hybrid_integrator.symbolic_reasoner = DummySymbolicReasoner()
 
