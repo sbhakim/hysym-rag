@@ -275,90 +275,128 @@ class HybridIntegrator:
     def _fuse_symbolic_neural(self, query: str, symbolic_result: Union[List[str], str], neural_answer: str,
                               query_complexity: float = 0.5) -> Tuple[str, float, Dict]:
         try:
-            # Extract top symbolic results with their confidence scores
+            # Format symbolic results consistently
+            symbolic_text = ""
+            confidence_scores = []
+
+            # Handle different symbolic result formats
             if isinstance(symbolic_result, dict) and "response" in symbolic_result:
-                symbolic_text = "\n".join(symbolic_result["response"][:3])  # Take top 3 responses
-                confidences = symbolic_result.get("similarities", [0.7] * len(symbolic_result["response"][:3]))
+                symbolic_responses = symbolic_result["response"][:3] if isinstance(symbolic_result["response"],
+                                                                                   list) else [
+                    symbolic_result["response"]]
+                confidence_scores = symbolic_result.get("similarities", [0.7] * len(symbolic_responses))
+                symbolic_text = "\n".join(symbolic_responses)
+            elif isinstance(symbolic_result, list):
+                symbolic_responses = symbolic_result[:3]  # Limit to top 3 responses
+                confidence_scores = [0.7] * len(symbolic_responses)  # Default confidence
+                symbolic_text = "\n".join(symbolic_responses)
             else:
-                symbolic_text = " ".join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result
-                confidences = [0.6]  # Default confidence
+                symbolic_text = str(symbolic_result)
+                confidence_scores = [0.7]  # Default confidence
 
-            # Generate enhanced neural prompt with symbolic guidance
-            if len(symbolic_text) > 10:  # Only if there's meaningful symbolic content
-                enhanced_neural_prompt = (
-                    f"Question: {query}\n\nRelevant facts from knowledge base:\n{symbolic_text}\n\n"
-                    f"Based on these facts and your knowledge, answer the question in detail: {query}"
-                )
-                # Re-query with enhanced prompt if neural_answer doesn't directly address the question
-                if not self._answer_addresses_query(neural_answer, query):
-                    try:
-                        new_answer = self.neural.retrieve_answer(symbolic_text, enhanced_neural_prompt)
-                        if len(new_answer) > len(neural_answer) * 0.7:  # Only use if substantial
-                            neural_answer = new_answer
-                    except Exception as e:
-                        self.logger.warning(f"Error in enhanced prompting: {e}")
+            # FIXED: Check if neural_answer is valid
+            if not neural_answer or (
+                    isinstance(neural_answer, str) and neural_answer.strip() == ""):  # Corrected condition
+                self.logger.warning("Empty neural answer received, generating fallback response")
+                neural_answer = "No additional information available from neural processing."
 
-            # Get embeddings for symbolic and neural results
-            symbolic_emb_raw = self._get_symbolic_embedding(symbolic_result)
-            neural_emb_raw = self._get_neural_embedding(neural_answer)
+            # Ensure neural answer is a string
+            if not isinstance(neural_answer, str):
+                neural_answer = str(neural_answer)
 
-            self.logger.debug(f"Symbolic emb shape (before alignment): {symbolic_emb_raw.shape}")
-            self.logger.debug(f"Neural emb shape (before alignment): {neural_emb_raw.shape}")
-
-            symbolic_emb = self.dim_manager.align_embeddings(symbolic_emb_raw, "symbolic")
-            neural_emb = self.dim_manager.align_embeddings(neural_emb_raw, "neural")
-
-            self.logger.debug(f"Symbolic emb shape (after alignment): {symbolic_emb.shape}")
-            self.logger.debug(f"Neural emb shape (after alignment): {neural_emb.shape}")
-
-            symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
-
-            # Process through alignment layer with robust error handling
+            # Get embeddings with robust error handling
             try:
-                aligned_emb, base_confidence, debug_info = self.alignment_layer(
+                symbolic_emb_raw = self._get_symbolic_embedding(symbolic_text)
+                neural_emb_raw = self._get_neural_embedding(neural_answer)
+            except Exception as embedding_error:
+                self.logger.error(f"Error generating embeddings: {embedding_error}")
+                # FALLBACK: Construct a basic fusion without embedding alignment
+                fallback_response = self._create_fallback_fusion(query, symbolic_text, neural_answer)
+                return fallback_response, 0.5, {"error": str(embedding_error), "fallback": "basic_fusion"}
+
+            # Process through alignment
+            try:
+                # Align dimensions safely
+                symbolic_emb = self.dim_manager.align_embeddings(symbolic_emb_raw, "symbolic")
+                neural_emb = self.dim_manager.align_embeddings(neural_emb_raw, "neural")
+
+                # Move to device
+                symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
+
+                # Process through alignment layer
+                aligned_emb, confidence, debug_info = self.alignment_layer(
                     symbolic_emb,
                     neural_emb,
                     rule_confidence=query_complexity
                 )
-            except Exception as e:
-                self.logger.warning(f"Alignment layer error: {str(e)}. Using fallback values.")
-                aligned_emb = neural_emb
-                base_confidence = 0.4
-                debug_info = {"error": str(e), "fallback": True}
 
-            # Apply more realistic confidence calculation
-            if base_confidence <= 0.0:
-                base_confidence = 0.4
+                # Generate the fused response with proper formatting
+                fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, confidence)
 
-            # Adjust confidence to be more realistic
-            avg_symbolic_confidence = sum(confidences) / len(confidences) if confidences else 0.5
+                # Update metrics
+                self._update_fusion_metrics(confidence, query_complexity, debug_info)
 
-            # More conservative confidence scoring
-            query_relevance = self._estimate_answer_relevance(query, neural_answer)
-            confidence = min(0.85, base_confidence * avg_symbolic_confidence * query_relevance)
+                return fused_response, confidence, debug_info
 
-            # Generate the final response
-            fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, aligned_emb,
-                                                              confidence)
-            self._update_fusion_metrics(confidence, query_complexity, debug_info)
-            return fused_response, confidence, debug_info
+            except Exception as alignment_error:
+                self.logger.error(f"Alignment error: {alignment_error}")
+                # FALLBACK: We'll at least show both answers with a proper explanation
+                fallback_response = self._create_fallback_fusion(query, symbolic_text, neural_answer)
+                return fallback_response, 0.5, {"error": str(alignment_error), "fallback": "basic_fusion"}
 
         except Exception as e:
             error_message = str(e)
             self.logger.warning(f"Fusion failed: {error_message}, falling back to neural response")
             return neural_answer, 0.5, {"fallback": True, "error": error_message}
 
+    def _create_fallback_fusion(self, query: str, symbolic_text: str, neural_answer: str) -> str:
+        """Create a simple fusion when advanced alignment fails"""
+        # Simple fallback that doesn't rely on complex embedding or alignment
+        if len(symbolic_text.strip()) > 10:
+            response = f"Based on available information:\n\n"
+            response += f"Background knowledge:\n{symbolic_text}\n\n"
+            response += f"Analysis:\n{neural_answer}"
+        else:
+            response = neural_answer
+
+        return response
+
     def _generate_reasoned_response(self, query: str, symbolic_result: Union[List[str], str], neural_answer: str,
-                                    aligned_emb: torch.Tensor, confidence: float) -> str:
-        symbolic_steps = symbolic_result if isinstance(symbolic_result, list) else [symbolic_result]
+                                    confidence: float) -> str:
+        # Handle various symbolic result formats
+        if isinstance(symbolic_result, list):
+            symbolic_steps = symbolic_result
+        elif isinstance(symbolic_result, dict):
+            # Extract responses from dictionary
+            if "response" in symbolic_result:
+                responses = symbolic_result["response"]
+                if isinstance(responses, list):
+                    symbolic_steps = responses
+                else:
+                    symbolic_steps = [responses]
+            else:
+                # If no response field, convert dict to string
+                symbolic_steps = [str(symbolic_result)]
+        else:
+            symbolic_steps = [str(symbolic_result)]
+
+        # Create reasoning chain
         reasoning_chain = []
         for step in symbolic_steps:
-            if step and step.strip():
-                reasoning_chain.append({"type": "symbolic", "content": step, "confidence": confidence})
-        if neural_answer and neural_answer.strip():
+            # Convert to string and check if non-empty
+            step_str = str(step)
+            if step_str and step_str.strip():
+                reasoning_chain.append({"type": "symbolic", "content": step_str, "confidence": confidence})
+
+        # Add neural answer if available
+        if neural_answer and isinstance(neural_answer, str) and neural_answer.strip():
             reasoning_chain.append({"type": "neural", "content": neural_answer, "confidence": confidence})
+
+        # Store the reasoning chain
         chain_id = hash(query)
         self.reasoning_chains[chain_id] = reasoning_chain
+
+        # Format the response based on confidence
         if confidence >= self.fusion_threshold:
             response = "Based on integrated reasoning:\n\n"
             for idx, step in enumerate(reasoning_chain, 1):
@@ -366,6 +404,7 @@ class HybridIntegrator:
             response += f"\nFinal Answer (confidence: {confidence:.2f}): {neural_answer}"
         else:
             response = f"Based on available information (confidence: {confidence:.2f}):\n{neural_answer}"
+
         return response
 
     def _update_fusion_metrics(self, confidence: float, query_complexity: float, debug_info: Dict):
@@ -450,5 +489,3 @@ class HybridIntegrator:
 
     def _set_cache(self, key: str, result: Tuple[str, str]):
         self.cache[key] = (result, time.time())
-
-
