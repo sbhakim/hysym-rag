@@ -13,6 +13,8 @@ from src.knowledge_integrator import AlignmentLayer
 from src.reasoners.rg_retriever import RuleGuidedRetriever
 from src.utils.device_manager import DeviceManager
 from src.utils.dimension_manager import DimensionalityManager
+from src.reasoners.dummy_reasoners import DummySymbolicReasoner # Import DummySymbolicReasoner
+
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +308,10 @@ class HybridIntegrator:
 
             # Get embeddings with robust error handling
             try:
-                symbolic_emb_raw = self._get_symbolic_embedding(symbolic_text)
+                symbolic_emb_raw = None  # Initialize to None
+                # CHECK: Only get symbolic embedding if not using DummySymbolicReasoner
+                if not isinstance(self.symbolic_reasoner, DummySymbolicReasoner):  # Conditional check here
+                    symbolic_emb_raw = self._get_symbolic_embedding(symbolic_text)
                 neural_emb_raw = self._get_neural_embedding(neural_answer)
             except Exception as embedding_error:
                 self.logger.error(f"Error generating embeddings: {embedding_error}")
@@ -316,19 +321,34 @@ class HybridIntegrator:
 
             # Process through alignment
             try:
-                # Align dimensions safely
-                symbolic_emb = self.dim_manager.align_embeddings(symbolic_emb_raw, "symbolic")
+                symbolic_emb = None # Initialize to None
+                if symbolic_emb_raw is not None: # Only align if we have a symbolic embedding
+                    # Align dimensions safely
+                    symbolic_emb = self.dim_manager.align_embeddings(symbolic_emb_raw, "symbolic")
+
+
+                neural_emb_raw = self._get_neural_embedding(neural_answer) # Neural emb is still needed
                 neural_emb = self.dim_manager.align_embeddings(neural_emb_raw, "neural")
 
                 # Move to device
-                symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
+                neural_emb = DeviceManager.ensure_same_device(neural_emb, neural_emb, self.device)[0] # Only neural_emb needs device moved
 
-                # Process through alignment layer
-                aligned_emb, confidence, debug_info = self.alignment_layer(
-                    symbolic_emb,
-                    neural_emb,
-                    rule_confidence=query_complexity
-                )
+
+                aligned_emb = neural_emb # Default to neural_emb if no symbolic emb for alignment
+                confidence = 0.9 # Default high confidence if only neural
+                debug_info = {}
+
+                if symbolic_emb is not None: # Proceed with alignment layer only if symbolic_emb exists
+                    # Move to device (both if using alignment)
+                    symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
+
+                    # Process through alignment layer
+                    aligned_emb, confidence, debug_info = self.alignment_layer(
+                        symbolic_emb,
+                        neural_emb,
+                        rule_confidence=query_complexity
+                    )
+
 
                 # Generate the fused response with proper formatting
                 fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, confidence)

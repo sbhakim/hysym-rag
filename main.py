@@ -39,7 +39,7 @@ urllib3.disable_warnings()
 
 # Set up basic logging for all components
 logging.basicConfig(
-    level=logging.DEBUG,  # Set log level to DEBUG to capture dimension alignment logs
+    level=logging.INFO,  # Set log level to DEBUG to capture dimension alignment logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -95,6 +95,10 @@ if __name__ == "__main__":
     logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     logging.getLogger('DimensionalityManager').setLevel(logging.DEBUG)
+    logging.getLogger('src.utils.dimension_manager').setLevel(logging.WARNING)  # Reduce dimension manager logs
+    logging.getLogger('src.knowledge_integrator').setLevel(logging.INFO)  # Reduce knowledge integrator logs
+    logging.getLogger('src.reasoners.networkx_symbolic_reasoner').setLevel(
+        logging.INFO)  # Reduce symbolic reasoner logs
     logger.setLevel(logging.DEBUG)
 
     # Disable HTTP connection pool warnings
