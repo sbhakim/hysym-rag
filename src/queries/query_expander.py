@@ -1,202 +1,338 @@
 # src/queries/query_expander.py
+
 import yaml
+import re
 from transformers import AutoTokenizer, AutoModel
 import torch
 import spacy
 import os
 from sentence_transformers import SentenceTransformer, util
 from collections import defaultdict
-
+from typing import Dict, List, Optional, Tuple, Set, Any
+import logging
 
 class QueryExpander:
-    def __init__(self, complexity_config=None, expansion_rules=None, embedder=None):
-        # Original expansion rules (if not provided, use default)
+    """
+    Enhanced query expander with specific support for multi-hop reasoning queries
+    and HotpotQA-style questions.
+    """
+
+    def __init__(self,
+                 complexity_config: Optional[str] = None,
+                 expansion_rules: Optional[Dict] = None,
+                 embedder: Optional[SentenceTransformer] = None,
+                 hop_threshold: float = 0.6):
+        """
+        Initialize with enhanced multi-hop support.
+        """
+        # Initialize base expansion rules
         self.expansion_rules = expansion_rules or {
-            "deforestation": ["forest loss", "tree cutting", "logging"],
-            "climate change": ["global warming", "greenhouse gases"],
-            "biodiversity": ["species diversity", "ecosystem diversity"]
+            "comparison": ["compare", "difference between", "versus", "similar to"],
+            "bridge": ["related to", "connected with", "involved in"],
+            "temporal": ["when", "before", "after", "during"],
+            "causal": ["cause", "effect", "result in", "lead to"],
+            "composite": ["and", "both", "together with"]
         }
-        # Use a medium-size spaCy model for structural analysis
+
+        # Initialize NLP components
         self.nlp = spacy.load("en_core_web_md")
-        # Initialize tokenizer and model for computing query complexity
         self.tokenizer = AutoTokenizer.from_pretrained("prajjwal1/bert-tiny")
         self.model = AutoModel.from_pretrained("prajjwal1/bert-tiny", output_attentions=True)
-        # Load additional configuration if provided
+
+        # Initialize embedding model
+        self.embedder = embedder or SentenceTransformer('all-MiniLM-L6-v2')
+
+        # Set configuration parameters
+        self.hop_threshold = hop_threshold
         self.config = {}
         if complexity_config and os.path.exists(complexity_config):
             with open(complexity_config, "r") as f:
                 self.config = yaml.safe_load(f)
-        # Set a similarity threshold for expansion
-        self.sim_threshold = 0.6
-        # Initialize embedder for rule guidance (use SentenceTransformer)
-        self.embedder = embedder or SentenceTransformer('all-MiniLM-L6-v2')
-        # Initialize cache and rule performance tracking for dynamic rule selection
-        self.rule_cache = {}  # Caches relevant rules for each query
-        self.rule_performance = defaultdict(list)  # Tracks historical performance for each rule
-        self.rule_embeddings = None
-        self._initialize_rule_embeddings()
 
-    def _initialize_rule_embeddings(self):
-        """Pre-compute embeddings for all rules to improve efficiency."""
-        if not self.expansion_rules:
-            return
-        rule_texts = []
-        # Use both rule keys and their synonyms for computing embeddings
-        for rule_key, synonyms in self.expansion_rules.items():
-            rule_texts.append(rule_key)
-            rule_texts.extend(synonyms)
-        self.rule_embeddings = self.embedder.encode(
-            rule_texts,
-            convert_to_tensor=True,
-            show_progress_bar=False
-        )
+        # Set up pattern recognition
+        self.multi_hop_patterns = {
+            'bridge': [
+                r".*(?:what|who|where).*(?:of|by|from).*(?:who|that|which).*",
+                r".*(?:involved in|related to|connected with).*"
+            ],
+            'comparison': [
+                r".*(?:compare|difference between|versus|or).*(?:and).*",
+                r".*(?:which|who).*(?:more|less|better|worse).*"
+            ],
+            'temporal': [
+                r".*(?:before|after|when|during).*(?:what|who|where).*",
+                r".*(?:first|last|previous|next).*(?:to|in|at).*"
+            ]
+        }
 
-    def _get_rule_guidance(self, query):
+        # Initialize caching
+        self.pattern_cache = {}
+        self.embedding_cache = {}
+
+        # Set up logging
+        self.logger = logging.getLogger("QueryExpander")
+        self.logger.setLevel(logging.INFO)
+
+    def expand_query(self, query: str) -> str:
         """
-        Get relevant rules for query expansion using a basic similarity approach.
-        (This method is kept for backward compatibility.)
+        Expand query with enhanced multi-hop awareness.
         """
-        cache_key = hash(query)
-        if cache_key in self.rule_cache:
-            return self.rule_cache[cache_key]
-        query_embedding = self.embedder.encode(query, convert_to_tensor=True, show_progress_bar=False)
-        similarities = util.cos_sim(query_embedding.unsqueeze(0), self.rule_embeddings).squeeze()
-        relevant_indices = (similarities >= self.sim_threshold).nonzero(as_tuple=False).squeeze()
-        if relevant_indices.dim() == 0:
-            if similarities.item() >= self.sim_threshold:
-                relevant_indices = [int(relevant_indices.item())]
-            else:
-                relevant_indices = []
+        # Get query complexity
+        complexity = self.get_query_complexity(query)
+        self.logger.info(f"Query complexity score: {complexity:.4f}")
+
+        if complexity > 1.0:
+            self.logger.info("Skipping expansion due to high complexity.")
+            return query
+
+        # Determine query type
+        query_type = self._determine_query_type(query)
+
+        # Perform type-specific expansion
+        if query_type == 'bridge':
+            return self._expand_bridge_query(query)
+        elif query_type == 'comparison':
+            return self._expand_comparison_query(query)
         else:
-            relevant_indices = relevant_indices.tolist()
-        rule_keys = list(self.expansion_rules.keys())
-        relevant_rules = [rule_keys[i] for i in relevant_indices if i < len(rule_keys)]
-        self.rule_cache[cache_key] = relevant_rules
-        return relevant_rules
+            return self._expand_standard_query(query)
 
-    def _get_relevant_rules(self, query, top_k=3):
+    def get_query_complexity(self, query: str) -> float:
         """
-        Get most relevant rules for a query using semantic similarity and historical performance.
+        Calculate query complexity with multi-hop consideration.
         """
-        cache_key = hash(query)
-        if cache_key in self.rule_cache:
-            return self.rule_cache[cache_key]
-
-        # Encode query
-        query_emb = self.embedder.encode(query, convert_to_tensor=True)
-
-        scored_rules = []
-        # Interpret each rule as a dict with an id and keywords
-        for rule_key in self.expansion_rules.keys():
-            rule = {"id": rule_key, "keywords": [rule_key] + self.expansion_rules[rule_key]}
-            rule_text = " ".join(rule.get("keywords", []))
-            rule_emb = self.embedder.encode(rule_text, convert_to_tensor=True)
-            sim_score = util.cos_sim(query_emb, rule_emb).item()
-
-            # Get historical performance
-            rule_id = rule.get("id", str(rule))
-            perf_score = self._get_rule_performance(rule_id)
-
-            # Combine scores (70% semantic similarity, 30% performance)
-            final_score = 0.7 * sim_score + 0.3 * perf_score
-            scored_rules.append((final_score, rule))
-
-        # Select top_k rules
-        top_rules = sorted(scored_rules, key=lambda x: x[0], reverse=True)[:top_k]
-        self.rule_cache[cache_key] = [rule for _, rule in top_rules]
-        return self.rule_cache[cache_key]
-
-    def _get_rule_performance(self, rule_id):
-        """Calculate rule performance score based on history."""
-        if not self.rule_performance[rule_id]:
-            return 0.5  # Default score
-        recent_performance = self.rule_performance[rule_id][-10:]
-        return sum(recent_performance) / len(recent_performance)
-
-    def update_rule_performance(self, rule_id, success_score):
-        """Update rule performance history."""
-        self.rule_performance[rule_id].append(success_score)
-        if len(self.rule_performance[rule_id]) > 100:  # Keep last 100 entries
-            self.rule_performance[rule_id].pop(0)
-
-    def get_query_complexity(self, query):
+        # Get basic attention-based complexity
         inputs = self.tokenizer(query, return_tensors="pt")
         with torch.no_grad():
             outputs = self.model(**inputs)
         attn = outputs.attentions[-1].mean().item()
-        complexity = attn * len(query.split())
-        return complexity
 
-    def _analyze_structural_patterns(self, doc):
-        if not self.config.get("structural_patterns"):
-            return 0.0
-        score = 0.0
-        text = [t.text for t in doc]
-        multi_part = self.config["structural_patterns"].get("multi_part", [])
-        for item in multi_part:
-            pattern = item["pattern"]
-            weight = item["weight"]
-            if pattern in text:
-                score += weight
-        dependency = self.config["structural_patterns"].get("dependency", [])
-        for item in dependency:
-            pattern = item["pattern"]
-            weight = item["weight"]
-            if pattern in " ".join(text):
-                score += weight
-        return score
+        # Base complexity score
+        base_complexity = attn * len(query.split())
 
-    def _semantic_expansion(self, query):
+        # Adjust for multi-hop characteristics
+        hop_adjustment = self._calculate_hop_complexity(query)
+
+        return base_complexity * (1 + hop_adjustment)
+
+    def _determine_query_type(self, query: str) -> str:
         """
-        Perform semantic query expansion using spaCy vectors.
-        For each term in our expansion rules that appears in the query,
-        find similar words (from the provided candidate list) that exceed a similarity threshold.
+        Determine query type with pattern matching.
+        """
+        # Check cache
+        cache_key = hash(query)
+        if cache_key in self.pattern_cache:
+            return self.pattern_cache[cache_key]
+
+        # Check patterns
+        for q_type, patterns in self.multi_hop_patterns.items():
+            for pattern in patterns:
+                if re.match(pattern, query.lower()):
+                    self.pattern_cache[cache_key] = q_type
+                    return q_type
+
+        return 'standard'
+
+    def _expand_bridge_query(self, query: str) -> str:
+        """
+        Expand bridge-type multi-hop query.
+        """
+        # Extract potential bridge entities
+        doc = self.nlp(query)
+        entities = [ent.text for ent in doc.ents]
+
+        # Get related terms for bridge entities
+        expanded_terms = []
+        for entity in entities:
+            related_terms = self._get_related_terms(entity)
+            if related_terms:
+                expanded_terms.append(f"({entity} OR {' OR '.join(related_terms)})")
+
+        # Combine original query with expansions
+        expanded = query
+        if expanded_terms:
+            expanded += " AND " + " AND ".join(expanded_terms)
+
+        return expanded
+
+    def _expand_comparison_query(self, query: str) -> str:
+        """
+        Expand comparison-type multi-hop query.
+        """
+        doc = self.nlp(query)
+
+        # Extract comparison entities
+        comparison_pairs = self._extract_comparison_pairs(doc)
+
+        # Expand each entity in the comparison
+        expanded_parts = []
+        for entity1, entity2 in comparison_pairs:
+            exp1 = self._get_related_terms(entity1)
+            exp2 = self._get_related_terms(entity2)
+
+            if exp1 and exp2:
+                expanded_parts.append(
+                    f"({entity1} OR {' OR '.join(exp1)}) compared to ({entity2} OR {' OR '.join(exp2)})"
+                )
+
+        return query + " " + " AND ".join(expanded_parts) if expanded_parts else query
+
+    def _expand_standard_query(self, query: str) -> str:
+        """
+        Expand standard query with semantic similarity.
         """
         doc = self.nlp(query)
         expanded_terms = []
-        for term, candidates in self.expansion_rules.items():
-            term_doc = self.nlp(term)
-            if term.lower() in query.lower():
-                similar = []
-                for cand in candidates:
-                    cand_doc = self.nlp(cand)
-                    sim = term_doc.similarity(cand_doc)
-                    if sim >= self.sim_threshold:
-                        similar.append(cand)
-                if similar:
-                    expanded_terms.append(f"({term} OR {' OR '.join(similar)})")
-        return " ".join(expanded_terms)
 
-    def expand_query(self, query):
-        complexity = self.get_query_complexity(query)
-        print(f"Query complexity score: {complexity}")
-        if complexity > 1.0:
-            print("Skipping expansion due to high complexity.")
-            return query
-        # Perform semantic expansion and basic string-based expansion
-        semantic_expansion = self._semantic_expansion(query)
-        basic_expansion = query
-        for term, synonyms in self.expansion_rules.items():
-            if term.lower() in query.lower():
-                expansion_group = f"({term} OR {' OR '.join(synonyms)})"
-                basic_expansion = basic_expansion.replace(term, expansion_group)
-        # Get rule-guided expansion using dynamic rule selection
-        rule_guidance = self._get_relevant_rules(query)
-        if rule_guidance:
-            expanded_terms = set(basic_expansion.split())
-            # Add rule IDs from the dynamic selection (or you might want to add rule responses)
-            expanded_terms.update([rule.get("id", rule) for rule in rule_guidance])
-            combined_expansion = " ".join(expanded_terms)
-        else:
-            combined_expansion = basic_expansion
-        if semantic_expansion:
-            combined_expansion = combined_expansion + " " + semantic_expansion
-        return combined_expansion.strip()
+        for token in doc:
+            if token.pos_ in ['NOUN', 'VERB'] and not token.is_stop:
+                similar_terms = self._get_similar_terms(token.text)
+                if similar_terms:
+                    expanded_terms.append(f"({token.text} OR {' OR '.join(similar_terms)})")
 
+        return query + " " + " ".join(expanded_terms) if expanded_terms else query
 
-# For testing purposes:
-if __name__ == "__main__":
-    expander = QueryExpander(complexity_config="src/config/complexity_rules.yaml")
-    test_query = "What are the environmental effects of deforestation?"
-    print("Original Query:", test_query)
-    print("Expanded Query:", expander.expand_query(test_query))
+    def _calculate_hop_complexity(self, query: str) -> float:
+        """
+        Calculate complexity adjustment for multi-hop characteristics.
+        """
+        doc = self.nlp(query)
+
+        # Count potential hops
+        hop_indicators = sum(1 for token in doc if token.text.lower()
+                             in ['and', 'or', 'then', 'after', 'before'])
+
+        # Count named entities
+        entity_count = len([ent for ent in doc.ents])
+
+        # Calculate adjustment
+        return min(0.5, (hop_indicators * 0.1 + entity_count * 0.05))
+
+    def _get_related_terms(self, term: str) -> List[str]:
+        """
+        Get semantically related terms using embeddings.
+        """
+        cache_key = hash(term)
+        if cache_key in self.embedding_cache:
+            return self.embedding_cache[cache_key]
+
+        try:
+            # Get term embedding
+            term_emb = self.embedder.encode(term, convert_to_tensor=True)
+
+            # Get related terms from expansion rules
+            related = []
+            for category, terms in self.expansion_rules.items():
+                terms_emb = self.embedder.encode(terms, convert_to_tensor=True)
+                similarities = util.cos_sim(term_emb, terms_emb)
+
+                # Add highly similar terms
+                for idx, sim in enumerate(similarities[0]):
+                    if sim > self.hop_threshold:
+                        related.append(terms[idx])
+            self.embedding_cache[cache_key] = related
+            return related
+
+        except Exception as e:
+            self.logger.error(f"Error getting related terms for {term}: {str(e)}")
+            return []
+
+    def _extract_comparison_pairs(self, doc) -> List[Tuple[str, str]]:
+        """
+        Extract entity pairs for comparison queries.
+        """
+        pairs = []
+        entities = list(doc.ents)
+
+        for i in range(len(entities) - 1):
+            for j in range(i + 1, len(entities)):
+                # Check if entities are being compared
+                between_tokens = doc[entities[i].end:entities[j].start]
+                if any(token.text.lower() in ['versus', 'vs', 'or', 'and']
+                       for token in between_tokens):
+                    pairs.append((entities[i].text, entities[j].text))
+
+        return pairs
+
+    # --- New Methods for Automatic Query Decomposition ---
+
+    def decompose_query(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Decompose complex queries into atomic reasoning steps.
+        """
+        doc = self.nlp(query)
+        reasoning_markers = {
+            'compare': 'comparison',
+            'cause': 'causality',
+            'before': 'temporal',
+            'after': 'temporal',
+            'because': 'causality'
+        }
+        steps = []
+        current_step = {'text': '', 'type': 'standard', 'entities': []}
+        for sent in doc.sents:
+            marker_type = None
+            for token in sent:
+                if token.text.lower() in reasoning_markers:
+                    marker_type = reasoning_markers[token.text.lower()]
+                    break
+            if marker_type:
+                if current_step['text']:
+                    steps.append(current_step)
+                current_step = {
+                    'text': sent.text.strip(),
+                    'type': marker_type,
+                    'entities': [ent.text for ent in sent.ents]
+                }
+            else:
+                if current_step['text']:
+                    current_step['text'] += " " + sent.text.strip()
+                else:
+                    current_step['text'] = sent.text.strip()
+                current_step['entities'].extend([ent.text for ent in sent.ents])
+        if current_step['text']:
+            steps.append(current_step)
+        return self._enrich_steps(steps)
+
+    def _enrich_steps(self, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enrich reasoning steps with additional metadata.
+        """
+        enriched_steps = []
+        for idx, step in enumerate(steps):
+            enriched = {
+                'step_id': idx,
+                'question': step['text'],
+                'type': step['type'],
+                'entities': list(set(step.get('entities', []))),
+                'complexity': self._calculate_step_complexity(step)
+            }
+            enriched_steps.append(enriched)
+        return enriched_steps
+
+    def _calculate_step_complexity(self, step: Dict[str, Any]) -> float:
+        """
+        Calculate complexity for a reasoning step based on text length and entity count.
+        """
+        text_length = len(step['text'].split())
+        entity_count = len(step.get('entities', []))
+        return min(0.5, (entity_count * 0.1 + text_length / 100.0))
+
+    def _get_similar_terms(self, term: str) -> List[str]:
+        """
+        Get similar terms to the given term using embedding similarity.
+        """
+        try:
+            term_emb = self.embedder.encode(term, convert_to_tensor=True)
+            corpus = [term] + [w for w in term.split()]
+            corpus_emb = self.embedder.encode(corpus, convert_to_tensor=True)
+            similarities = util.cos_sim(term_emb, corpus_emb)[0]
+            similar_terms = []
+            for idx, sim in enumerate(similarities):
+                if idx == 0:
+                    continue
+                if sim > self.hop_threshold:
+                    similar_terms.append(corpus[idx])
+            return similar_terms
+        except Exception as e:
+            self.logger.error(f"Error in getting similar terms for {term}: {str(e)}")
+            return []

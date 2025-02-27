@@ -1,12 +1,56 @@
-# config.yaml
+# src/config/config.yaml
+
+# Basic System Configuration
 model_name: "meta-llama/Llama-3.2-3B"
 data_dir: "data/"
 rules_file: "rules.json"
 knowledge_base: "small_knowledge_base.txt"
 
-
+# Dimension Management and Embedding Configuration
 embeddings:
-  symbolic_dim: 300
-  neural_dim: 384
+  symbolic_dim: 384
+  neural_dim: 768
   target_dim: 768
   model_name: "all-MiniLM-L6-v2"
+
+# Alignment Configuration
+alignment:
+  target_dim: 768
+  num_heads: 4
+  dropout: 0.1
+  sym_dim: 384
+  neural_dim: 768
+
+# Basic resource thresholds (can be overridden by resource_config.yaml)
+resource_thresholds:
+  cpu:
+    base_threshold: 0.85
+    adjustment_factor: 0.08
+  memory:
+    base_threshold: 0.85
+    adjustment_factor: 0.08
+  gpu:
+    base_threshold: 0.95
+    adjustment_factor: 0.05
+
+
+# Chunking Configuration
+chunking:
+  chunk_size: 512
+  chunk_overlap: 128
+  min_chunk_size: 64
+  fallback_enabled: true
+
+# Error Recovery Configuration
+error_recovery:
+  max_retries: 3
+  backoff_factor: 1.5
+  fallback_enabled: true
+  cache_ttl: 3600
+
+# Metrics Configuration
+metrics:
+  detailed_logging: true
+  save_frequency: 100
+  history_window: 1000
+  performance_tracking: true

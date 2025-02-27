@@ -1,222 +1,372 @@
 # src/integrators/hybrid_integrator.py
-import time
+
 import logging
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
+import numpy as np
 import torch
-from typing import Tuple, List, Dict, Optional
-from datetime import datetime, timedelta
-from sentence_transformers import util
+from collections import defaultdict
+import math
+from datetime import datetime
 
 from src.knowledge_integrator import AlignmentLayer
-from src.utils.rule_extractor import extract_rules_from_neural_output
-from src.reasoners.rg_retriever import RuleGuidedRetriever # Import Advanced RG-Retriever
-
+from src.reasoners.rg_retriever import RuleGuidedRetriever
+from src.utils.device_manager import DeviceManager
+from src.utils.dimension_manager import DimensionalityManager
 
 logger = logging.getLogger(__name__)
 
+
 class HybridIntegrator:
     """
-    HySym-RAG's core integration system that combines symbolic and neural reasoning.
+    Enhanced HybridIntegrator for academic evaluation of symbolic-neural integration.
     """
-    def __init__(self, symbolic_reasoner, neural_retriever, resource_manager, query_expander=None, cache_ttl=3600, batch_size=4):
+
+    def __init__(self, symbolic_reasoner, neural_retriever, resource_manager,
+                 query_expander=None, cache_ttl: int = 3600,
+                 fusion_threshold: float = 0.6, max_reasoning_steps: int = 5,
+                 dim_manager: Optional[DimensionalityManager] = None):
         self.symbolic_reasoner = symbolic_reasoner
         self.neural = neural_retriever
         self.resource_manager = resource_manager
         self.query_expander = query_expander
+        self.fusion_threshold = fusion_threshold
+        self.max_reasoning_steps = max_reasoning_steps
+        self.logger = logger
+        self.logger.setLevel(logging.DEBUG)  # Set logging level to DEBUG in HybridIntegrator
+        self.device = DeviceManager.get_device()
+        self.dim_manager = dim_manager or DimensionalityManager(target_dim=768, device=self.device)
+        self.alignment_layer = AlignmentLayer(
+            sym_dim=384,
+            neural_dim=768,
+            target_dim=768,
+            dim_manager=self.dim_manager
+        ).to(self.device)
+        self.rg_retriever = RuleGuidedRetriever()
+        self.integration_metrics = {
+            'alignment_scores': [],
+            'fusion_quality': [],
+            'reasoning_steps': [],
+            'step_success': [],
+            'path_lengths': [],
+            'resource_usage': defaultdict(list)
+        }
+        self.fusion_metrics = defaultdict(list)
+        self.reasoning_chains = defaultdict(dict)
         self.cache = {}
         self.cache_ttl = cache_ttl
-        self.batch_size = batch_size
-        self.performance_stats = {
-            'symbolic_hits': 0,
-            'neural_hits': 0,
-            'cache_hits': 0,
-            'total_queries': 0,
-            'hybrid_successes': 0
-        }
-        self.alignment_layer = AlignmentLayer(sym_dim=300, neural_dim=384, target_dim=768)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info("HybridIntegrator initialized successfully with alignment layer")
-        # Initialize Advanced RG-Retriever and pass it to NeuralRetriever
-        self.advanced_rg_retriever = RuleGuidedRetriever() # Initialize Advanced RG-Retriever in HybridIntegrator as well, if needed here. Currently, NeuralRetriever has its own instance.
 
-    @property
-    def expander(self):
-        return self.query_expander
-
-    def ensure_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.to(self.device) if tensor.device != self.device else tensor
-
-    def ensure_device_consistency(self, *tensors: torch.Tensor) -> List[torch.Tensor]:
-        return [self.ensure_device(tensor) for tensor in tensors]
-
-    def _generate_cache_key(self, query: str) -> str:
-        if self.query_expander:
-            expanded = self.query_expander.expand_query(query)
-            return f"{query}::{expanded}"
-        return query
-
-    def _get_valid_cache(self, cache_key: str) -> Optional[Tuple[List[str], str]]:
-        if cache_key in self.cache:
-            entry = self.cache[cache_key]
-            if datetime.now() - entry['timestamp'] < timedelta(seconds=self.cache_ttl):
-                self.performance_stats['cache_hits'] += 1
-                return entry['result'], entry['source']
-            else:
-                del self.cache[cache_key]
-        return None
-
-    def _update_cache(self, cache_key: str, result: Tuple[List[str], str]) -> None:
-        if len(self.cache) > 1000:
-            oldest_key = min(self.cache.items(), key=lambda x: x[1]['timestamp'])[0]
-            del self.cache[oldest_key]
-        self.cache[cache_key] = {
-            'result': result[0],
-            'source': result[1],
-            'timestamp': datetime.now()
-        }
-
-    def process_query(self, query: str, context: str, query_complexity=0.5) -> Tuple[List[str], str]: # Added query_complexity parameter
-        """Process query (same as before, just calling neural retriever)."""
-        self.performance_stats['total_queries'] += 1
-
-        cache_key = self._generate_cache_key(query)
-        cached_result = self._get_valid_cache(cache_key)
-        if cached_result:
-            return cached_result
-
+    def process_query(self, query: str, context: str, query_complexity: float = 0.5,
+                      supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
         try:
-            if self.query_expander:
-                logger.info(f"Query complexity score: {query_complexity:.4f}") # Using passed query_complexity
+            cache_key = self._generate_cache_key(query, context)
+            cached_result = self._get_cache(cache_key)
+            if cached_result:
+                return cached_result
+            symbolic_result = self._process_symbolic(query)
+            is_multi_hop = self._is_multi_hop_query(query)
+            if is_multi_hop:
+                result = self._handle_multi_hop_query(query, context, symbolic_result, supporting_facts)
             else:
-                complexity = 0.5
+                result = self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
+            self._set_cache(cache_key, result)
+            return result
 
-            if query_complexity < 0.4:
-                symbolic_result = self._process_symbolic(query)
-                if symbolic_result:
-                    return symbolic_result, "symbolic"
+        except Exception as e:
+            self.logger.error(f"Error in hybrid processing: {str(e)}")
+            return ("Error processing query.", "error")
 
-            symbolic_emb = self.symbolic_reasoner.encode(query)
-            neural_emb = self.neural.encode(query)
-            symbolic_emb, neural_emb = self.ensure_device_consistency(symbolic_emb, neural_emb)
-            symbolic_emb = self._prepare_embedding(symbolic_emb, 300, "symbolic")
-            neural_emb = self._prepare_embedding(neural_emb, 384, "neural")
+    def _process_symbolic(self, query: str) -> List[str]:
+        return self.symbolic_reasoner.process_query(query)
 
-            try:
-                aligned_emb, confidence, debug_info = self.alignment_layer(symbolic_emb, neural_emb)
-                logger.info(f"Alignment confidence: {confidence:.3f}")
-                if debug_info:
-                    logger.debug(f"Alignment debug info: {debug_info}")
-            except Exception as alignment_error:
-                logger.error(f"Alignment error: {str(alignment_error)}. Falling back to neural.")
-                confidence = 0.0
+    def _is_multi_hop_query(self, query: str) -> bool:
+        multi_hop_indicators = [" and ", " then ", " after ", " before "]
+        query_lower = query.lower()
+        return any(indicator in query_lower for indicator in multi_hop_indicators)
 
-            symbolic_result_for_neural_guidance = None
+    def _handle_single_hop_query(self, query: str, context: str, symbolic_result: List[str],
+                                 supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
+        symbolic_guidance = self._get_symbolic_guidance(symbolic_result, {'question': query})
+        if supporting_facts:
+            filtered_context = self.rg_retriever.filter_context_by_rules(context, symbolic_guidance,
+                                                                         supporting_facts=supporting_facts)
+        else:
+            filtered_context = self.rg_retriever.filter_context_by_rules(context, symbolic_guidance)
+        neural_answer = self.neural.retrieve_answer(filtered_context, query,
+                                                    symbolic_guidance=symbolic_guidance,
+                                                    query_complexity=0.5)
+        fused_answer, confidence, debug_info = self._fuse_symbolic_neural(
+            query, symbolic_result, neural_answer, query_complexity=0.5
+        )
+        return (fused_answer, "hybrid")
 
-            if confidence > 0.6:
-                symbolic_result = self._process_symbolic(query)
-                if symbolic_result:
-                    symbolic_result_for_neural_guidance = symbolic_result
-                    try:
-                        neural_result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result, query_complexity=query_complexity) # Pass query_complexity
-                        combined_result = self._combine_results(symbolic_result, neural_result)
-                        self.performance_stats['hybrid_successes'] += 1
-                        self._update_cache(cache_key, (combined_result, "hybrid"))
-                        return combined_result, "hybrid"
-                    except Exception as hybrid_error:
-                        logger.warning(f"Hybrid processing failed: {str(hybrid_error)}")
-                        return symbolic_result, "symbolic"
+    def _handle_multi_hop_query(self, query: str, context: str, symbolic_result: List[str],
+                                supporting_facts: Optional[List[Tuple[str, int]]] = None) -> Tuple[str, str]:
+        """
+        Enhanced multi-hop query handling with robust reasoning chain construction.
+        """
+        try:
+            # Use query_expander's decomposition if available; else fallback to basic extraction.
+            if self.query_expander and hasattr(self.query_expander, 'decompose_query'):
+                reasoning_chain = self.query_expander.decompose_query(query)
+            else:
+                reasoning_chain = self._extract_reasoning_chain(query, context)
 
-            result = self._process_neural_optimized(query, context, symbolic_guidance=symbolic_result_for_neural_guidance, query_complexity=query_complexity) # Pass query_complexity
-            self._update_cache(cache_key, (result, "neural"))
-            return result, "neural"
+            if not reasoning_chain:
+                self.logger.warning("Could not extract reasoning chain")
+                return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
 
-        except RuntimeError as runtime_error:
-            self._handle_runtime_error(runtime_error)
-            raise
+            intermediate_results = []
+            current_context = context
+            accumulated_knowledge = ""
 
-        except Exception as generic_error:
-            logger.error(f"Unexpected error: {str(generic_error)}")
-            return self._handle_fallback(query, context)
+            # Process each hop in the reasoning chain
+            for hop_idx, hop in enumerate(reasoning_chain):
+                symbolic_guidance = self._get_symbolic_guidance(symbolic_result, hop)
+                enriched_context = current_context
+                if accumulated_knowledge:
+                    enriched_context = f"{current_context}\n\nPrevious findings:\n{accumulated_knowledge}"
+                filtered_context = self.rg_retriever.filter_context_by_rules(
+                    enriched_context,
+                    symbolic_guidance,
+                    query_complexity=0.7
+                )
+                hop_response = self.neural.retrieve_answer(
+                    filtered_context,
+                    hop['question'],
+                    symbolic_guidance=symbolic_guidance,
+                    query_complexity=0.7
+                )
+                if hop_response and not hop_response.startswith("Error"):
+                    intermediate_results.append({
+                        'hop_idx': hop_idx,
+                        'question': hop['question'],
+                        'response': hop_response,
+                        'context_used': filtered_context
+                    })
+                    accumulated_knowledge += f"\nStep {hop_idx + 1}: {hop_response}"
+                    current_context += " " + hop_response
 
+            # If no intermediate results, fallback to single-hop processing
+            if not intermediate_results:
+                self.logger.warning(f"No intermediate results for query: {query}")
+                return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
 
-    def _prepare_embedding(self, embedding: torch.Tensor, target_dim: int, name: str) -> torch.Tensor:
-        """Prepare embedding (unchanged)."""
-        if embedding.dim() == 1:
-            embedding = embedding.unsqueeze(0)
-        if embedding.size(1) != target_dim:
-            logger.warning(f"Transforming {name} embedding from {embedding.size(1)} to {target_dim}")
-            projection = torch.nn.Linear(embedding.size(1), target_dim).to(self.device)
-            embedding = projection(embedding)
-        return embedding
+            # Create a structured representation of the reasoning chain
+            reasoning_chain_info = {
+                'chain_id': hash(query),
+                'query': query,
+                'chain_length': len(intermediate_results),
+                'hop_count': len(reasoning_chain),
+                'steps': [],
+                'overall_confidence': 0.0
+            }
 
-    def _combine_results(self, symbolic_results: List[str], neural_result: List[str]) -> List[str]:
-        """Combine results (unchanged)."""
-        combined = []
-        combined.extend(symbolic_results)
-        for neural_resp in neural_result:
-            if not any(self._high_overlap(neural_resp, sym_resp) for sym_resp in symbolic_results):
-                combined.append(neural_resp)
+            # Calculate confidence scores for each hop and track them
+            hop_confidences = []
+            for idx, (hop, res) in enumerate(zip(reasoning_chain, intermediate_results)):
+                base_conf = 0.5 + (0.1 * idx)
+                response_length = len(res.get('response', '').split())
+                length_boost = min(0.2, response_length / 500)  # Cap at 0.2
+                hop_conf = min(0.95, base_conf + length_boost)
+                hop_confidences.append(hop_conf)
+                reasoning_chain_info['steps'].append({
+                    'hop_idx': idx,
+                    'question': hop.get('question', ''),
+                    'response': res.get('response', ''),
+                    'confidence': hop_conf,
+                    'type': 'multi_hop'
+                })
+            if hop_confidences:
+                reasoning_chain_info['overall_confidence'] = sum(hop_confidences) / len(hop_confidences)
+
+            # Store metrics in integration_metrics
+            self.integration_metrics['reasoning_steps'].append(len(reasoning_chain))
+            self.integration_metrics['path_lengths'].append(len(intermediate_results))
+            if not self.integration_metrics.get('chain_lengths'):
+                self.integration_metrics['chain_lengths'] = []
+            if not self.integration_metrics.get('chain_confidences'):
+                self.integration_metrics['chain_confidences'] = []
+            if not self.integration_metrics.get('inference_depths'):
+                self.integration_metrics['inference_depths'] = []
+            self.integration_metrics['chain_lengths'].append(reasoning_chain_info['chain_length'])
+            self.integration_metrics['chain_confidences'].append(reasoning_chain_info['overall_confidence'])
+            self.integration_metrics['inference_depths'].append(reasoning_chain_info['hop_count'])
+
+            # Store the reasoning chain
+            self.reasoning_chains[reasoning_chain_info['chain_id']] = reasoning_chain_info
+
+            final_answer = self._combine_hop_results(
+                [res['response'] for res in intermediate_results],
+                reasoning_chain
+            )
+
+            fused_answer, confidence, debug_info = self._fuse_symbolic_neural(
+                query, symbolic_result, final_answer, query_complexity=0.7
+            )
+
+            debug_info['reasoning_chain'] = reasoning_chain_info
+
+            return (fused_answer, "hybrid")
+
+        except Exception as e:
+            self.logger.error(f"Error in multi-hop processing: {str(e)}")
+            return self._handle_single_hop_query(query, context, symbolic_result, supporting_facts)
+
+    def _extract_reasoning_chain(self, query: str, context: str) -> List[Dict[str, str]]:
+        # Basic fallback: decompose query by splitting on 'and'
+        subqueries = [q.strip() for q in query.split("and") if q.strip()]
+        return [{"question": subq} for subq in subqueries]
+
+    def _combine_hop_results(self, results: List[str], reasoning_chain: List[Dict[str, str]]) -> str:
+        if not results:
+            return ""
+        if len(results) == 1:
+            return results[0]
+        combined = "Based on multiple reasoning steps:\n\n"
+        for idx, (res, hop) in enumerate(zip(results, reasoning_chain)):
+            combined += f"Step {idx + 1}: {hop['question']}\n"
+            combined += f"Answer: {res}\n\n"
+        combined += f"Final Answer: {results[-1]}"
         return combined
 
-    def _high_overlap(self, text1: str, text2: str, threshold: float = 0.7) -> bool:
-        """Check high overlap (unchanged)."""
-        emb1 = self.neural.encode(text1)
-        emb2 = self.neural.encode(text2)
-        similarity = util.cos_sim(emb1, emb2).item()
-        return similarity > threshold
+    def _assess_symbolic_contribution(self, symbolic_result: Union[List[str], str]) -> float:
+        """
+        Assess the quality/quantity of symbolic matches.
+        Returns a contribution score capped at 0.3.
+        """
+        if isinstance(symbolic_result, list) and symbolic_result:
+            if symbolic_result[0].strip().lower().startswith("no symbolic match"):
+                return 0.0
+            num_matches = len(symbolic_result)
+            return min(0.3, num_matches * 0.1)
+        return 0.0
 
-    def _process_symbolic(self, query: str) -> Optional[List[str]]:
-        """Process symbolic (unchanged)."""
+    def _fuse_symbolic_neural(self, query: str, symbolic_result: Union[List[str], str], neural_answer: str,
+                              query_complexity: float = 0.5) -> Tuple[str, float, Dict]:
         try:
-            symbolic_results = self.symbolic_reasoner.process_query(query)
-            if symbolic_results and "No symbolic match found." not in symbolic_results:
-                self.performance_stats['symbolic_hits'] += 1
-                return symbolic_results
-            return None
+            symbolic_text = " ".join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result
+            symbolic_emb_raw = self._get_symbolic_embedding(symbolic_result)
+            neural_emb_raw = self._get_neural_embedding(neural_answer)
+
+            self.logger.debug(f"Symbolic emb shape (before alignment): {symbolic_emb_raw.shape}")
+            self.logger.debug(f"Neural emb shape (before alignment): {neural_emb_raw.shape}")
+
+            symbolic_emb = self.dim_manager.align_embeddings(symbolic_emb_raw, "symbolic")
+            neural_emb = self.dim_manager.align_embeddings(neural_emb_raw, "neural")
+
+            self.logger.debug(f"Symbolic emb shape (after alignment): {symbolic_emb.shape}")
+            self.logger.debug(f"Neural emb shape (after alignment): {neural_emb.shape}")
+
+            symbolic_emb, neural_emb = DeviceManager.ensure_same_device(symbolic_emb, neural_emb, self.device)
+
+            try:
+                aligned_emb, base_confidence, debug_info = self.alignment_layer(
+                    symbolic_emb,
+                    neural_emb,
+                    rule_confidence=query_complexity
+                )
+            except Exception as e:
+                self.logger.warning(f"Alignment layer error: {str(e)}. Using fallback values.")
+                aligned_emb = neural_emb
+                base_confidence = 0.4
+                debug_info = {"error": str(e), "fallback": True}
+
+            if base_confidence <= 0.0:
+                base_confidence = 0.4
+
+            confidence = (base_confidence + 0.2)
+            confidence = min(1.0, confidence)
+
+            symbolic_contribution = self._assess_symbolic_contribution(symbolic_result)
+            confidence = (confidence + symbolic_contribution * 1.5)
+            confidence = max(0.3, min(1.0, confidence))
+
+            fused_response = self._generate_reasoned_response(query, symbolic_result, neural_answer, aligned_emb,
+                                                              confidence)
+            self._update_fusion_metrics(confidence, query_complexity, debug_info)
+            return fused_response, confidence, debug_info
+
         except Exception as e:
-            logger.error(f"Error in symbolic processing: {str(e)}")
-            return None
+            error_message = str(e)
+            self.logger.warning(f"Fusion failed: {error_message}, falling back to neural response")
+            return neural_answer, 0.5, {"fallback": True, "error": error_message}
 
-    def _process_neural_optimized(self, query: str, context: str, symbolic_guidance: Optional[List[str]] = None, query_complexity=0.5) -> List[str]: # Added query_complexity parameter
-        """Process neural (modified to use Advanced RG-Retriever)."""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        try:
-            start_time = time.time()
-            # Use Advanced RG-Retriever for context filtering, pass query_complexity
-            filtered_context = self.neural.advanced_rg_retriever.filter_context_by_rules(context, symbolic_guidance, query_complexity=query_complexity)
-            # Pass filtered context to neural retriever, pass query_complexity
-            answer_text = self.neural.retrieve_answer(filtered_context, query, symbolic_guidance=symbolic_guidance, rule_guided_retrieval=False, query_complexity=query_complexity) # Pass query_complexity here as well, though RG-Retriever is already applied
-            result = [answer_text]
-            dynamic_rules = extract_rules_from_neural_output(answer_text)
-            if dynamic_rules:
-                logger.info(f"Extracted {len(dynamic_rules)} dynamic rules from neural output.")
-                self.symbolic_reasoner.add_dynamic_rules(dynamic_rules)
-            processing_time = time.time() - start_time
-            self.resource_manager.neural_perf_times.append(processing_time)
-            self.performance_stats['neural_hits'] += 1
-            return result
-        finally:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    def _generate_reasoned_response(self, query: str, symbolic_result: Union[List[str], str], neural_answer: str,
+                                    aligned_emb: torch.Tensor, confidence: float) -> str:
+        symbolic_steps = symbolic_result if isinstance(symbolic_result, list) else [symbolic_result]
+        reasoning_chain = []
+        for step in symbolic_steps:
+            if step and step.strip():
+                reasoning_chain.append({"type": "symbolic", "content": step, "confidence": confidence})
+        if neural_answer and neural_answer.strip():
+            reasoning_chain.append({"type": "neural", "content": neural_answer, "confidence": confidence})
+        chain_id = hash(query)
+        self.reasoning_chains[chain_id] = reasoning_chain
+        if confidence >= self.fusion_threshold:
+            response = "Based on integrated reasoning:\n\n"
+            for idx, step in enumerate(reasoning_chain, 1):
+                response += f"Step {idx} ({step['type']}): {step['content']}\n"
+            response += f"\nFinal Answer (confidence: {confidence:.2f}): {neural_answer}"
+        else:
+            response = f"Based on available information (confidence: {confidence:.2f}):\n{neural_answer}"
+        return response
 
-    def get_performance_metrics(self) -> Dict[str, float]:
-        """Get performance metrics (unchanged)."""
-        total = max(1, self.performance_stats['total_queries'])
+    def _update_fusion_metrics(self, confidence: float, query_complexity: float, debug_info: Dict):
+        self.fusion_metrics['confidence'].append(confidence)
+        self.fusion_metrics['complexity'].append(query_complexity)
+        if 'attention_weights' in debug_info:
+            self.fusion_metrics['attention_patterns'].append(debug_info['attention_weights'])
+
+    def _get_symbolic_embedding(self, symbolic_result: Union[List[str], str]) -> torch.Tensor:
+        symbolic_text = " ".join(symbolic_result) if isinstance(symbolic_result, list) else symbolic_result
+        return self.symbolic_reasoner.embedder.encode(symbolic_text, convert_to_tensor=True).to(self.device)
+
+    def _get_neural_embedding(self, neural_answer: str) -> torch.Tensor:
+        return self.neural.encoder.encode(neural_answer, convert_to_tensor=True).to(self.device)
+
+    def get_integration_metrics(self) -> Dict[str, Any]:
+        if not self.integration_metrics['reasoning_steps']:
+            return {
+                'alignment_quality': {'mean': 0.0, 'std': 0.0},
+                'reasoning_depth': {'avg_steps': 0.0, 'max_steps': 0},
+                'fusion_quality': {'mean': 0.0, 'std': 0.0}
+            }
         return {
-            'symbolic_ratio': self.performance_stats['symbolic_hits'] / total,
-            'neural_ratio': self.performance_stats['neural_hits'] / total,
-            'cache_hit_ratio': self.performance_stats['cache_hits'] / total,
-            'hybrid_success_ratio': self.performance_stats['hybrid_successes'] / total,
-            'average_neural_time': (sum(self.resource_manager.neural_perf_times) / len(self.resource_manager.neural_perf_times)
-                                    if self.resource_manager.neural_perf_times else 0)
+            'alignment_quality': {
+                'mean': float(np.mean(self.integration_metrics['alignment_scores'])),
+                'std': float(np.std(self.integration_metrics['alignment_scores']))
+            },
+            'reasoning_depth': {
+                'avg_steps': float(np.mean(self.integration_metrics['reasoning_steps'])),
+                'max_steps': max(self.integration_metrics['reasoning_steps'])
+            },
+            'fusion_quality': {
+                'mean': float(np.mean(self.integration_metrics['fusion_quality'])),
+                'std': float(np.std(self.integration_metrics['fusion_quality']))
+            }
         }
 
-    def _handle_runtime_error(self, error: RuntimeError):
-        """Handle runtime error (unchanged)."""
-        logger.error(f"Runtime error occurred: {str(error)}")
-        # Additional handling if needed
+    def _get_symbolic_guidance(self, symbolic_result: List[str], hop: Dict[str, Any]) -> List[str]:
+        return symbolic_result
 
-    def _handle_fallback(self, query: str, context: str) -> Tuple[List[str], str]:
-        """Handle fallback (unchanged)."""
-        fallback_response = ["Unable to process query. Please try again later."]
-        return fallback_response, "fallback"
+    def _encode_text(self, text: str) -> torch.Tensor:
+        from sentence_transformers import SentenceTransformer
+        embedder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+        return embedder.encode(text, convert_to_tensor=True).to(self.device)
+
+    def _generate_cache_key(self, query: str, context: str) -> str:
+        return f"{hash(query)}_{hash(context)}"
+
+    def _get_cache(self, key: str) -> Optional[Tuple[str, str]]:
+        if key in self.cache:
+            result, timestamp = self.cache[key]
+            if time.time() - timestamp < self.cache_ttl:
+                return result
+            del self.cache[key]
+        return None
+
+    def _set_cache(self, key: str, result: Tuple[str, str]):
+        self.cache[key] = (result, time.time())
+
+

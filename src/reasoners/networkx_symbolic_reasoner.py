@@ -6,174 +6,542 @@ import networkx as nx
 import logging
 from sentence_transformers import SentenceTransformer, util
 import torch
+import torch.nn as nn  # For potential adapter usage in fallback
+import torch.nn.functional as F
 import numpy as np
+from typing import List, Dict, Set, Optional, Tuple, Any, Union
+from collections import defaultdict
+from datetime import datetime
 
-logger = logging.getLogger("GraphSymbolicReasoner")
-try:
-    nlp = spacy.load("en_core_web_sm")
-except Exception as e:
-    logger.error(f"Error loading spaCy model in GraphSymbolicReasoner: {str(e)}")
-    raise
+from src.utils.device_manager import DeviceManager
+from src.utils.dimension_manager import DimensionalityManager
+
+# For improved keyword extraction using KeyBERT
+from keybert import KeyBERT
+
+kw_model = KeyBERT()
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 
 class GraphSymbolicReasoner:
     """
-    A graph-based symbolic reasoner that uses sentence embeddings for matching and supports
-    multi-hop chaining by traversing a rule graph. It also provides an extract_keywords method.
+    Enhanced graph-based symbolic reasoner for academic evaluation of HySym-RAG.
+    Core functionalities include loading and validating rules, building a knowledge graph,
+    indexing rules, matching rules against query embeddings, and basic query processing.
+    Detailed reasoning chain extraction and academic metrics are moved to a separate module.
     """
-    def __init__(self, rules_file, match_threshold=0.25, max_hops=5):
+
+    def __init__(
+            self,
+            rules_file: str,
+            match_threshold: float = 0.1,  # Reduced match_threshold
+            max_hops: int = 5,
+            embedding_model: str = 'all-MiniLM-L6-v2',
+            device: Optional[torch.device] = None,
+            dim_manager: Optional[DimensionalityManager] = None
+    ):
+        self.logger = logger
         self.match_threshold = match_threshold
         self.max_hops = max_hops
-        self.rules = self.load_rules(rules_file)
-        self.nlp = spacy.load("en_core_web_sm")
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.rule_index = {}
-        self.traversal_cache = {}  # cache for traversal results
+        self.device = device or DeviceManager.get_device()
+        self.dim_manager = dim_manager
+
+        # Initialize embedder
+        self.embedder = SentenceTransformer(embedding_model).to(self.device)
+
+        # Load spaCy
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+            logger.info("Successfully loaded spaCy model")
+        except Exception as e:
+            logger.error(f"Error loading spaCy model: {str(e)}")
+            raise
+
+        # Load and validate rules
+        self.rules = self._load_rules(rules_file)
+
+        # Basic academic metrics
+        self.reasoning_metrics = {
+            'path_lengths': [],
+            'match_confidences': [],
+            'hop_distributions': defaultdict(int),
+            'pattern_types': defaultdict(int),
+            'chains': []
+        }
+
+        # Knowledge graph and indexes
+        self.graph = nx.DiGraph()
+        self.rule_index: Dict[str, Dict] = {}
+        self.rule_ids: List[str] = []
+        self.keyword_index = defaultdict(list)
+        self.entity_index = defaultdict(set)
+        self.relation_index = defaultdict(set)
+        self.rule_embeddings = None
+
+        # Build indexes and graph
         self.build_rule_index()
         self.build_graph()
-        self.build_causal_graph()
-        logger.info("GraphSymbolicReasoner initialized successfully.")
 
-    def load_rules(self, rules_file):
-        with open(rules_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        logger.info("GraphSymbolicReasoner initialized successfully")
+
+    def _load_rules(self, rules_file: str) -> Dict[str, Dict]:
+        loaded_rules = {}
+        try:
+            with open(rules_file, 'r', encoding='utf-8') as f:
+                raw_rules = json.load(f)
+            self.logger.info(f"Successfully loaded {len(raw_rules)} rules from {rules_file}")
+            for i, rule in enumerate(raw_rules):
+                if self._validate_rule_structure(rule):
+                    rule_id = f"rule_{i}"
+                    rule['version'] = GraphSymbolicReasoner._get_next_version(rule_id, loaded_rules)
+                    loaded_rules[rule_id] = rule
+                else:
+                    self.logger.warning(f"Invalid rule structure skipped: {rule}")
+            return loaded_rules
+        except FileNotFoundError:
+            self.logger.warning(f"Rules file not found at {rules_file}. Starting with empty rule set.")
+            return {}
+        except json.JSONDecodeError:
+            self.logger.error(f"Error decoding JSON from {rules_file}. Please ensure it's valid JSON.")
+            return {}
+        except Exception as e:
+            self.logger.error(f"Error loading rules from {rules_file}: {str(e)}")
+            return {}
+
+    @staticmethod
+    def _get_next_version(rule_id: str, current_rules: Dict[str, Dict]) -> int:
+        return sum(1 for r in current_rules.values() if r.get('id', '').startswith(rule_id)) + 1
 
     def build_rule_index(self):
-        for i, rule in enumerate(self.rules):
-            rule_id = f"rule_{i}"
-            cause_text = " ".join(rule.get("keywords", []))
-            embedding = self.embedder.encode(cause_text, convert_to_tensor=True)
-            rule["embedding"] = embedding
-            rule["id"] = rule_id
+        self.rule_index = {}
+        valid_rule_ids = []
+        rule_embeddings_list = []
+        embedding_dim = None
+
+        for rule_id, rule in self.rules.items():
             self.rule_index[rule_id] = rule
-        self.rule_ids = list(self.rule_index.keys())
-        self.rule_embeddings = torch.stack([self.rule_index[rid]["embedding"] for rid in self.rule_ids])
+
+            if 'keywords' in rule:
+                for keyword in rule['keywords']:
+                    self.keyword_index[keyword].append(rule_id)
+
+            try:
+                # Use existing embedding if present
+                if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
+                    rule_embedding = rule['embedding'].unsqueeze(0) if rule['embedding'].dim() == 1 else rule[
+                        'embedding']
+                # Or compute from source_text
+                elif 'source_text' in rule and rule['source_text'].strip():
+                    rule_text = rule['source_text']
+                    if 'keywords' in rule:
+                        rule_text += " " + " ".join(rule['keywords'])
+                    rule_embedding = self.embedder.encode(rule_text, convert_to_tensor=True).to(self.device)
+                    rule_embedding = rule_embedding.unsqueeze(0) if rule_embedding.dim() == 1 else rule_embedding
+                # Or compute from response
+                elif 'response' in rule and rule['response'].strip():
+                    rule_text = rule['response']
+                    if 'keywords' in rule:
+                        rule_text += " " + " ".join(rule['keywords'])
+                    rule_embedding = self.embedder.encode(rule_text, convert_to_tensor=True).to(self.device)
+                    rule_embedding = rule_embedding.unsqueeze(0) if rule_embedding.dim() == 1 else rule_embedding
+                else:
+                    continue
+
+                # Use the centralized alignment from DimensionalityManager with logging
+                current_embedding = self.dim_manager.align_embeddings(rule_embedding.to(self.device), "rule")
+                if embedding_dim is None:
+                    embedding_dim = current_embedding.shape[-1]
+                elif current_embedding.shape[-1] != embedding_dim:
+                    self.logger.warning(
+                        f"Rule {rule_id} embedding dimension mismatch. Expected {embedding_dim}, got {current_embedding.shape[-1]}"
+                    )
+                    continue
+
+                if current_embedding.shape[-1] != self.dim_manager.target_dim:
+                    self.logger.warning(
+                        f"Rule {rule_id} embedding dimension {current_embedding.shape[-1]} does not match target {self.dim_manager.target_dim}"
+                    )
+                    continue
+
+                rule['embedding'] = current_embedding
+                valid_rule_ids.append(rule_id)
+                rule_embeddings_list.append(current_embedding)
+            except Exception as e:
+                self.logger.error(f"Error processing rule {rule_id}: {e}")
+                continue
+
+        self.rule_ids = valid_rule_ids
+        if rule_embeddings_list:
+            try:
+                stacked_embeddings = torch.cat(rule_embeddings_list).to(self.device)
+                if stacked_embeddings.shape[-1] != self.dim_manager.target_dim:
+                    self.logger.warning("Correcting rule embeddings dimension...")
+                    stacked_embeddings = self.dim_manager.align_embeddings(stacked_embeddings, "rule")
+                self.rule_embeddings = stacked_embeddings
+                self.logger.info(f"Rule embeddings tensor created with shape: {self.rule_embeddings.shape}")
+            except Exception as e:
+                self.logger.error(f"Error stacking rule embeddings: {e}")
+                self.rule_embeddings = None
+        else:
+            self.rule_embeddings = None
+
+        self.logger.info(
+            f"Rule index built successfully with {len(self.rules)} rules. Final count of valid rules: {len(self.rule_ids)}"
+        )
 
     def build_graph(self):
-        self.graph = nx.DiGraph()
-        for rule_id, rule in self.rule_index.items():
-            self.graph.add_node(rule_id, rule=rule)
-        for id1, rule1 in self.rule_index.items():
-            for id2, rule2 in self.rule_index.items():
-                if id1 == id2:
-                    continue
-                if set(rule1.get("keywords", [])) & set(rule2.get("keywords", [])):
-                    self.graph.add_edge(id1, id2)
+        try:
+            self.graph = nx.DiGraph()
+            for rule_id, rule in self.rule_index.items():
+                self.graph.add_node(
+                    rule_id,
+                    type="fact",
+                    rule_response=rule.get('response', ''),
+                    confidence=rule.get('confidence', 0.5),
+                    version=rule.get('version', 0),
+                    keywords=rule.get('keywords', [])
+                )
+                self._add_rule_relationships(rule_id, rule)
+            self.logger.info(f"Knowledge graph built with {len(self.graph.nodes)} nodes")
+        except Exception as e:
+            self.logger.error(f"Error building knowledge graph: {str(e)}")
+            self.graph = nx.DiGraph()
 
-    def build_causal_graph(self):
-        self.causal_graph = nx.DiGraph()
-        for rule_id, rule in self.rule_index.items():
-            causes = rule.get("causes", [])
-            effects = rule.get("effects", [])
-            for cause in causes:
-                for effect in effects:
-                    self.causal_graph.add_edge(cause.lower(), effect.lower(), rule_id=rule_id)
-        logger.info("Causal graph built successfully.")
+    def _add_rule_relationships(self, rule_id: str, rule: Dict) -> None:
+        for other_id in self.graph.nodes:
+            if other_id != rule_id:
+                other_rule = self.graph.nodes[other_id]
+                common_keywords = set(rule.get('keywords', [])) & set(other_rule.get('keywords', []))
+                if common_keywords:
+                    relationship_strength = len(common_keywords) / max(
+                        len(rule.get('keywords', [])),
+                        len(other_rule.get('keywords', []))
+                    )
+                    if relationship_strength > self.match_threshold:
+                        self.graph.add_edge(
+                            rule_id,
+                            other_id,
+                            weight=relationship_strength,
+                            common_keywords=list(common_keywords)
+                        )
 
-    def extract_keywords(self, text):
-        """
-        Extract meaningful keywords from the input text using spaCy.
-        """
-        doc = self.nlp(text.lower())
-        keywords = [token.lemma_ for token in doc
-                    if token.pos_ in ("NOUN", "VERB", "ADJ") and not token.is_stop and len(token.text) > 1]
-        return list(set(keywords))
+    def _validate_rule_structure(self, rule: Dict) -> bool:
+        try:
+            if not isinstance(rule, dict):
+                return False
 
-    def encode(self, query):
-        return self.embedder.encode(query, convert_to_tensor=True)
+            if "supporting_fact" in rule:
+                required_hotpot_fields = {"type", "source_text", "keywords"}
+                if all(field in rule and isinstance(rule[field], (str, list)) for field in required_hotpot_fields):
+                    if "confidence" not in rule:
+                        rule["confidence"] = self._calculate_rule_confidence(rule)
+                    return True
+                else:
+                    return False
 
-    def traverse_graph(self, query_embedding, max_hops=None):
-        if max_hops is None:
-            max_hops = self.max_hops
-        fingerprint = hash(query_embedding.detach().cpu().numpy().tobytes())
-        if fingerprint in self.traversal_cache:
-            return self.traversal_cache[fingerprint]
+            required_fields = {"keywords", "response"}
+            if all(field in rule and isinstance(rule[field], (str, list)) for field in required_fields):
+                if "embedding" in rule:
+                    return isinstance(rule["embedding"], torch.Tensor)
+                if ("source_text" in rule and isinstance(rule["source_text"], str)
+                        and rule["source_text"].strip()):
+                    return True
+                if ("response" in rule and isinstance(rule["response"], str)
+                        and rule["response"].strip()):
+                    return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Error in rule validation: {str(e)}")
+            return False
 
-        sims = util.cos_sim(query_embedding, self.rule_embeddings).squeeze(0)
-        initial_indices = (sims >= self.match_threshold).nonzero(as_tuple=False).flatten().tolist()
-        if not initial_indices:
-            self.traversal_cache[fingerprint] = []
-            return []
-        initial_matches = [self.rule_ids[i] for i in initial_indices]
+    def _calculate_rule_confidence(self, rule: Dict) -> float:
+        base_confidence = 0.7
+        if "source_text" in rule:
+            base_confidence += 0.1
+        if "entity_types" in rule:
+            base_confidence += 0.1
+        if "type" in rule:
+            base_confidence += 0.1
+        return min(1.0, base_confidence)
 
-        visited = set()
-        results = []
-        current_nodes = initial_matches
-        hops = 0
-        while current_nodes and hops < max_hops:
-            new_nodes = []
-            for node_id in current_nodes:
-                if node_id in visited:
-                    continue
-                visited.add(node_id)
-                rule = self.rule_index[node_id]
-                results.append(rule["response"])
-                new_nodes.extend(list(self.graph.neighbors(node_id)))
-            current_nodes = new_nodes
-            hops += 1
-
-        self.traversal_cache[fingerprint] = results
-        return results
-
-    def traverse_causal_graph(self, query):
-        tokens = set(query.lower().split())
-        responses = []
-        if not hasattr(self, 'causal_graph'):
-            self.build_causal_graph()
-        for token in tokens:
-            if token in self.causal_graph:
-                for target in self.causal_graph.nodes():
-                    if target != token:
-                        try:
-                            paths = nx.all_simple_paths(self.causal_graph, source=token, target=target, cutoff=self.max_hops)
-                            for path in paths:
-                                responses.append(" -> ".join(path))
-                        except nx.NetworkXNoPath:
-                            continue
-        return responses
-
-    def process_query(self, query):
-        query_embedding = self.encode(query)
-        responses = self.traverse_graph(query_embedding)
-        causal_responses = self.traverse_causal_graph(query)
-        responses.extend(causal_responses)
-        if not responses:
-            logger.info("No symbolic match found.")
-            return ["No symbolic match found."]
-        logger.info(f"Multi-hop symbolic responses found: {responses}")
-        return responses
-
-    # --- NEW: Method to add dynamic rules ---
-    def add_dynamic_rules(self, new_rules):
-        """
-        Add newly extracted rules to both self.rules and the internal graph structures in-memory.
-        """
+    def add_dynamic_rules(self, new_rules: List[Dict]) -> None:
         if not new_rules:
+            self.logger.info("No new rules to add.")
             return
 
-        start_index = len(self.rules)
-        for i, rule in enumerate(new_rules):
-            rule_id = f"rule_{start_index + i}"
-            # Compute embedding
-            cause_text = " ".join(rule.get("keywords", []))
-            rule_embedding = self.embedder.encode(cause_text, convert_to_tensor=True)
-            rule["embedding"] = rule_embedding
-            rule["id"] = rule_id
-            self.rules.append(rule)
-            # Add to rule_index
-            self.rule_index[rule_id] = rule
+        valid_rules = {}
+        for i, rule in enumerate(new_rules, start=len(self.rules)):
+            standardized_rule = self._standardize_rule_format(rule)
+            if self._validate_rule_structure(standardized_rule):
+                rule_id = f"rule_{i}"
+                standardized_rule['id'] = rule_id
+                standardized_rule['version'] = GraphSymbolicReasoner._get_next_version(rule_id, self.rules)
+                standardized_rule['added_timestamp'] = datetime.now().isoformat()
+                if 'confidence' not in standardized_rule:
+                    standardized_rule['confidence'] = self._calculate_rule_confidence(standardized_rule)
+                if 'embedding' in standardized_rule and isinstance(standardized_rule['embedding'], torch.Tensor):
+                    standardized_rule['embedding'] = standardized_rule['embedding'].to(self.device)
+                valid_rules[rule_id] = standardized_rule
+            else:
+                self.logger.warning(f"Invalid rule structure (post-standardization): {rule}")
 
-            # Expand self.rule_ids and self.rule_embeddings
-            self.rule_ids.append(rule_id)
-            self.rule_embeddings = torch.cat([self.rule_embeddings, rule_embedding.unsqueeze(0)], dim=0)
+        if valid_rules:
+            self.rules.update(valid_rules)
+            self.build_rule_index()
+            self.build_graph()
+            self.logger.info(f"Added {len(valid_rules)} new rules. Total rules: {len(self.rules)}")
+            try:
+                self._track_rule_addition(list(valid_rules.values()))
+            except Exception as e:
+                self.logger.error(f"Error tracking rule addition (non-critical): {str(e)}")
 
-            # Add node to the main graph
-            self.graph.add_node(rule_id, rule=rule)
-            # Possibly add edges to existing nodes if keywords overlap:
-            for existing_id, existing_rule in self.rule_index.items():
-                if existing_id == rule_id:
-                    continue
-                if set(rule.get("keywords", [])) & set(existing_rule.get("keywords", [])):
-                    self.graph.add_edge(rule_id, existing_id)
-                    self.graph.add_edge(existing_id, rule_id)
+    def _standardize_rule_format(self, rule: Dict) -> Dict:
+        standardized = rule.copy()
 
-        logger.info(f"Added {len(new_rules)} dynamic rules to the symbolic reasoner.")
+        if "supporting_fact" in standardized and "source_text" in standardized and "response" not in standardized:
+            standardized["response"] = standardized["source_text"]
+
+        if "statement" in standardized and "response" not in standardized:
+            standardized["response"] = standardized["statement"]
+        elif "text" in standardized and "response" not in standardized:
+            standardized["response"] = standardized["text"]
+
+        if "embedding" in standardized and "keywords" not in standardized:
+            text_to_process = standardized.get("response", standardized.get("source_text", ""))
+            keywords = self._extract_keywords_from_text(text_to_process)
+            if keywords:
+                standardized["keywords"] = keywords
+
+        if "keywords" in standardized and isinstance(standardized["keywords"], str):
+            standardized["keywords"] = [kw.strip() for kw in standardized["keywords"].split(',')]
+
+        return standardized
+
+    def _extract_keywords_from_text(self, text: str) -> List[str]:
+        try:
+            keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1, 2), stop_words='english')
+            return [kw[0] for kw in keywords]
+        except Exception as e:
+            self.logger.error(f"Error extracting keywords: {str(e)}")
+            return [word.lower() for word in text.split() if len(word) > 3]
+
+    def _track_rule_addition(self, valid_rules: List[Dict]):
+        num_rules_added = len(valid_rules)
+        total_rules_now = len(self.rules)
+        avg_confidence = float(np.mean([rule.get('confidence', 0.0) for rule in valid_rules])) if valid_rules else 0.0
+        self.logger.info(
+            f"Added {num_rules_added} rules. Total rules: {total_rules_now}. Average confidence: {avg_confidence:.3f}"
+        )
+        if 'rule_additions' in self.reasoning_metrics:
+            for rule in valid_rules:
+                self.reasoning_metrics['rule_additions'].append({
+                    'timestamp': datetime.now().isoformat(),
+                    'confidence': rule.get('confidence', 0.0),
+                    'type': rule.get('type', 'unknown')
+                })
+
+    def _calculate_similarity(self, query_embedding: torch.Tensor, rule_embedding: torch.Tensor) -> float:
+        """
+        Directly calculates cosine similarity after alignment using the centralized alignment functions.
+        """
+        try:
+            query_aligned = self.dim_manager.align_embeddings(query_embedding, "query")
+            rule_aligned = self.dim_manager.align_embeddings(rule_embedding, "rule")
+
+            query_aligned = query_aligned.to(self.device)
+            rule_aligned = rule_aligned.to(self.device)
+
+            self.logger.debug(f"Aligned shapes - Query: {query_aligned.shape}, Rule: {rule_aligned.shape}")
+
+            with torch.no_grad():
+                similarity = F.cosine_similarity(query_aligned, rule_aligned, dim=1)
+                return similarity.item()
+        except Exception as e:
+            self.logger.error(f"Error calculating similarity: {str(e)}")
+            return 0.0
+
+    def process_query(self, query: Union[str, torch.Tensor]) -> Dict:
+        """
+        Attempt fast direct matching; if no match, do multi-hop.
+        Delegates all dimension alignment to DimensionalityManager with detailed logging.
+        """
+        try:
+            if isinstance(query, str):
+                logger.debug(f"Received string query: {query}, encoding to tensor")
+                query_embedding_raw = self.embedder.encode(query, convert_to_tensor=True).to(self.device)
+            elif isinstance(query, torch.Tensor):
+                query_embedding_raw = query.to(self.device)
+            else:
+                raise ValueError(f"Unsupported query type: {type(query)}")
+
+            logger.debug(f"Raw query embedding shape: {query_embedding_raw.shape}")
+
+            # Use centralized alignment with logging
+            query_aligned = self.dim_manager.align_embeddings(query_embedding_raw, "query").view(1, -1)
+            logger.debug(f"Aligned query shape: {query_aligned.shape}")
+
+            rules_aligned = self.dim_manager.align_embeddings(self.rule_embeddings.clone().detach(), "rule")
+            logger.debug(f"Aligned rule embeddings shape: {rules_aligned.shape}")
+
+            if query_aligned.shape[1] != rules_aligned.shape[1]:
+                raise ValueError(
+                    f"Dimension mismatch: query embedding dim {query_aligned.shape[1]} != rule embedding dim {rules_aligned.shape[1]}"
+                )
+
+            # Direct matching using cosine similarity
+            similarities = util.cos_sim(query_aligned, rules_aligned.squeeze(1)).flatten()
+            matching_indices = (similarities >= self.match_threshold).nonzero(as_tuple=False).flatten().tolist()
+
+            if matching_indices:
+                responses = []
+                for idx in matching_indices:
+                    rule = self.rules.get(self.rule_ids[idx], {})
+                    if "response" in rule:
+                        responses.append(rule["response"])
+                    else:
+                        logger.warning(f"Rule {self.rule_ids[idx]} missing 'response' key.")
+                if responses:
+                    logger.info(f"Found {len(responses)} symbolic responses via direct matching.")
+                    return responses
+            else:
+                logger.info("No symbolic match found via direct similarity.")
+
+            # Multi-hop fallback: graph traversal
+            multi_hop_paths = self._some_graph_traversal(query_aligned)
+            all_hop_embeddings = []
+            for rule_id in multi_hop_paths:
+                rule = self.rules.get(rule_id, {})
+                if "embedding" in rule:
+                    hop_emb = rule["embedding"]
+                    all_hop_embeddings.append(hop_emb.unsqueeze(0))
+                else:
+                    logger.warning(f"Rule {rule_id} missing 'embedding' key in multi-hop traversal.")
+
+            if all_hop_embeddings:
+                multi_hop_emb = torch.cat(all_hop_embeddings, dim=0).unsqueeze(0)
+            else:
+                multi_hop_emb = query_aligned.unsqueeze(0)
+
+            responses = self.traverse_graph_from_multi_hop(multi_hop_emb)
+            chain_info = {'steps': responses, 'reasoning_path': responses}
+            self.reasoning_metrics['chains'].append(chain_info)
+
+            self._update_reasoning_metrics(responses)
+
+            if not responses:
+                logger.info("No symbolic match found in multi-hop traversal.")
+                return {"response": ["No symbolic match found."]}
+            logger.info(f"Found {len(responses)} symbolic responses via multi-hop traversal.")
+            return {"response": responses}
+
+        except Exception as e:
+            logger.error(f"Error in process_query: {str(e)}")
+            return {"response": [f"Error processing query: {str(e)}"]}
+
+    def _some_graph_traversal(self, query_embedding: torch.Tensor) -> List[str]:
+        """
+        Combined approach for graph traversal.
+        Uses centralized alignment to log and fix dimensions before applying matrix multiplication.
+        """
+        if not self.graph.nodes or self.rule_embeddings is None:
+            return []
+
+        try:
+            self.logger.debug(f"Initial query shape: {query_embedding.shape}")
+            self.logger.debug(f"Initial rule embeddings shape: {self.rule_embeddings.shape}")
+
+            query_aligned = self.dim_manager.align_embeddings(query_embedding.clone(), "query")
+            rules_aligned = self.dim_manager.align_embeddings(self.rule_embeddings.clone().detach(), "rule")
+            self.logger.debug(f"Aligned query shape: {query_aligned.shape}")
+            self.logger.debug(f"Aligned rule embeddings shape: {rules_aligned.shape}")
+
+            self.logger.debug(f"Using matrix multiplication with shapes: {query_aligned.shape} x {rules_aligned.shape}")
+            similarities = torch.matmul(query_aligned, rules_aligned.transpose(0, 1)).squeeze()
+            self.logger.debug(f"Matrix multiplication successful, similarity shape: {similarities.shape}")
+
+        except RuntimeError as e:
+            self.logger.warning(f"Matrix multiplication failed: {e}. Falling back to element-wise calculation.")
+            similarities = torch.zeros(len(self.rule_ids), device=self.device)
+            for idx, rule_id in enumerate(self.rule_ids):
+                try:
+                    rule = self.rules.get(rule_id, {})
+                    if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
+                        rule_emb = rule['embedding'].to(self.device)
+                        q_flat = query_aligned.view(-1)
+                        r_flat = rule_emb.view(-1)
+                        if q_flat.shape[0] != r_flat.shape[0]:
+                            self.logger.warning(
+                                f"Dimension mismatch in fallback for rule {rule_id}. Aligning manually.")
+                            q_flat = self.dim_manager.align_embeddings(q_flat.unsqueeze(0), "query").view(-1)
+                            r_flat = self.dim_manager.align_embeddings(r_flat.unsqueeze(0), "rule").view(-1)
+                        dot_product = torch.dot(q_flat, r_flat)
+                        norm_q = torch.norm(q_flat)
+                        norm_r = torch.norm(r_flat)
+                        sim = dot_product / (norm_q * norm_r)
+                        similarities[idx] = sim
+                except Exception as inner_e:
+                    self.logger.warning(f"Error calculating similarity for rule {rule_id}: {inner_e}")
+                    similarities[idx] = 0.0
+
+        if similarities.numel() == 0:
+            return []
+
+        # Breadth-first search from best matching rule
+        start_idx = torch.argmax(similarities).item()
+        start_node = self.rule_ids[start_idx]
+        bfs_tree = nx.bfs_tree(self.graph, source=start_node, depth_limit=self.max_hops)
+        return list(bfs_tree.nodes())
+
+    def traverse_graph_from_multi_hop(self, multi_hop_emb: torch.Tensor) -> List[str]:
+        responses = []
+        hop_count = multi_hop_emb.size(1)
+        for i in range(hop_count):
+            if i < len(self.rule_ids):
+                rule_id = self.rule_ids[i]
+                rule = self.rules.get(rule_id, {})
+                responses.append(rule.get('response', ''))
+        return responses
+
+    def _update_reasoning_metrics(self, responses: List[str]):
+        chain_length = len(responses) if responses else 1
+        self.reasoning_metrics['path_lengths'].append(chain_length)
+        confidences = [self._calculate_response_confidence(response) for response in responses]
+        self.reasoning_metrics['match_confidences'].extend(confidences)
+        for response in responses:
+            rules_used = self._identify_rules_used(response)
+            for rule_id in rules_used:
+                self.reasoning_metrics.setdefault('rule_utilization', defaultdict(int))[rule_id] += 1
+
+    def _calculate_response_confidence(self, response: str) -> float:
+        confidence_factors = []
+        length_score = min(len(response.split()) / 50, 1.0)
+        confidence_factors.append(length_score)
+        doc = self.nlp(response)
+        structure_score = len([ent for ent in doc.ents]) / max(1, len(response.split()))
+        confidence_factors.append(structure_score)
+        return float(np.mean(confidence_factors))
+
+    def _identify_rules_used(self, response: str) -> Set[str]:
+        used_rules = set()
+        response_embedding = self.embedder.encode(response, convert_to_tensor=True).to(self.device)
+        for rule_id, rule in self.rules.items():
+            if 'embedding' in rule and isinstance(rule['embedding'], torch.Tensor):
+                rule_embedding = rule['embedding'].to(self.device)
+                similarity = util.cos_sim(response_embedding, rule_embedding).item()
+                if similarity > self.match_threshold:
+                    used_rules.add(rule_id)
+        return used_rules
+
+    def _log_memory_usage(self, stage: str):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.debug(f"Memory usage at {stage}: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
+
+    def _ensure_device(self, tensor: torch.Tensor, target_device: Optional[torch.device] = None) -> torch.Tensor:
+        device = target_device or self.device
+        moved_tensor, _ = DeviceManager.ensure_same_device(tensor, tensor, device=device)
+        return moved_tensor

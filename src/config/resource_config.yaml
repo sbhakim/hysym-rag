@@ -1,3 +1,6 @@
+# src/config/resource_config.yaml
+
+
 resource_thresholds:
   cpu:
     base_threshold: 0.85    # Increased from 0.7
