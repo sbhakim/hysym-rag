@@ -22,11 +22,11 @@ from src.utils.metrics_collector import MetricsCollector
 from src.utils.device_manager import DeviceManager
 from src.ablation_study import run_ablation_study
 from src.utils.progress import tqdm, ProgressManager
+from src.utils.output_capture import capture_output  # Import the capture_output context manager
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import os
-# os.environ['HYSYM_MEMORY_TRACKING'] = '1'  # Enable memory tracking for debugging
 import json
 import torch
 import warnings
@@ -35,13 +35,12 @@ from collections import defaultdict
 import torch.nn as nn
 import logging
 import urllib3
+import sys  # Import sys
+import argparse
+
+
 urllib3.disable_warnings()
 
-# Set up basic logging for all components
-logging.basicConfig(
-    level=logging.INFO,  # Set log level to DEBUG to capture dimension alignment logs
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 
 # Suppress specific spaCy warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
@@ -86,8 +85,9 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
             break
     return dataset
 
+def run_hysym_system(samples=200):
+    """Main execution function for the HySym-RAG system."""
 
-if __name__ == "__main__":
     print("\n=== Initializing HySym-RAG System ===")
 
     ProgressManager.SHOW_PROGRESS = False  # Globally disable progress bars
@@ -186,7 +186,7 @@ if __name__ == "__main__":
 
     use_hotpotqa = True
     hotpotqa_path = "data/hotpot_dev_distractor_v1.json"
-    max_hotpot_samples = 4
+    max_hotpot_samples = samples  # Use function parameter for samples
 
     if use_hotpotqa and os.path.exists(hotpotqa_path):
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=max_hotpot_samples)
@@ -256,121 +256,118 @@ if __name__ == "__main__":
 
     print("\n=== Testing System with Queries ===")
     for q_info in test_queries:
-        query = q_info["query"]
-        the_answer = q_info.get("answer", None)
-        forced_path = q_info.get("forced_path", None)
-        data_type = q_info.get("type", "ground_truth_available")
-        supporting_facts = q_info.get("supporting_facts", None)
+      query = q_info["query"]
+      the_answer = q_info.get("answer", None)
+      forced_path = q_info.get("forced_path", None)
+      data_type = q_info.get("type", "ground_truth_available")
+      supporting_facts = q_info.get("supporting_facts", None)
 
-        print(f"\nProcessing Query: {query}")
-        print(f"Query Type: {data_type}")
-        if forced_path:
-            print(f"Forced Path: {forced_path}")
-        print("-" * 50)
-        try:
-            initial_time = time.time()
-            complexity = expander.get_query_complexity(query)
-            print(f"Query Complexity Score: {complexity:.4f}")
+      print(f"\nProcessing Query: {query}")
+      print(f"Query Type: {data_type}")
+      if forced_path:
+          print(f"Forced Path: {forced_path}")
+      print("-" * 50)
+      try:
+          initial_time = time.time()
+          complexity = expander.get_query_complexity(query)
+          print(f"Query Complexity Score: {complexity:.4f}")
 
-            initial_metrics = resource_manager.check_resources()
-            local_context = q_info.get("context", context)
+          initial_metrics = resource_manager.check_resources()
+          local_context = q_info.get("context", context)
 
-            final_answer = system_manager.process_query_with_fallback(
-                query, local_context, forced_path=forced_path, query_complexity=complexity
-            )
-            final_metrics = resource_manager.check_resources()
-            resource_delta = {
-                key: final_metrics[key] - initial_metrics[key]
-                for key in final_metrics
-            }
+          final_answer = system_manager.process_query_with_fallback(
+              query, local_context, forced_path=forced_path, query_complexity=complexity
+          )
+          final_metrics = resource_manager.check_resources()
+          resource_delta = {
+              key: final_metrics[key] - initial_metrics[key]
+              for key in final_metrics
+          }
 
-            prediction_val = final_answer.get('result', '')
-            if isinstance(prediction_val, tuple):
-                prediction_val = prediction_val[0]
+          prediction_val = final_answer.get('result', '')
+          if isinstance(prediction_val, tuple):
+              prediction_val = prediction_val[0]
 
-            # Instead of symbolic.extract_reasoning_pattern(...), we call the standalone function
-            # from networkx_symbolic_reasoning_metrics, if we want a 'pattern_type' in our metrics:
-            if final_answer.get('reasoning_path') is not None:
-                pattern_dict = extract_reasoning_pattern(
-                    query,
-                    final_answer.get('reasoning_path', []),
-                    symbolic.rules
-                )
-                pattern_type_val = pattern_dict.get('pattern_type', 'unknown')
-            else:
-                pattern_type_val = 'unknown'
+          if final_answer.get('reasoning_path') is not None:
+              pattern_dict = extract_reasoning_pattern(
+                  query,
+                  final_answer.get('reasoning_path', []),
+                  symbolic.rules
+              )
+              pattern_type_val = pattern_dict.get('pattern_type', 'unknown')
+          else:
+              pattern_type_val = 'unknown'
 
-            metrics_collector.collect_query_metrics(
-                query=query,
-                prediction=prediction_val,
-                ground_truth=the_answer,
-                reasoning_path=pattern_type_val,  # pass the pattern_type
-                processing_time=time.time() - initial_time,
-                resource_usage=resource_delta,
-                complexity_score=complexity
-            )
+          metrics_collector.collect_query_metrics(
+              query=query,
+              prediction=prediction_val,
+              ground_truth=the_answer,
+              reasoning_path=pattern_type_val,  # pass the pattern_type
+              processing_time=time.time() - initial_time,
+              resource_usage=resource_delta,
+              complexity_score=complexity
+          )
 
-            if isinstance(final_answer, dict):
-                metrics_collector.component_metrics['symbolic']['execution_time'].append(
-                    final_answer.get('symbolic_time', 0.0)
-                )
-                metrics_collector.component_metrics['neural']['execution_time'].append(
-                    final_answer.get('neural_time', 0.0)
-                )
+          if isinstance(final_answer, dict):
+              metrics_collector.component_metrics['symbolic']['execution_time'].append(
+                  final_answer.get('symbolic_time', 0.0)
+              )
+              metrics_collector.component_metrics['neural']['execution_time'].append(
+                  final_answer.get('neural_time', 0.0)
+              )
 
-            query_logger.log_query(
-                query=query,
-                result=final_answer,
-                source="hybrid",
-                complexity=complexity,
-                resource_usage=resource_delta
-            )
+          query_logger.log_query(
+              query=query,
+              result=final_answer,
+              source="hybrid",
+              complexity=complexity,
+              resource_usage=resource_delta
+          )
 
-            print("\nProcessing Results:")
-            print("-" * 20)
-            print(final_answer)
-            print("\nResource Usage:")
-            print(f"CPU Delta: {resource_delta['cpu'] * 100:.1f}%")
-            print(f"Memory Delta: {resource_delta['memory'] * 100:.1f}%")
-            print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
-            print("-" * 20)
+          print("\nProcessing Results:")
+          print("-" * 20)
+          print(final_answer)
+          print("\nResource Usage:")
+          print(f"CPU Delta: {resource_delta['cpu'] * 100:.1f}%")
+          print(f"Memory Delta: {resource_delta['memory'] * 100:.1f}%")
+          print(f"GPU Delta: {resource_delta['gpu'] * 100:.1f}%")
+          print("-" * 20)
 
-            if data_type == "ground_truth_available" and the_answer is not None:
-                # Similarly, if we want a "reasoning_chain" from that path:
-                if final_answer.get('reasoning_path') is not None:
-                    chain_dict = extract_reasoning_pattern(
-                        query,
-                        final_answer.get('reasoning_path', []),
-                        symbolic.rules
-                    )
-                else:
-                    chain_dict = {}  # fallback if no path
+          if data_type == "ground_truth_available" and the_answer is not None:
+              if final_answer.get('reasoning_path') is not None:
+                  chain_dict = extract_reasoning_pattern(
+                      query,
+                      final_answer.get('reasoning_path', []),
+                      symbolic.rules
+                  )
+              else:
+                  chain_dict = {}  # fallback if no path
 
-                eval_pred_text = final_answer.get('result', '')
-                if isinstance(eval_pred_text, tuple):
-                    eval_pred_text = eval_pred_text[0]
+              eval_pred_text = final_answer.get('result', '')
+              if isinstance(eval_pred_text, tuple):
+                  eval_pred_text = eval_pred_text[0]
 
-                eval_metrics = evaluator.evaluate(
-                    predictions={query: eval_pred_text},
-                    ground_truths={query: the_answer},
-                    supporting_facts={query: supporting_facts},
-                    reasoning_chain=chain_dict
-                )
-                print("\nEvaluation Metrics:")
-                print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
-                print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}")
-                print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}")
-                print(f"F1 Score: {eval_metrics['average_f1']:.2f}")
-                if 'reasoning_analysis' in eval_metrics:
-                    print("\nReasoning Analysis:")
-                    print(f"Pattern Type: {eval_metrics['reasoning_analysis'].get('pattern_type', 'unknown')}")
-                    print(f"Chain Length: {eval_metrics['reasoning_analysis'].get('chain_length', 0)}")
-                    print(f"Pattern Confidence: {eval_metrics['reasoning_analysis'].get('pattern_confidence', 0.0):.2f}")
+              eval_metrics = evaluator.evaluate(
+                  predictions={query: eval_pred_text},
+                  ground_truths={query: the_answer},
+                  supporting_facts={query: supporting_facts},
+                  reasoning_chain=chain_dict
+              )
+              print("\nEvaluation Metrics:")
+              print(f"Similarity Score: {eval_metrics['average_semantic_similarity']:.2f}")
+              print(f"ROUGE-L Score: {eval_metrics['average_rougeL']:.2f}")
+              print(f"BLEU Score: {eval_metrics['average_bleu']:.2f}")
+              print(f"F1 Score: {eval_metrics['average_f1']:.2f}")
+              if 'reasoning_analysis' in eval_metrics:
+                  print("\nReasoning Analysis:")
+                  print(f"Pattern Type: {eval_metrics['reasoning_analysis'].get('pattern_type', 'unknown')}")
+                  print(f"Chain Length: {eval_metrics['reasoning_analysis'].get('chain_length', 0)}")
+                  print(f"Pattern Confidence: {eval_metrics['reasoning_analysis'].get('pattern_confidence', 0.0):.2f}")
 
-        except KeyError as e:
-            print(f"Error: Missing ground truth for query evaluation - {str(e)}")
-        except Exception as e:
-            print(f"Error processing query: {str(e)}")
+      except KeyError as e:
+          print(f"Error: Missing ground truth for query evaluation - {str(e)}")
+      except Exception as e:
+          print(f"Error processing query: {str(e)}")
 
     # Pass the dimensionality_manager to the ablation study
     ablation_results = run_ablation_study(
@@ -495,3 +492,26 @@ if __name__ == "__main__":
     print("\n=== End of Run ===")
     print("\n=== Academic Evaluation Results ===")
     print(json.dumps(academic_report, indent=2))
+    return academic_report
+
+
+if __name__ == "__main__":
+    import argparse
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run HySym-RAG system with output capture')
+    parser.add_argument('--log-dir', default='logs', help='Directory to save log files')
+    parser.add_argument('--no-output-capture', action='store_true', help='Disable output capture to file')
+    parser.add_argument('--samples', type=int, default=4, help='Number of samples to process')  # Add samples argument
+
+    args = parser.parse_args()
+
+    # Execution with conditional output capture
+    if args.no_output_capture:
+        # Execute without output capture
+        run_hysym_system(samples = args.samples) #Pass samples to run_hysym_system
+    else:
+        # Execute with output capture
+        with capture_output(output_dir=args.log_dir) as output_path:
+            print(f"Output being saved to: {output_path}")
+            run_hysym_system(samples = args.samples) #Pass samples to run_hysym_system
