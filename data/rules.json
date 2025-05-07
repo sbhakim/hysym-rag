@@ -49,5 +49,36 @@
         "confidence": 0.9,
         "source": "default",
         "type": "basic"
+    },
+    {
+        "keywords": ["field goal", "count", "how many"],
+        "response": "Count occurrences of field goal events",
+        "confidence": 0.8,
+        "type": "count"
+    },
+    {
+        "keywords": ["longest", "yards", "field goal"],
+        "response": "Extract maximum yard value for field goal",
+        "confidence": 0.7,
+        "type": "extreme_value"
+    },
+    {
+        "keywords": ["who", "scored", "touchdown"],
+        "response": "Extract player name for touchdown event",
+        "confidence": 0.75,
+        "type": "entity_span"
+    },
+    {
+        "keywords": ["team", "won", "game"],
+        "response": "Extract winning team name",
+        "confidence": 0.75,
+        "type": "entity_span"
+    },
+    {
+        "keywords": ["difference", "yards", "field goal"],
+        "response": "Calculate difference between yard values",
+        "confidence": 0.7,
+        "type": "difference"
     }
+
 ]

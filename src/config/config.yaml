@@ -2,8 +2,19 @@
 
 # Basic System Configuration
 model_name: "meta-llama/Llama-3.2-3B"
-data_dir: "data/"
-rules_file: "rules.json"
+data_dir: "data/" # General data directory
+
+# ---- MODIFICATION START ----
+# Dataset Specific Paths
+hotpotqa_dataset_path: "data/hotpot_dev_distractor_v1.json"
+drop_dataset_path: "data/drop_dataset_dev.json"
+
+# Rule Files (Consider making these dataset-specific)
+# rules_file: "rules.json" # This can be a generic fallback or removed if using specific ones
+hotpotqa_rules_file: "data/rules_hotpotqa.json" # Example, if you rename your current rules.json
+drop_rules_file: "data/rules_drop.json"         # You'll need to create this file for DROP rules
+# ---- MODIFICATION END ----
+
 knowledge_base: "small_knowledge_base.txt"
 
 # Dimension Management and Embedding Configuration

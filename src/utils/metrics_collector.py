@@ -11,18 +11,21 @@ from pathlib import Path
 import torch
 import pandas as pd
 from scipy import stats
-
+import re
+import string
 
 class MetricsCollector:
     """
     Comprehensive metrics collection and analysis system for HySym-RAG.
-    Designed specifically for academic evaluation and research paper results.
+    Designed for academic evaluation and research paper results.
+    Updated to fix query count discrepancy and handle DROP's structured answers.
     """
 
     def __init__(self,
                  metrics_dir: str = "metrics",
                  experiment_name: Optional[str] = None,
-                 save_frequency: int = 100):
+                 save_frequency: int = 100,
+                 dataset_type: Optional[str] = None):
         """
         Initialize metrics collector with academic focus.
 
@@ -30,12 +33,14 @@ class MetricsCollector:
             metrics_dir: Directory for storing metrics data.
             experiment_name: Name of current experiment run.
             save_frequency: Frequency of metrics persistence.
+            dataset_type: Type of dataset ('hotpotqa' or 'drop') for evaluation logic.
         """
         self.metrics_dir = Path(metrics_dir)
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
 
         self.experiment_name = experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_frequency = save_frequency
+        self.dataset_type = dataset_type.lower() if dataset_type else None
 
         # Initialize logging
         self.logger = logging.getLogger("MetricsCollector")
@@ -43,29 +48,23 @@ class MetricsCollector:
 
         # Initialize comprehensive metrics storage
         self.metrics = {
-            # Query-specific metrics (stored as a dictionary keyed by query count)
             'query_metrics': defaultdict(dict),
-            # Reasoning path analysis
             'reasoning_paths': defaultdict(list),
-            # Resource utilization tracking
             'resource_usage': defaultdict(list),
-            # Performance metrics
             'performance': defaultdict(list),
-            # Timing analysis
             'timing': defaultdict(list),
-            # Error tracking
             'errors': defaultdict(list)
         }
 
-        # Statistical aggregates (for various metrics)
+        # Statistical aggregates
         self.statistical_data = defaultdict(list)
 
         # Initialize counters
         self.query_count = 0
+        self.query_metrics = set()  # Track unique query IDs
         self.start_time = datetime.now()
 
-        # --- Enhanced Academic Metrics Tracking ---
-        # Detailed reasoning metrics: chain length, confidence scores, inference depth, etc.
+        # Reasoning metrics
         self.reasoning_metrics = {
             'chain_length': [],
             'confidence_scores': [],
@@ -73,57 +72,98 @@ class MetricsCollector:
             'step_accuracy': [],
             'inference_depth': [],
             'fact_coverage': [],
-            'chains': [],  # To store complete reasoning chain info
+            'chains': [],
             'path_lengths': [],
             'chain_lengths': [],
             'match_confidences': [],
             'hop_distributions': defaultdict(int),
-            'pattern_types': defaultdict(int),  # ADD THIS INITIALIZATION FOR pattern_types
-            'rule_utilization': defaultdict(int)  # Ensure rule_utilization is also initialized if used
+            'pattern_types': defaultdict(int),
+            'rule_utilization': defaultdict(int)
         }
-        # Component performance tracking (per component: execution_time, success_rate, error_rate, resource_usage)
+
+        # Component performance tracking
         self.component_metrics = defaultdict(lambda: {
             'execution_time': [],
             'success_rate': [],
             'error_rate': [],
             'resource_usage': []
         })
-        # Ablation study results; updated to store baseline vs. modified reports
+
+        # Ablation study results
         self.ablation_results = defaultdict(dict)
+
         # Path complexity tracking
         self.path_complexities = defaultdict(list)
 
+        # Cache for performance
+        self.cache = {}
+        self.cache_ttl = 3600  # 1 hour
+
     def collect_query_metrics(self,
                               query: str,
-                              prediction: str,
-                              ground_truth: Optional[str],
+                              prediction: Any,
+                              ground_truth: Optional[Any],
                               reasoning_path: str,
                               processing_time: float,
                               resource_usage: Dict[str, float],
-                              complexity_score: float) -> None:
+                              complexity_score: float,
+                              query_id: Optional[str] = None,
+                              confidence: Optional[float] = None,
+                              operation_type: Optional[str] = None) -> None:
         """
         Collect comprehensive metrics for a single query execution.
+        Updated to handle DROP's structured answers and fix query count discrepancy.
 
         Args:
             query: Input query.
-            prediction: System's prediction.
-            ground_truth: Optional ground truth.
+            prediction: System's prediction (str for HotpotQA, dict for DROP).
+            ground_truth: Ground truth (str for HotpotQA, dict for DROP).
             reasoning_path: Path taken (symbolic/hybrid/neural).
             processing_time: Query processing time.
             resource_usage: Resource utilization metrics.
             complexity_score: Query complexity score.
+            query_id: Unique query identifier.
+            confidence: Confidence score of the prediction.
+            operation_type: Operation type for DROP (e.g., 'count', 'extreme_value').
         """
         timestamp = datetime.now()
+        qid = query_id or hash(query)
+
+        # Prevent double-counting
+        if qid not in self.query_metrics:
+            self.query_count += 1
+            self.query_metrics.add(qid)
+            self.logger.debug(f"[QID:{qid}] New query counted. Total queries: {self.query_count}")
+
+        self.logger.debug(f"[QID:{qid}] Collecting metrics: Prediction={prediction}, Path={reasoning_path}")
 
         # Collect basic metrics
         query_metrics = {
+            'query_id': qid,
             'timestamp': timestamp.isoformat(),
             'query_length': len(query),
-            'prediction_length': len(prediction),
             'processing_time': processing_time,
             'complexity_score': complexity_score,
             'reasoning_path': reasoning_path
         }
+
+        # Handle prediction and ground truth based on dataset type
+        if self.dataset_type == 'drop':
+            # DROP: Structured answers
+            query_metrics['prediction_format'] = 'structured'
+            query_metrics['prediction'] = prediction
+            if isinstance(prediction, dict):
+                query_metrics['prediction_length'] = (len(prediction.get('number', '')) +
+                                                     sum(len(s) for s in prediction.get('spans', [])) +
+                                                     sum(len(v) for v in prediction.get('date', {}).values()))
+            else:
+                query_metrics['prediction_length'] = 0
+                self.logger.warning(f"[QID:{qid}] Invalid DROP prediction format: {prediction}")
+        else:
+            # HotpotQA: Text-based answers
+            query_metrics['prediction_format'] = 'text'
+            query_metrics['prediction'] = str(prediction)
+            query_metrics['prediction_length'] = len(str(prediction))
 
         # Resource usage metrics
         query_metrics.update({
@@ -131,13 +171,25 @@ class MetricsCollector:
         })
 
         # Performance metrics if ground truth available
-        if ground_truth:
-            query_metrics.update(self._calculate_performance_metrics(
-                prediction, ground_truth
-            ))
+        if ground_truth is not None:
+            try:
+                query_metrics.update(self._calculate_performance_metrics(prediction, ground_truth))
+            except Exception as e:
+                self.logger.error(f"[QID:{qid}] Error calculating performance metrics: {str(e)}")
+                query_metrics['performance_metrics'] = {'exact_match': 0.0, 'f1': 0.0}
+
+        # Reasoning metrics
+        if confidence is not None:
+            self.reasoning_metrics['confidence_scores'].append(confidence)
+            query_metrics['confidence'] = confidence
+        if operation_type:
+            self.reasoning_metrics['pattern_types'][operation_type] += 1
+            query_metrics['operation_type'] = operation_type
+        self.reasoning_metrics['path_choices'].append(reasoning_path)
+        self.reasoning_metrics['chain_lengths'].append(1 if reasoning_path in ['symbolic', 'hybrid'] else 0)
 
         # Update metrics collections
-        self.metrics['query_metrics'][self.query_count] = query_metrics
+        self.metrics['query_metrics'][qid] = query_metrics
         self.metrics['reasoning_paths'][reasoning_path].append(query_metrics)
 
         # Update resource tracking
@@ -147,18 +199,125 @@ class MetricsCollector:
         # Update timing metrics
         self.metrics['timing']['processing_times'].append(processing_time)
 
-        # Update statistical data for later analysis
+        # Update statistical data
         self.statistical_data['complexity'].append(complexity_score)
         self.statistical_data['processing_time'].append(processing_time)
-
-        # Increment query counter
-        self.query_count += 1
 
         # Save metrics if needed
         if self.query_count % self.save_frequency == 0:
             self._save_metrics()
 
+    def _calculate_performance_metrics(self, prediction: Any, ground_truth: Any) -> Dict[str, float]:
+        """
+        Calculate performance metrics based on dataset type.
+        Handles DROP's structured answers and HotpotQA's text-based answers.
+        """
+        metrics = {'exact_match': 0.0, 'f1': 0.0}
+        try:
+            if self.dataset_type == 'drop':
+                # DROP: Structured comparison
+                if isinstance(prediction, dict) and isinstance(ground_truth, dict):
+                    if ground_truth.get('number'):
+                        metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'number'))
+                        metrics['f1'] = metrics['exact_match']
+                    elif ground_truth.get('spans'):
+                        metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'spans'))
+                        metrics['f1'] = self._compute_f1_spans(prediction.get('spans', []), ground_truth.get('spans', []))
+                    elif ground_truth.get('date') and any(ground_truth['date'].values()):
+                        metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'date'))
+                        metrics['f1'] = metrics['exact_match']
+                    metrics['success'] = metrics['exact_match'] == 1.0
+                else:
+                    self.logger.warning("Invalid DROP prediction or ground truth format")
+            else:
+                # HotpotQA: Text-based comparison
+                pred_text = str(prediction)
+                gt_text = str(ground_truth)
+                metrics['exact_match'] = float(pred_text == gt_text)
+                metrics['char_error_rate'] = self._calculate_char_error_rate(pred_text, gt_text)
+                metrics['prediction_length_ratio'] = (float(len(pred_text) / len(gt_text))
+                                                     if len(gt_text) != 0 else 0.0)
+                metrics['success'] = metrics['exact_match'] == 1.0
+        except Exception as e:
+            self.logger.error(f"Error in performance metrics calculation: {str(e)}")
+        return metrics
+
+    def _are_drop_values_equivalent(self, obj1: Dict[str, Any], obj2: Dict[str, Any], value_type: str) -> bool:
+        """
+        Compare DROP answer values for equivalence.
+        Consistent with hybrid_integrator.py.
+        """
+        try:
+            if value_type == "number":
+                n1 = self._normalize_drop_number_for_comparison(obj1.get("number"))
+                n2 = self._normalize_drop_number_for_comparison(obj2.get("number"))
+                if n1 is None or n2 is None:
+                    return False
+                return abs(n1 - n2) < 1e-6
+            elif value_type == "spans":
+                pred_spans = [self._normalize_drop_answer_str(str(s)) for s in obj1.get("spans", []) if str(s).strip()]
+                gt_spans = [self._normalize_drop_answer_str(str(s)) for s in obj2.get("spans", []) if str(s).strip()]
+                return set(pred_spans) == set(gt_spans)
+            elif value_type == "date":
+                pred_date = obj1.get("date", {})
+                gt_date = obj2.get("date", {})
+                return all(str(pred_date.get(k, '')).strip() == str(gt_date.get(k, '')).strip() for k in ['day', 'month', 'year'])
+            return False
+        except Exception as e:
+            self.logger.debug(f"Error comparing DROP values: {str(e)}")
+            return False
+
+    def _normalize_drop_number_for_comparison(self, value_str: Optional[Any]) -> Optional[float]:
+        """
+        Normalize number strings for DROP comparison.
+        """
+        if value_str is None:
+            return None
+        try:
+            s = str(value_str).replace(",", "").strip().lower()
+            words = {
+                "zero": 0.0, "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
+                "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0,
+                "ten": 10.0
+            }
+            return words.get(s, float(s))
+        except Exception:
+            return None
+
+    def _normalize_drop_answer_str(self, text: str) -> str:
+        """
+        Normalize DROP answer strings for span comparison.
+        """
+        text = str(text).lower()
+        text = text.translate(str.maketrans('', '', string.punctuation))
+        text = re.sub(r'\b(a|an|the)\b', '', text)
+        text = ' '.join(text.split())
+        return text
+
+    def _compute_f1_spans(self, pred_spans: List[str], gold_spans: List[str]) -> float:
+        """
+        Compute F1 for DROP spans based on set overlap.
+        """
+        try:
+            pred_set = set(self._normalize_drop_answer_str(str(s)) for s in pred_spans if str(s).strip())
+            gt_set = set(self._normalize_drop_answer_str(str(s)) for s in gold_spans if str(s).strip())
+            if not pred_set and not gt_set:
+                return 1.0
+            if not pred_set or not gt_set:
+                return 0.0
+            precision = len(pred_set.intersection(gt_set)) / len(pred_set)
+            recall = len(pred_set.intersection(gt_set)) / len(gt_set)
+            if precision + recall == 0:
+                return 0.0
+            return 2 * (precision * recall) / (precision + recall)
+        except Exception as e:
+            self.logger.error(f"Error computing F1 for spans: {str(e)}")
+            return 0.0
+
     def _calculate_metrics(self, values: List[float]) -> Dict[str, float]:
+        """
+        Calculate statistical metrics for a list of values.
+        """
         if not values:
             return {
                 'mean': 0.0,
@@ -176,7 +335,7 @@ class MetricsCollector:
     def generate_academic_report(self) -> Dict[str, Any]:
         """
         Generate comprehensive metrics report for academic paper.
-        Includes statistical analysis and confidence intervals.
+        Updated to reflect accurate query counts and DROP metrics.
         """
         try:
             overall_stats = self._calculate_overall_statistics()
@@ -185,7 +344,7 @@ class MetricsCollector:
             statistical_tests = self._run_statistical_tests()
             component_performance = self._analyze_component_performance()
             adaptability_metrics = self._analyze_system_adaptability()
-            ablation_analysis = self._compile_ablation_results()  # Incorporate ablation results
+            ablation_analysis = self._compile_ablation_results()
             confidence_intervals = self._calculate_confidence_intervals()
 
             report = {
@@ -203,6 +362,7 @@ class MetricsCollector:
                 'statistical_analysis': statistical_tests,
                 'confidence_intervals': confidence_intervals
             }
+            self.logger.info(f"Generated academic report with {self.query_count} queries")
             return report
         except Exception as e:
             self.logger.error(f"Error generating academic report: {str(e)}")
@@ -211,6 +371,7 @@ class MetricsCollector:
     def _calculate_overall_statistics(self) -> Dict[str, Any]:
         """
         Calculate comprehensive statistics for all collected metrics.
+        Updated to handle DROP's structured metrics.
         """
         stats = {}
         processing_times = self.metrics['timing']['processing_times']
@@ -256,11 +417,9 @@ class MetricsCollector:
                 'mean': 0.0, 'std': 0.0,
                 'distribution': {'histogram': [], 'bin_edges': []}
             }
-        # --- New: Reasoning Chain Metrics ---
-        chain_lengths = self.reasoning_metrics.get('chain_length', [])
-        if not chain_lengths and self.reasoning_metrics.get('chains'):
-            chain_lengths = [chain.get('chain_length', len(chain.get('steps', [])))
-                             for chain in self.reasoning_metrics['chains']]
+
+        # Reasoning chain metrics
+        chain_lengths = self.reasoning_metrics.get('chain_lengths', [])
         if chain_lengths:
             stats['reasoning_chains'] = {
                 'mean_length': float(np.mean(chain_lengths)),
@@ -271,6 +430,7 @@ class MetricsCollector:
             stats['reasoning_chains'] = {
                 'mean_length': 0.0, 'max_length': 0, 'std_length': 0.0
             }
+
         return stats
 
     def _calculate_success_rate(self, path_metrics: List[Dict[str, Any]]) -> float:
@@ -284,11 +444,13 @@ class MetricsCollector:
         return (successes / len(path_metrics)) * 100 if path_metrics else 0.0
 
     def _analyze_reasoning_patterns(self) -> Dict[str, Any]:
-        """Analyze reasoning chain patterns and quality."""
+        """
+        Analyze reasoning chain patterns and quality.
+        """
         return {
             'chain_characteristics': {
-                'avg_length': float(np.mean(self.reasoning_metrics['chain_length']))
-                if self.reasoning_metrics['chain_length'] else 0.0,
+                'avg_length': float(np.mean(self.reasoning_metrics['chain_lengths']))
+                if self.reasoning_metrics['chain_lengths'] else 0.0,
                 'avg_confidence': float(np.mean(self.reasoning_metrics['confidence_scores']))
                 if self.reasoning_metrics['confidence_scores'] else 0.0,
                 'avg_inference_depth': float(np.mean(self.reasoning_metrics['inference_depth']))
@@ -310,7 +472,9 @@ class MetricsCollector:
         }
 
     def _analyze_path_distribution(self) -> Dict[str, float]:
-        """Analyze distribution of reasoning paths."""
+        """
+        Analyze distribution of reasoning paths.
+        """
         total_paths = len(self.reasoning_metrics['path_choices'])
         if total_paths == 0:
             return {}
@@ -320,7 +484,9 @@ class MetricsCollector:
         return {path: count / total_paths for path, count in path_counts.items()}
 
     def _analyze_accuracy_distribution(self) -> Dict[str, Any]:
-        """Analyze distribution of step accuracy values."""
+        """
+        Analyze distribution of step accuracy values.
+        """
         if not self.reasoning_metrics['step_accuracy']:
             return {}
         hist, bin_edges = np.histogram(self.reasoning_metrics['step_accuracy'], bins=10)
@@ -330,7 +496,9 @@ class MetricsCollector:
         }
 
     def _analyze_coverage_by_complexity(self) -> Dict[str, float]:
-        """Analyze fact coverage relative to query complexity."""
+        """
+        Analyze fact coverage relative to query complexity.
+        """
         complexity_bins = ['low', 'medium', 'high']
         coverage_by_complexity = defaultdict(list)
         if ('query_complexity' not in self.path_complexities or
@@ -348,16 +516,10 @@ class MetricsCollector:
             for bin_name, covers in coverage_by_complexity.items()
         }
 
-    def _analyze_performance_metrics(self) -> Dict[str, Any]:
-        """Analyze system performance metrics."""
-        return {
-            'component_performance': self._analyze_component_performance(),
-            'resource_efficiency': self._analyze_resource_efficiency(),
-            'execution_statistics': self._analyze_execution_statistics()
-        }
-
     def _analyze_component_performance(self) -> Dict[str, Dict[str, float]]:
-        """Analyze individual component performance."""
+        """
+        Analyze individual component performance.
+        """
         component_analysis = {}
         for component, metrics in self.component_metrics.items():
             component_analysis[component] = {
@@ -373,7 +535,9 @@ class MetricsCollector:
         return component_analysis
 
     def _analyze_resource_efficiency(self) -> Dict[str, Any]:
-        """Analyze resource utilization and efficiency metrics."""
+        """
+        Analyze resource utilization and efficiency metrics.
+        """
         efficiency_metrics = {}
         for resource, values in self.metrics['resource_usage'].items():
             if values:
@@ -394,16 +558,26 @@ class MetricsCollector:
         efficiency_metrics['trends'] = self._calculate_efficiency_trends()
         return efficiency_metrics
 
-    def _analyze_execution_statistics(self) -> Dict[str, Any]:
-        """Analyze overall execution statistics."""
-        proc_times = self.metrics['timing']['processing_times']
-        return {
-            'total_queries': self.query_count,
-            'average_processing_time': float(np.mean(proc_times)) if proc_times else 0.0
-        }
+    def _calculate_efficiency_trends(self) -> Dict[str, float]:
+        """
+        Calculate trends in resource usage.
+        """
+        trends = {"cpu": 0.0, "memory": 0.0, "gpu": 0.0}
+        query_metrics_list = list(self.metrics['query_metrics'].values())
+        if len(query_metrics_list) < 2:
+            return trends
+        first = query_metrics_list[0]
+        last = query_metrics_list[-1]
+        for resource in trends.keys():
+            key = f"resource_{resource}"
+            if key in first and key in last:
+                trends[resource] = float(last[key] - first[key])
+        return trends
 
     def _analyze_system_adaptability(self) -> Dict[str, Any]:
-        """Analyze system's adaptive behavior."""
+        """
+        Analyze system's adaptive behavior.
+        """
         return {
             'path_selection_accuracy': self._analyze_path_selection(),
             'complexity_adaptation': self._analyze_complexity_adaptation(),
@@ -411,21 +585,26 @@ class MetricsCollector:
         }
 
     def _analyze_path_selection(self) -> float:
-        """Placeholder: Analyze accuracy of path selection decisions."""
+        """
+        Placeholder: Analyze accuracy of path selection decisions.
+        """
         return 0.8
 
     def _analyze_complexity_adaptation(self) -> float:
-        """Placeholder: Analyze system adaptation to varying query complexities."""
+        """
+        Placeholder: Analyze system adaptation to varying query complexities.
+        """
         return 0.75
 
     def _analyze_resource_adaptation(self) -> float:
-        """Placeholder: Analyze system adaptation to resource availability."""
+        """
+        Placeholder: Analyze system adaptation to resource availability.
+        """
         return 0.85
 
     def _compile_ablation_results(self) -> Dict[str, Any]:
         """
         Compile and analyze ablation study results.
-        Now compares 'baseline_report' vs. 'modified_report' fields in self.ablation_results.
         """
         ablation_analysis = {}
         for component, results in self.ablation_results.items():
@@ -453,90 +632,96 @@ class MetricsCollector:
         return ablation_analysis
 
     def _calculate_significance(self, baseline_vals: List[float], ablated_vals: List[float]) -> Dict[str, float]:
+        """
+        Calculate statistical significance using t-test.
+        """
         if len(baseline_vals) < 2 or len(ablated_vals) < 2:
             return {}
-        t_stat, p_value = stats.ttest_rel(baseline_vals, ablated_vals)
-        return {'t_statistic': float(t_stat), 'p_value': float(p_value)}
+        try:
+            t_stat, p_value = stats.ttest_rel(baseline_vals, ablated_vals)
+            return {'t_statistic': float(t_stat), 'p_value': float(p_value)}
+        except Exception as e:
+            self.logger.error(f"Error calculating significance: {str(e)}")
+            return {}
 
     def _run_statistical_tests(self) -> Dict[str, Any]:
+        """
+        Run statistical tests on collected metrics.
+        """
         tests = {}
         for metric, values in self.statistical_data.items():
             if len(values) >= 2:
-                t_stat, p_value = stats.ttest_1samp(values, 0)
-                tests[metric] = {
-                    't_statistic': float(t_stat),
-                    'p_value': float(p_value),
-                    'effect_size': float(np.mean(values) / np.std(values)) if np.std(values) != 0 else 0.0
-                }
+                try:
+                    t_stat, p_value = stats.ttest_1samp(values, 0)
+                    tests[metric] = {
+                        't_statistic': float(t_stat),
+                        'p_value': float(p_value),
+                        'effect_size': float(np.mean(values) / np.std(values)) if np.std(values) != 0 else 0.0
+                    }
+                except Exception as e:
+                    self.logger.error(f"Error running statistical test for {metric}: {str(e)}")
+                    tests[metric] = {'error': str(e)}
         tests['correlations'] = self._calculate_correlations()
         tests['regression_analysis'] = self._perform_regression_analysis()
         return tests
 
     def _calculate_correlations(self) -> Dict[str, float]:
+        """
+        Placeholder: Calculate correlations between metrics.
+        """
         return {"correlation_coefficient": 0.5}
 
     def _perform_regression_analysis(self) -> Dict[str, Any]:
+        """
+        Placeholder: Perform regression analysis on metrics.
+        """
         return {"slope": 0.1, "intercept": 0.0, "r_squared": 0.6}
 
     def _calculate_confidence_intervals(self) -> Dict[str, Dict[str, float]]:
+        """
+        Calculate confidence intervals for metrics.
+        """
         confidence_intervals = {}
         for metric, values in self.statistical_data.items():
             if len(values) >= 2:
-                ci = stats.t.interval(
-                    0.95,
-                    len(values) - 1,
-                    loc=np.mean(values),
-                    scale=stats.sem(values)
-                )
-                confidence_intervals[metric] = {
-                    'lower': float(ci[0]),
-                    'upper': float(ci[1]),
-                    'mean': float(np.mean(values))
-                }
+                try:
+                    ci = stats.t.interval(
+                        0.95,
+                        len(values) - 1,
+                        loc=np.mean(values),
+                        scale=stats.sem(values)
+                    )
+                    confidence_intervals[metric] = {
+                        'lower': float(ci[0]),
+                        'upper': float(ci[1]),
+                        'mean': float(np.mean(values))
+                    }
+                except Exception as e:
+                    self.logger.error(f"Error calculating CI for {metric}: {str(e)}")
+                    confidence_intervals[metric] = {'error': str(e)}
         return confidence_intervals
 
-    def _calculate_efficiency_trends(self) -> Dict[str, float]:
-        trends = {"cpu": 0.0, "memory": 0.0, "gpu": 0.0}
-        query_metrics_list = list(self.metrics['query_metrics'].values())
-        if len(query_metrics_list) < 2:
-            return trends
-        first = query_metrics_list[0]
-        last = query_metrics_list[-1]
-        for resource in trends.keys():
-            key = f"resource_{resource}"
-            if key in first and key in last:
-                trends[resource] = float(last[key] - first[key])
-        return trends
-
-    def _save_metrics(self) -> None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        metrics_file = self.metrics_dir / f"metrics_{self.experiment_name}_{timestamp}.json"
-        try:
-            with open(metrics_file, 'w') as f:
-                json.dump(self.metrics, f, default=str, indent=2)
-            self.logger.info(f"Metrics saved to {metrics_file}")
-        except Exception as e:
-            self.logger.error(f"Error saving metrics: {str(e)}")
-
     def collect_component_metrics(self,
-                                  component: str,
-                                  execution_time: float,
-                                  success: bool = True,
-                                  error_rate: float = 0.0,
-                                  resource_usage: Optional[Dict[str, float]] = None):
+                                 component: str,
+                                 execution_time: float,
+                                 success: bool = True,
+                                 error_rate: float = 0.0,
+                                 resource_usage: Optional[Dict[str, float]] = None):
         """
-        Collect metrics for individual system components (symbolic, neural, etc.)
+        Collect metrics for individual system components (symbolic, neural, etc.).
         """
         self.component_metrics[component]['execution_time'].append(execution_time)
         self.component_metrics[component]['success_rate'].append(1.0 if success else 0.0)
         self.component_metrics[component]['error_rate'].append(error_rate)
 
         if resource_usage:
-            # Calculate average resource usage
             avg_usage = sum(resource_usage.values()) / len(resource_usage) if resource_usage else 0.0
             self.component_metrics[component]['resource_usage'].append(avg_usage)
 
     def get_real_time_metrics(self) -> Dict[str, Any]:
+        """
+        Get real-time metrics snapshot.
+        """
         return {
             'current_query_count': self.query_count,
             'average_processing_time': float(np.mean(self.metrics['timing']['processing_times']))
@@ -551,18 +736,10 @@ class MetricsCollector:
             }
         }
 
-    def _calculate_performance_metrics(self,
-                                       prediction: str,
-                                       ground_truth: str) -> Dict[str, float]:
-        return {
-            'exact_match': float(prediction == ground_truth),
-            'char_error_rate': self._calculate_char_error_rate(prediction, ground_truth),
-            'prediction_length_ratio': float(len(prediction) / len(ground_truth))
-            if len(ground_truth) != 0 else 0.0,
-            'success': prediction == ground_truth
-        }
-
     def _calculate_char_error_rate(self, prediction: str, ground_truth: str) -> float:
+        """
+        Calculate character error rate using Levenshtein distance.
+        """
         def levenshtein(s1, s2):
             if len(s1) < len(s2):
                 return levenshtein(s2, s1)
@@ -579,43 +756,31 @@ class MetricsCollector:
                 previous_row = current_row
             return previous_row[-1]
 
-        distance = levenshtein(prediction, ground_truth)
-        return distance / max(len(ground_truth), 1)
-
-    def get_integration_metrics(self) -> Dict[str, Any]:
-        if not self.integration_metrics['reasoning_steps']:
-            return {
-                'alignment_quality': {'mean': 0.0, 'std': 0.0},
-                'reasoning_depth': {'avg_steps': 0.0, 'max_steps': 0},
-                'fusion_quality': {'mean': 0.0, 'std': 0.0}
-            }
-        return {
-            'alignment_quality': {
-                'mean': float(np.mean(self.integration_metrics['alignment_scores'])),
-                'std': float(np.std(self.integration_metrics['alignment_scores']))
-            },
-            'reasoning_depth': {
-                'avg_steps': float(np.mean(self.integration_metrics['reasoning_steps'])),
-                'max_steps': max(self.integration_metrics['reasoning_steps'])
-            },
-            'fusion_quality': {
-                'mean': float(np.mean(self.integration_metrics['fusion_quality'])),
-                'std': float(np.std(self.integration_metrics['fusion_quality']))
-            }
-        }
-
-    def _get_symbolic_guidance(self, symbolic_result: List[str], hop: Dict[str, Any]) -> List[str]:
-        return symbolic_result
+        distance = levenshtein(str(prediction), str(ground_truth))
+        return distance / max(len(str(ground_truth)), 1)
 
     def _encode_text(self, text: str) -> torch.Tensor:
-        from sentence_transformers import SentenceTransformer
-        embedder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
-        return embedder.encode(text, convert_to_tensor=True).to(self.device)
+        """
+        Encode text using SentenceTransformer for similarity metrics.
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cuda' if torch.cuda.is_available() else 'cpu')
+            return embedder.encode(text, convert_to_tensor=True)
+        except Exception as e:
+            self.logger.error(f"Error encoding text: {str(e)}")
+            return torch.tensor([])
 
     def _generate_cache_key(self, query: str, context: str) -> str:
+        """
+        Generate a cache key for query and context.
+        """
         return f"{hash(query)}_{hash(context)}"
 
-    def _get_cache(self, key: str) -> Optional[Tuple[str, str]]:
+    def _get_cache(self, key: str) -> Optional[Tuple[Any, float]]:
+        """
+        Retrieve cached metrics.
+        """
         if key in self.cache:
             result, timestamp = self.cache[key]
             if time.time() - timestamp < self.cache_ttl:
@@ -623,5 +788,21 @@ class MetricsCollector:
             del self.cache[key]
         return None
 
-    def _set_cache(self, key: str, result: Tuple[str, str]):
+    def _set_cache(self, key: str, result: Tuple[Any, float]):
+        """
+        Store metrics in cache.
+        """
         self.cache[key] = (result, time.time())
+
+    def _save_metrics(self) -> None:
+        """
+        Save metrics to a JSON file.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        metrics_file = self.metrics_dir / f"metrics_{self.experiment_name}_{timestamp}.json"
+        try:
+            with open(metrics_file, 'w') as f:
+                json.dump(self.metrics, f, default=str, indent=2)
+            self.logger.info(f"Metrics saved to {metrics_file}")
+        except Exception as e:
+            self.logger.error(f"Error saving metrics: {str(e)}")
