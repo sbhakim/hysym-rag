@@ -1069,8 +1069,13 @@ class NeuralRetriever:
         self.logger.debug(f"Added support scores to {len(chunks)} chunks.")
         return chunks
 
-    def _get_relevant_chunks(self, question_embedding: Optional[torch.Tensor], chunks: List[Dict], symbolic_guidance: Optional[List[Dict]] = None) -> List[Dict]:
-        """Finds chunks most relevant to the question using similarity and guidance boosts."""
+    def _get_relevant_chunks(self, question_embedding: Optional[torch.Tensor], chunks: List[Dict],
+                             symbolic_guidance: Optional[List[Dict]] = None) -> List[Dict]:
+        """
+        Finds chunks most relevant to the question using similarity and guidance boosts.
+        [Updated May 16, 2025]: Added numerical boost for 'difference' or 'more' queries to prioritize chunks with numbers,
+        increased top_k for numerical queries, and enhanced logging for debugging.
+        """
         if not chunks:
             self.logger.warning("No chunks provided to _get_relevant_chunks.")
             return []
@@ -1082,6 +1087,12 @@ class NeuralRetriever:
         scored_chunks = []
         question_emb = question_embedding.view(1, -1)  # Ensure 2D for similarity calculation
 
+        # [Added May 16, 2025]: Determine if query is numerical (e.g., 'difference', 'more')
+        is_numerical_query = any(keyword in chunks[0].get('text', '').lower() for keyword in ['difference', 'more'])
+        effective_top_k = self.top_k * 2 if is_numerical_query and len(chunks) > self.top_k else self.top_k
+        self.logger.debug(
+            f"Effective top_k for chunk selection: {effective_top_k}{' (increased for numerical query)' if is_numerical_query else ''}")
+
         # --- Calculate Scores ---
         try:
             for i, chunk in enumerate(chunks):
@@ -1090,12 +1101,14 @@ class NeuralRetriever:
                 if chunk_emb is None or not isinstance(chunk_emb, torch.Tensor) or chunk_emb.nelement() == 0:
                     self.logger.warning(f"Chunk {i} missing valid embedding. Assigning score 0.")
                     score = 0.0
-                    debug_scores = {'base_sim': 0.0, 'support_boost': 0.0, 'guidance_boost': 0.0}
+                    debug_scores = {'base_sim': 0.0, 'support_boost': 0.0, 'guidance_boost': 0.0,
+                                    'numerical_boost': 0.0}
                 else:
                     chunk_emb = chunk_emb.to(self.device).view(1, -1)  # Ensure 2D and on correct device
                     # Dimension check
                     if chunk_emb.shape[1] != question_emb.shape[1]:
-                        self.logger.error(f"Dimension mismatch: question ({question_emb.shape}), chunk {i} ({chunk_emb.shape}). Skipping chunk.")
+                        self.logger.error(
+                            f"Dimension mismatch: question ({question_emb.shape}), chunk {i} ({chunk_emb.shape}). Skipping chunk.")
                         continue
 
                     # Calculate base similarity
@@ -1103,11 +1116,25 @@ class NeuralRetriever:
 
                     # Calculate boosts
                     support_boost = chunk.get('support_score', 0.0) * self.support_boost
-                    guidance_boost = self._calculate_guidance_boost(chunk, symbolic_guidance) if symbolic_guidance else 0.0
+                    guidance_boost = self._calculate_guidance_boost(chunk,
+                                                                    symbolic_guidance) if symbolic_guidance else 0.0
+                    # [Added May 16, 2025]: Boost chunks with numerical content for numerical queries
+                    numerical_boost = 0.0
+                    if is_numerical_query:
+                        chunk_text = chunk.get('text', '').lower()
+                        if re.search(r'\b\d+\b', chunk_text):  # Presence of numbers
+                            numerical_boost = 0.2  # Boost numerical chunks
+                            self.logger.debug(
+                                f"Applied numerical boost of {numerical_boost} to chunk {i} containing numbers.")
 
                     # Final score with boosts
-                    score = base_sim + support_boost + guidance_boost
-                    debug_scores = {'base_sim': base_sim, 'support_boost': support_boost, 'guidance_boost': guidance_boost}
+                    score = base_sim + support_boost + guidance_boost + numerical_boost
+                    debug_scores = {
+                        'base_sim': base_sim,
+                        'support_boost': support_boost,
+                        'guidance_boost': guidance_boost,
+                        'numerical_boost': numerical_boost
+                    }
 
                 scored_chunks.append({
                     'score': score,
@@ -1127,19 +1154,20 @@ class NeuralRetriever:
         # Sort by final score
         scored_chunks.sort(key=lambda x: x['score'], reverse=True)
 
-        # Corrected logging line using standard string formatting:
+        # [Updated May 16, 2025]: Enhanced logging to include numerical boost
         debug_strings = [
-            "{:.3f} (S:{:.2f} P:{:.2f} G:{:.2f})".format(
+            "{:.3f} (S:{:.2f} P:{:.2f} G:{:.2f} N:{:.2f})".format(
                 sc['score'],
                 sc['debug_scores']['base_sim'],
                 sc['debug_scores']['support_boost'],
-                sc['debug_scores']['guidance_boost']
+                sc['debug_scores']['guidance_boost'],
+                sc['debug_scores']['numerical_boost']
             )
             for sc in scored_chunks[:5]
         ]
         self.logger.debug(f"Top 5 chunk scores (Base+Boosts): {debug_strings}")
 
-        # Select top_k initially, ensuring unique chunks
+        # Select effective_top_k, ensuring unique chunks
         relevant_chunks = []
         ids_added = set()
         for sc in scored_chunks:
@@ -1148,11 +1176,12 @@ class NeuralRetriever:
             if chunk_id not in ids_added:
                 relevant_chunks.append(chunk_to_add)
                 ids_added.add(chunk_id)
-                if len(relevant_chunks) >= self.top_k:
-                    break  # Stop once we have top_k unique chunks
+                if len(relevant_chunks) >= effective_top_k:
+                    break  # Stop once we have effective_top_k unique chunks
 
         if not relevant_chunks and chunks:  # Ensure we always return at least one chunk if possible
-            self.logger.warning("No chunks met selection criteria (e.g., all had errors or low scores), returning highest scored chunk as fallback.")
+            self.logger.warning(
+                "No chunks met selection criteria (e.g., all had errors or low scores), returning highest scored chunk as fallback.")
             relevant_chunks = [scored_chunks[0]['chunk']] if scored_chunks else [chunks[0]]  # Safest fallback
 
         self.logger.info(f"Selected {len(relevant_chunks)} relevant chunks for prompt.")
@@ -1283,11 +1312,9 @@ class NeuralRetriever:
 
         # --- Instruction and Question Section ---
         if dataset_type == 'drop':
-            # Clearer instructions for DROP
-            instruction = "Based ONLY on the context passages, answer the following question with the single, most precise answer (e.g., only the number, name(s), or date). Do NOT include units like 'yards'. Do NOT provide explanations or reasoning."
-            # [Updated May 16, 2025]: Enhanced instruction for numerical difference queries
+            instruction = "Based ONLY on the context passages, answer the following question with the single, most precise numerical answer (e.g., only the number). Do NOT include units like 'yards'. Do NOT provide explanations or reasoning. Extract values directly from the context to ensure accuracy."
             if 'difference' in question.lower() or 'more' in question.lower():
-                instruction += " For questions asking for a difference, identify the largest and smallest relevant values in the context and calculate their numerical difference by subtracting the smaller value from the larger one."
+                instruction += " For difference queries, identify the largest and smallest relevant numerical values in the context (e.g., field goal lengths) and compute their difference by subtracting the smaller from the larger."
                 self.logger.debug("Added enhanced difference instruction for DROP query")
         else:  # Default / HotpotQA
             instruction = "Based ONLY on the context passages and relevant background information provided, answer the following question accurately and concisely."

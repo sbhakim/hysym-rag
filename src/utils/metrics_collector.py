@@ -197,34 +197,40 @@ class MetricsCollector:
             self.metrics['resource_usage'][resource].append(value)
 
         # Update timing metrics
-        self.metrics['timing']['processing_times'].append(processing_time)
+            self.metrics['timing']['processing_times'].append(processing_time)
 
-        # Update statistical data
-        self.statistical_data['complexity'].append(complexity_score)
-        self.statistical_data['processing_time'].append(processing_time)
+            # Update statistical data
+            self.statistical_data['complexity'].append(complexity_score)
+            self.statistical_data['processing_time'].append(processing_time)
 
-        # Save metrics if needed
-        if self.query_count % self.save_frequency == 0:
-            self._save_metrics()
+            # Save metrics if needed
+            if self.query_count % self.save_frequency == 0:
+                self._save_metrics()
 
     def _calculate_performance_metrics(self, prediction: Any, ground_truth: Any, query_id: str) -> Dict[str, float]:
         """
         Calculate performance metrics based on dataset type.
         Handles DROP's structured answers and HotpotQA's text-based answers.
         [Updated May 16, 2025]: Enhanced validation to accept valid DROP predictions (number, spans, date),
-        handle empty predictions, and log specific errors for type mismatches, with improved robustness.
+        handle empty predictions, and log specific errors for type mismatches, with improved robustness and debugging.
         """
         metrics = {'exact_match': 0.0, 'f1': 0.0, 'semantic_similarity': 0.0}
         try:
             if self.dataset_type == 'drop':
-                # Validate prediction structure
-                if not isinstance(prediction, dict) or not all(k in prediction for k in ['number', 'spans', 'date']):
-                    self.logger.warning(f"[QID:{query_id}] Invalid DROP prediction structure: {prediction}")
+                # [Updated May 16, 2025]: Add debug logging for validation failures
+                if not isinstance(prediction, dict):
+                    self.logger.warning(
+                        f"[QID:{query_id}] Invalid DROP prediction type: {type(prediction)}, value: {prediction}")
                     return metrics
-                # Validate ground truth structure
-                if not isinstance(ground_truth, dict) or not all(
-                        k in ground_truth for k in ['number', 'spans', 'date']):
-                    self.logger.warning(f"[QID:{query_id}] Invalid DROP ground truth structure: {ground_truth}")
+                if not all(isinstance(prediction.get(k), (str, list, dict)) for k in ['number', 'spans', 'date']):
+                    self.logger.warning(f"[QID:{query_id}] Invalid DROP prediction keys or types: {prediction}")
+                    return metrics
+                if not isinstance(ground_truth, dict):
+                    self.logger.warning(
+                        f"[QID:{query_id}] Invalid DROP ground truth type: {type(ground_truth)}, value: {ground_truth}")
+                    return metrics
+                if not all(isinstance(ground_truth.get(k), (str, list, dict)) for k in ['number', 'spans', 'date']):
+                    self.logger.warning(f"[QID:{query_id}] Invalid DROP ground truth keys or types: {ground_truth}")
                     return metrics
 
                 # Check if prediction is empty (no meaningful content)
@@ -241,7 +247,7 @@ class MetricsCollector:
                             ('date' if any(ground_truth.get('date', {}).values()) else None)))
                 if gt_type is None:
                     self.logger.warning(
-                        f"[QID:{query_id}] Invalid ground truth format: No valid number, spans, or date")
+                        f"[QID:{query_id}] Invalid ground truth format: No valid number, spans, or date, value: {ground_truth}")
                     return metrics
 
                 # Determine prediction type, prioritizing actual content over 'type' field
@@ -252,11 +258,12 @@ class MetricsCollector:
                 if pred_type is None:
                     pred_type = prediction.get('type', 'unknown')
                     self.logger.debug(
-                        f"[QID:{query_id}] No content-based type detected, using prediction type: {pred_type}")
+                        f"[QID:{query_id}] No content-based type detected, using prediction type: {pred_type}, prediction: {prediction}")
 
                 # Check for type mismatch
                 if pred_type != gt_type:
-                    self.logger.debug(f"[QID:{query_id}] Type mismatch: Predicted {pred_type}, Expected {gt_type}")
+                    self.logger.debug(
+                        f"[QID:{query_id}] Type mismatch: Predicted {pred_type}, Expected {gt_type}, prediction: {prediction}")
                     return metrics
 
                 # Compute metrics based on type
@@ -280,7 +287,8 @@ class MetricsCollector:
                 metrics['prediction_length_ratio'] = (float(len(pred_text) / len(gt_text))
                                                       if len(gt_text) != 0 else 0.0)
         except Exception as e:
-            self.logger.error(f"[QID:{query_id}] Error in performance metrics calculation: {str(e)}")
+            self.logger.error(
+                f"[QID:{query_id}] Error in performance metrics calculation: {str(e)}, prediction: {prediction}")
             return metrics
         return metrics
 
@@ -297,13 +305,15 @@ class MetricsCollector:
                     return False
                 return abs(n1 - n2) < 1e-6
             elif value_type == "spans":
-                pred_spans = [self._normalize_drop_answer_str(str(s)) for s in obj1.get("spans", []) if str(s).strip()]
+                pred_spans = [self._normalize_drop_answer_str(str(s)) for s in obj1.get("spans", []) if
+                              str(s).strip()]
                 gt_spans = [self._normalize_drop_answer_str(str(s)) for s in obj2.get("spans", []) if str(s).strip()]
                 return set(pred_spans) == set(gt_spans)
             elif value_type == "date":
                 pred_date = obj1.get("date", {})
                 gt_date = obj2.get("date", {})
-                return all(str(pred_date.get(k, '')).strip() == str(gt_date.get(k, '')).strip() for k in ['day', 'month', 'year'])
+                return all(str(pred_date.get(k, '')).strip() == str(gt_date.get(k, '')).strip() for k in
+                           ['day', 'month', 'year'])
             return False
         except Exception as e:
             self.logger.debug(f"Error comparing DROP values: {str(e)}")
