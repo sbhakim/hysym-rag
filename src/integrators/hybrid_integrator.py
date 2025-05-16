@@ -41,6 +41,14 @@ except Exception as spacy_load_err:
     _logger_init.error(f"Error loading spaCy model: {spacy_load_err}")
     nlp = None
 
+# Import SentenceTransformer for semantic similarity in span filtering
+try:
+    from sentence_transformers import SentenceTransformer, util
+except ImportError:
+    _logger_init = logging.getLogger(__name__)
+    _logger_init.warning("SentenceTransformer not installed. Span filtering will be limited.")
+    util = None
+
 logger = logging.getLogger(__name__)  # Define logger for the rest of the class
 
 class HybridIntegrator:
@@ -76,6 +84,18 @@ class HybridIntegrator:
 
         self.dataset_type = dataset_type.lower().strip() if isinstance(dataset_type, str) else None
         self.logger.info(f"HybridIntegrator initialized for dataset type: {self.dataset_type}")
+
+        # Initialize SentenceTransformer for semantic similarity in span filtering
+        try:
+            # Reuse embedder from neural retriever if available
+            self.encoder = getattr(self.neural_retriever, 'encoder', None)
+            if self.encoder is None:
+                self.encoder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+            self.logger.info("SentenceTransformer encoder initialized for span filtering.")
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize SentenceTransformer: {e}. Span filtering will be limited.")
+            self.encoder = None
+            util = None
 
         # AlignmentLayer for text fusion
         self.alignment_layer = None
@@ -264,23 +284,25 @@ class HybridIntegrator:
         return final_result, source
 
     def _handle_drop_path(
-        self, query: str, context: str,
-        query_complexity: float, query_id: Optional[str]
-    ) -> Tuple[Dict[str,Any], str]:
-        """Handles the DROP dataset path."""
+            self, query: str, context: str,
+            query_complexity: float, query_id: Optional[str]
+    ) -> Tuple[Dict[str, Any], str]:
+        """Handles the DROP dataset path.
+        [Updated May 16, 2025]: Fixed TypeError by ensuring neu_raw_output is converted to string for logging.
+        """
         qid = query_id or "unknown"
         self.logger.debug(f"[DROP Start QID:{qid}] Complexity: {query_complexity:.3f}")
 
         # --- Symbolic Processing ---
         start_sym = time.time()
-        sym_obj = {**self._empty_drop(), 'status':'error','rationale':'Symbolic processing not run'}
+        sym_obj = {**self._empty_drop(), 'status': 'error', 'rationale': 'Symbolic processing not run'}
         try:
-            sym_obj = self._process_symbolic_for_drop(query, context, query_id)
+            sym_obj = self._process_symbolic_for_drop(query, context, qid)
             if not isinstance(sym_obj, dict) or 'status' not in sym_obj:
                 raise ValueError("Symbolic reasoner returned invalid format.")
         except Exception as e:
             self.logger.error(f"[DROP QID:{qid}] Symbolic processing error: {e}")
-            sym_obj = {**self._empty_drop(), 'status':'error','rationale':f"Symbolic Exception: {e}"}
+            sym_obj = {**self._empty_drop(), 'status': 'error', 'rationale': f"Symbolic Exception: {e}"}
         self.component_times['symbolic'] = time.time() - start_sym
         self.logger.debug(f"[DROP QID:{qid}] Symbolic Result: {sym_obj}")
 
@@ -288,13 +310,15 @@ class HybridIntegrator:
         sym_conf = sym_obj.get('confidence', 0.0)
         if sym_obj.get('status') == 'success' and sym_conf >= 0.85:
             self.logger.info(f"[DROP QID:{qid}] Returning high-confidence symbolic result (Conf: {sym_conf:.2f})")
-            answer_obj = self._create_drop_answer_obj(sym_obj.get('type'), sym_obj.get('value'))
-            answer_obj.update({
+            answer_obj = {
+                'number': sym_obj.get('number', ''),
+                'spans': sym_obj.get('spans', []),
+                'date': sym_obj.get('date', {'day': '', 'month': '', 'year': ''}),
                 'status': 'success',
                 'confidence': sym_conf,
                 'rationale': sym_obj.get('rationale', 'High-confidence symbolic result'),
-                'type': sym_obj.get('type')
-            })
+                'type': sym_obj.get('type', 'unknown')
+            }
             return answer_obj, 'symbolic_high_conf'
 
         # --- Neural Processing ---
@@ -306,23 +330,32 @@ class HybridIntegrator:
                 context, query, symbolic_guidance=guid,
                 query_complexity=query_complexity, dataset_type=self.dataset_type
             )
+            # [Added May 16, 2025]: Validate neu_raw_output type
+            if not isinstance(neu_raw_output, (str, dict)):
+                self.logger.error(f"[DROP QID:{qid}] Neural output invalid type: {type(neu_raw_output)}")
+                raise ValueError(f"Neural retriever returned invalid type: {type(neu_raw_output)}")
         except Exception as e:
             self.logger.error(f"[DROP QID:{qid}] Neural retrieval failed: {str(e)}")
             if sym_obj.get('status') == 'success':
-                self.logger.info(f"[DROP QID:{qid}] Neural failed, falling back to successful symbolic result (Conf: {sym_conf:.2f})")
+                self.logger.info(
+                    f"[DROP QID:{qid}] Neural failed, falling back to successful symbolic result (Conf: {sym_conf:.2f})")
                 self.component_times['neural'] = time.time() - start_neu
-                answer_obj = self._create_drop_answer_obj(sym_obj.get('type'), sym_obj.get('value'))
-                answer_obj.update({
+                answer_obj = {
+                    'number': sym_obj.get('number', ''),
+                    'spans': sym_obj.get('spans', []),
+                    'date': sym_obj.get('date', {'day': '', 'month': '', 'year': ''}),
                     'status': 'success',
                     'confidence': sym_conf,
                     'rationale': sym_obj.get('rationale', 'Symbolic fallback due to neural error'),
-                    'type': sym_obj.get('type')
-                })
+                    'type': sym_obj.get('type', 'unknown')
+                }
                 return answer_obj, 'symbolic_fallback_on_neural_error'
             else:
+                self.component_times['neural'] = time.time() - start_neu
                 return self._error(f"Neural processing failed, no symbolic success: {e}", qid)
         self.component_times['neural'] = time.time() - start_neu
-        self.logger.debug(f"[DROP QID:{qid}] Neural Raw Output: {neu_raw_output[:100]}...")
+        # [Updated May 16, 2025]: Use str() to prevent TypeError with non-string outputs
+        self.logger.debug(f"[DROP QID:{qid}] Neural Raw Output: {str(neu_raw_output)[:100]}...")
 
         # --- Fusion ---
         start_fus = time.time()
@@ -332,8 +365,8 @@ class HybridIntegrator:
             )
             fusion_strategy = fusion_debug.get('fusion_strategy_drop', 'unknown')
             source = f'hybrid_drop_{fusion_strategy}'
-            self.logger.info(f"[DROP QID:{qid}] Fusion successful: Strategy={fusion_strategy}, Final Confidence={final_confidence:.2f}")
-
+            self.logger.info(
+                f"[DROP QID:{qid}] Fusion successful: Strategy={fusion_strategy}, Final Confidence={final_confidence:.2f}")
         except Exception as e:
             self.logger.exception(f"[DROP QID:{qid}] Fusion critical error: {e}")
             answer_obj, source = self._error(f"DROP Fusion Exception: {e}", qid)
@@ -347,8 +380,15 @@ class HybridIntegrator:
         """Logs error and returns structured error object."""
         self.logger.error(f"[Error QID:{qid}] {msg}")
         if self.dataset_type=='drop':
-            error_obj = self._empty_drop()
-            error_obj['error'] = msg
+            error_obj = {
+                'number': '',
+                'spans': [],
+                'date': {'day': '', 'month': '', 'year': ''},
+                'status': 'error',
+                'confidence': 0.0,
+                'rationale': msg,
+                'type': 'error'
+            }
             return error_obj, 'error'
         return f"Error: {msg}", 'error'
 
@@ -369,12 +409,22 @@ class HybridIntegrator:
         )
         if isinstance(out, dict) and 'status' in out:
             out.setdefault('type', None)
-            out.setdefault('value', None)
+            out.setdefault('number', '')
+            out.setdefault('spans', [])
+            out.setdefault('date', {'day': '', 'month': '', 'year': ''})
             out.setdefault('confidence', 0.0)
             out.setdefault('rationale', 'No rationale provided.')
             return out
         self.logger.error(f"[DROP QID:{qid}] Symbolic reasoner returned invalid format: {out}. Expected Dict.")
-        return {**self._empty_drop(), 'status':'error','rationale':'Invalid format from symbolic reasoner'}
+        return {
+            'number': '',
+            'spans': [],
+            'date': {'day': '', 'month': '', 'year': ''},
+            'status': 'error',
+            'confidence': 0.0,
+            'rationale': 'Invalid format from symbolic reasoner',
+            'type': 'error'
+        }
 
     def _is_multi_hop_query(self, query: str) -> bool:
         """Determines if a text query likely requires multi-hop reasoning."""
@@ -486,7 +536,9 @@ class HybridIntegrator:
         conf = sym_obj.get('confidence', 0.0)
         rationale = sym_obj.get('rationale')
         op_type = sym_obj.get('type')
-        value = sym_obj.get('value')
+        number = sym_obj.get('number', '')
+        spans = sym_obj.get('spans', [])
+        date = sym_obj.get('date', {'day': '', 'month': '', 'year': ''})
         status = sym_obj.get('status', 'error')
 
         if rationale and conf > 0.3:
@@ -494,12 +546,12 @@ class HybridIntegrator:
 
         if status == 'success' and conf > 0.4:
             guidance_text = f"Symbolic operation result: Type={op_type}"
-            if op_type == 'number' and value is not None:
-                guidance_text += f", Value={value}"
-            elif op_type == 'spans' and isinstance(value, list) and value:
-                guidance_text += f", Spans=[{', '.join(value)}]"
-            elif op_type == 'date' and isinstance(value, dict):
-                guidance_text += f", Date={value.get('month','')}/{value.get('day','')}/{value.get('year','')}"
+            if number:
+                guidance_text += f", Number={number}"
+            elif spans:
+                guidance_text += f", Spans=[{', '.join(spans)}]"
+            elif any(date.values()):
+                guidance_text += f", Date={date.get('month','')}/{date.get('day','')}/{date.get('year','')}"
             if len(guidance_text) > len(f"Symbolic operation result: Type={op_type}"):
                 guidance.append({'response': guidance_text, 'confidence': conf})
 
@@ -590,14 +642,20 @@ class HybridIntegrator:
                                        ) -> Tuple[Dict[str, Any], float, Dict[str, Any]]:
         """
         Fuse symbolic and neural outputs for DROP queries, returning a structured answer.
-        Enhanced fusion logic with improved type handling and decision criteria.
+        Enhanced fusion logic with improved type handling, decision criteria, and answer formatting.
+        Updated to favor symbolic for numerical queries and check numerical closeness.
+        [Updated May 16, 2025]: Ensure neural outputs are always formatted as DROP answer objects,
+        add validation for parsed results, and enhance logging for symbolic failures.
         """
         qid = query_id or "unknown"
         debug = {'fusion_strategy_drop': 'init'}
         sym_conf = symbolic_result_obj.get('confidence', 0.0)
         sym_type = symbolic_result_obj.get('type')
-        sym_value = symbolic_result_obj.get('value')
+        sym_number = symbolic_result_obj.get('number', '')
+        sym_spans = symbolic_result_obj.get('spans', [])
+        sym_date = symbolic_result_obj.get('date', {'day': '', 'month': '', 'year': ''})
         sym_status = symbolic_result_obj.get('status', 'error')
+        sym_rationale = symbolic_result_obj.get('rationale', 'No rationale provided.')
 
         # Parse neural output with improved logic
         neu_parsed = self._parse_neural_for_drop(neural_raw_output, query, sym_type)
@@ -605,87 +663,212 @@ class HybridIntegrator:
         neu_type = neu_parsed.get('type') if neu_parsed else None
         neu_value = neu_parsed.get('value') if neu_parsed else None
 
-        self.logger.debug(f"[DROP QID:{qid}] Fusion Input - Symbolic: status={sym_status}, type={sym_type}, conf={sym_conf:.2f}, value={str(sym_value)[:50]}")
+        self.logger.debug(f"[DROP QID:{qid}] Fusion Input - Symbolic: status={sym_status}, type={sym_type}, conf={sym_conf:.2f}, number={sym_number}, spans={sym_spans}, date={sym_date}")
         self.logger.debug(f"[DROP QID:{qid}] Fusion Input - Neural Parsed: type={neu_type}, conf={neu_conf:.2f}, value={str(neu_value)[:50]}")
 
-        final_answer_obj: Dict[str, Any]
-        final_confidence: float
-        final_source_type: Optional[str] = None
+        # Log symbolic result status
+        if sym_status != 'success':
+            self.logger.debug(f"[DROP QID:{qid}] No valid symbolic result: Status={sym_status}, Rationale={sym_rationale}")
+
+        # Initialize final answer
+        final_answer_obj = self._empty_drop()
+        final_confidence = 0.1
+        final_source_type = 'none'
 
         # --- Decision Logic ---
 
         # 1. High-Confidence, Successful Symbolic Result
         if sym_status == 'success' and sym_conf >= 0.85 and sym_type in ['number', 'spans', 'date', 'count', 'difference', 'extreme_value']:
             debug['fusion_strategy_drop'] = 'prioritized_strong_symbolic'
-            final_answer_obj = self._create_drop_answer_obj(sym_type, sym_value)
+            final_answer_obj = {
+                'number': sym_number,
+                'spans': sym_spans,
+                'date': sym_date,
+                'status': 'success',
+                'confidence': sym_conf,
+                'rationale': sym_rationale,
+                'type': sym_type
+            }
             final_confidence = sym_conf
             final_source_type = 'symbolic'
 
         # 2. Both Symbolic and Neural Succeeded
         elif sym_status == 'success' and neu_parsed and neu_conf > 0.6:
-            sym_answer_obj = self._create_drop_answer_obj(sym_type, sym_value)
+            sym_answer_obj = {
+                'number': sym_number,
+                'spans': sym_spans,
+                'date': sym_date,
+                'status': 'success',
+                'confidence': sym_conf,
+                'rationale': sym_rationale,
+                'type': sym_type
+            }
             neu_answer_obj = self._create_drop_answer_obj(neu_type, neu_value)
+            neu_answer_obj.update({
+                'status': 'success',
+                'confidence': neu_conf,
+                'rationale': 'Neural parsed result',
+                'type': neu_type
+            })
 
             # Check if types are compatible
             effective_sym_type = sym_type
             if sym_type in ['count', 'difference', 'extreme_value']:
-                effective_sym_type = 'number' if isinstance(sym_value, (int, float, str)) and str(sym_value).replace('.', '').isdigit() else 'spans'
+                effective_sym_type = 'number' if sym_number else ('spans' if sym_spans else 'date')
             effective_neu_type = neu_type
 
             if effective_sym_type == effective_neu_type:
-                if self._are_drop_values_equivalent(sym_answer_obj, neu_answer_obj, effective_sym_type):
+                if self._are_drop_values_equivalent(sym_answer_obj, neu_answer_obj, effective_sym_type, qid):
                     debug['fusion_strategy_drop'] = 'agreed_sym_neu'
                     final_answer_obj = neu_answer_obj
                     final_confidence = max(sym_conf, neu_conf)
                     final_source_type = 'agreed'
+                    self.logger.debug(f"[DROP QID:{qid}] Symbolic and Neural agree: Using neural with combined confidence {final_confidence:.2f}")
                 else:
                     debug['fusion_strategy_drop'] = 'disagreed_sym_neu_types_match'
-                    if neu_conf >= sym_conf:
-                        final_answer_obj = neu_answer_obj
-                        final_confidence = neu_conf
-                        final_source_type = 'neural'
+                    # For numerical queries, check closeness and favor symbolic unless neural is significantly more confident
+                    if effective_sym_type == 'number' and effective_neu_type == 'number':
+                        sym_val = float(sym_answer_obj['number']) if sym_answer_obj['number'] else 0.0
+                        neu_val = float(neu_answer_obj['number']) if neu_answer_obj['number'] else 0.0
+                        # Check closeness (within 10% of larger value)
+                        larger_val = max(abs(sym_val), abs(neu_val))
+                        closeness_threshold = larger_val * 0.1
+                        if larger_val == 0:
+                            are_close = True
+                        else:
+                            are_close = abs(sym_val - neu_val) <= closeness_threshold
+                        # Favor symbolic for numerical queries unless neural confidence is much higher
+                        if are_close or (sym_conf >= neu_conf - 0.1 and sym_type in ['count', 'difference', 'extreme_value']):
+                            final_answer_obj = sym_answer_obj
+                            final_confidence = sym_conf
+                            final_source_type = 'symbolic'
+                            self.logger.debug(f"[DROP QID:{qid}] Values {'are close' if are_close else 'differ'}, favoring symbolic (Conf: {sym_conf:.2f} vs Neural: {neu_conf:.2f})")
+                        else:
+                            final_answer_obj = neu_answer_obj
+                            final_confidence = neu_conf
+                            final_source_type = 'neural'
+                            self.logger.debug(f"[DROP QID:{qid}] Values differ, favoring neural (Conf: {neu_conf:.2f} vs Symbolic: {sym_conf:.2f})")
                     else:
-                        final_answer_obj = sym_answer_obj
-                        final_confidence = sym_conf
-                        final_source_type = 'symbolic'
+                        # Non-numerical types: use adjusted confidence
+                        rule_quality = 0.8 if 'entity' in symbolic_result_obj and symbolic_result_obj.get('entity') not in ['difference', 'yards'] else 0.5
+                        adjusted_sym_conf = sym_conf * rule_quality
+                        if adjusted_sym_conf >= neu_conf:
+                            final_answer_obj = sym_answer_obj
+                            final_confidence = sym_conf
+                            final_source_type = 'symbolic'
+                            self.logger.debug(f"[DROP QID:{qid}] Non-numerical types match, favoring symbolic (Adjusted Conf: {adjusted_sym_conf:.2f} vs Neural: {neu_conf:.2f})")
+                        else:
+                            final_answer_obj = neu_answer_obj
+                            final_confidence = neu_conf
+                            final_source_type = 'neural'
+                            self.logger.debug(f"[DROP QID:{qid}] Non-numerical types match, favoring neural (Conf: {neu_conf:.2f} vs Symbolic Adjusted: {adjusted_sym_conf:.2f})")
             else:
-                # Types differ, prioritize higher confidence
-                debug['fusion_strategy_drop'] = 'types_mismatch_select_higher_conf'
-                if neu_conf >= sym_conf:
-                    final_answer_obj = neu_answer_obj
-                    final_confidence = neu_conf
-                    final_source_type = 'neural'
-                else:
+                # Types differ, adjust confidence based on rule quality and query complexity
+                debug['fusion_strategy_drop'] = 'types_mismatch_adjusted_conf'
+                rule_quality = 0.8 if 'entity' in symbolic_result_obj and symbolic_result_obj.get('entity') not in ['difference', 'yards'] else 0.5
+                adjusted_sym_conf = sym_conf * rule_quality * (1 + query_complexity * 0.2)
+                # Favor symbolic for numerical types unless neural confidence is significantly higher
+                if sym_type in ['count', 'difference', 'extreme_value'] and sym_conf >= neu_conf - 0.1:
                     final_answer_obj = sym_answer_obj
                     final_confidence = sym_conf
                     final_source_type = 'symbolic'
+                    self.logger.debug(f"[DROP QID:{qid}] Types differ, favoring symbolic numerical (Conf: {sym_conf:.2f} vs Neural: {neu_conf:.2f})")
+                else:
+                    if adjusted_sym_conf >= neu_conf:
+                        final_answer_obj = sym_answer_obj
+                        final_confidence = sym_conf
+                        final_source_type = 'symbolic'
+                        self.logger.debug(f"[DROP QID:{qid}] Types differ, favoring symbolic (Adjusted Conf: {adjusted_sym_conf:.2f} vs Neural: {neu_conf:.2f})")
+                    else:
+                        final_answer_obj = neu_answer_obj
+                        final_confidence = neu_conf
+                        final_source_type = 'neural'
+                        self.logger.debug(f"[DROP QID:{qid}] Types differ, favoring neural (Conf: {neu_conf:.2f} vs Symbolic Adjusted: {adjusted_sym_conf:.2f})")
 
         # 3. Neural Result is Strong and Parsed Successfully
         elif neu_parsed and neu_conf > 0.6 and neu_type in ['number', 'spans', 'date']:
             debug['fusion_strategy_drop'] = 'parsed_neural_dominant'
-            final_answer_obj = self._create_drop_answer_obj(neu_type, neu_value)
-            final_confidence = neu_conf
-            final_source_type = 'neural'
+            # Ensure proper DROP answer object format
+            if neu_value is not None:
+                final_answer_obj = self._create_drop_answer_obj(neu_type, neu_value)
+                final_answer_obj.update({
+                    'status': 'success',
+                    'confidence': neu_conf,
+                    'rationale': 'Neural dominant result',
+                    'type': neu_type
+                })
+                final_confidence = neu_conf
+                final_source_type = 'neural'
+                self.logger.debug(f"[DROP QID:{qid}] Strong neural result, using parsed neural output (Conf: {neu_conf:.2f})")
+            else:
+                debug['fusion_strategy_drop'] = 'neural_parse_failed'
+                final_answer_obj = self._empty_drop()
+                final_answer_obj.update({
+                    'status': 'error',
+                    'confidence': 0.1,
+                    'rationale': 'Failed to parse valid neural value',
+                    'type': 'error'
+                })
+                final_confidence = 0.1
+                final_source_type = 'none'
+                self.logger.warning(f"[DROP QID:{qid}] Neural parsing failed: Invalid value {neu_value}")
 
         # 4. Symbolic Succeeded (but lower conf), Neural Failed/Low Conf
         elif sym_status == 'success' and sym_conf > 0.35:
             debug['fusion_strategy_drop'] = 'weak_symbolic_fallback_no_good_neural'
-            final_answer_obj = self._create_drop_answer_obj(sym_type, sym_value)
+            final_answer_obj = {
+                'number': sym_number,
+                'spans': sym_spans,
+                'date': sym_date,
+                'status': 'success',
+                'confidence': sym_conf,
+                'rationale': sym_rationale,
+                'type': sym_type
+            }
             final_confidence = sym_conf
             final_source_type = 'symbolic'
+            self.logger.debug(f"[DROP QID:{qid}] Weak symbolic fallback due to no good neural (Conf: {sym_conf:.2f})")
 
         # 5. Neural Parsed (but lower conf), Symbolic Failed
         elif neu_parsed and neu_conf > 0.35:
             debug['fusion_strategy_drop'] = 'weak_parsed_neural_fallback_no_good_symbolic'
-            final_answer_obj = self._create_drop_answer_obj(neu_type, neu_value)
-            final_confidence = neu_conf
-            final_source_type = 'neural'
+            if neu_value is not None:
+                final_answer_obj = self._create_drop_answer_obj(neu_type, neu_value)
+                final_answer_obj.update({
+                    'status': 'success',
+                    'confidence': neu_conf,
+                    'rationale': 'Weak neural fallback',
+                    'type': neu_type
+                })
+                final_confidence = neu_conf
+                final_source_type = 'neural'
+                self.logger.debug(f"[DROP QID:{qid}] Weak neural fallback due to no good symbolic (Conf: {neu_conf:.2f})")
+            else:
+                debug['fusion_strategy_drop'] = 'neural_parse_failed'
+                final_answer_obj = self._empty_drop()
+                final_answer_obj.update({
+                    'status': 'error',
+                    'confidence': 0.1,
+                    'rationale': 'Failed to parse valid neural value',
+                    'type': 'error'
+                })
+                final_confidence = 0.1
+                final_source_type = 'none'
+                self.logger.warning(f"[DROP QID:{qid}] Neural parsing failed: Invalid value {neu_value}")
 
         # 6. Failure Case
         else:
             debug['fusion_strategy_drop'] = 'failure_no_confident_source'
             self.logger.warning(f"[DROP QID:{qid}] Fusion failed: No valid symbolic or neural result found.")
-            final_answer_obj = self._create_drop_answer_obj('error', 'No confident answer found by either method.')
+            final_answer_obj = {
+                'number': '',
+                'spans': [],
+                'date': {'day': '', 'month': '', 'year': ''},
+                'status': 'error',
+                'confidence': 0.1,
+                'rationale': 'No confident answer found by either method',
+                'type': 'error'
+            }
             final_confidence = 0.1
             final_source_type = 'none'
 
@@ -697,33 +880,63 @@ class HybridIntegrator:
         """
         Create a DROP answer object with validation.
         Handles 'extreme_value', 'count', and 'difference' types appropriately.
+        Ensures all required fields are included for evaluation.
+        Updated to deduplicate spans.
         """
-        obj = self._empty_drop()
+        obj = {
+            'number': '',
+            'spans': [],
+            'date': {'day': '', 'month': '', 'year': ''},
+            'status': 'success',
+            'confidence': 0.5,
+            'rationale': 'Created DROP answer object',
+            'type': answer_type or 'unknown'
+        }
         try:
             if answer_type in ["number", "count", "difference"]:
                 num_val = self._normalize_drop_number_for_comparison(value)
-                obj["number"] = str(num_val) if num_val is not None else ""
-                if obj["number"]:
+                if num_val is not None:
+                    # Convert to int if the value is a whole number
+                    if num_val.is_integer():
+                        num_val = int(num_val)
+                    obj["number"] = str(num_val)
+                    obj["rationale"] = f"Parsed number value: {obj['number']}"
                     self.logger.debug(f"Created DROP answer: number={obj['number']}")
                 else:
+                    obj["status"] = "error"
+                    obj["rationale"] = f"Invalid number value: {value}"
                     self.logger.warning(f"Invalid number value for DROP obj: {value}")
 
             elif answer_type == "extreme_value":
-                # Determine if the extreme_value result should be a number or spans based on value
                 if isinstance(value, (int, float, str)) and str(value).replace('.', '').isdigit():
                     num_val = self._normalize_drop_number_for_comparison(value)
-                    obj["number"] = str(num_val) if num_val is not None else ""
-                    self.logger.debug(f"Created DROP answer (extreme_value as number): number={obj['number']}")
+                    if num_val is not None:
+                        if num_val.is_integer():
+                            num_val = int(num_val)
+                        obj["number"] = str(num_val)
+                        obj["rationale"] = f"Parsed extreme_value as number: {num_val}"
+                        self.logger.debug(f"Created DROP answer (extreme_value as number): number={obj['number']}")
+                    else:
+                        obj["status"] = "error"
+                        obj["rationale"] = f"Invalid extreme_value number: {value}"
                 elif isinstance(value, list):
-                    obj["spans"] = [str(v).strip() for v in value if str(v).strip()]
+                    spans_in = value if isinstance(value, list) else ([value] if value is not None else [])
+                    # Deduplicate spans while (case-insensitive)
+                    seen = set()
+                    obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip() and str(v).strip().lower() not in seen and not seen.add(str(v).strip().lower())]
+                    obj["rationale"] = f"Parsed extreme_value as spans: {obj['spans']}"
                     self.logger.debug(f"Created DROP answer (extreme_value as spans): spans={obj['spans']}")
                 else:
+                    obj["status"] = "error"
+                    obj["rationale"] = f"Invalid extreme_value value: {value}"
                     self.logger.warning(f"Invalid extreme_value value: {value}")
-                    obj["error"] = f"Invalid extreme_value value: {value}"
 
             elif answer_type in ["spans", "entity_span"]:
                 spans_in = value if isinstance(value, list) else ([value] if value is not None else [])
-                obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip()]
+                # Deduplicate spans (case-insensitive)
+                seen = set()
+                obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip() and str(v).strip().lower() not in seen and not seen.add(str(v).strip().lower())]
+                obj["rationale"] = f"Parsed spans: {obj['spans']}"
                 self.logger.debug(f"Created DROP answer: type={answer_type}, spans={obj['spans']}")
 
             elif answer_type == "date":
@@ -734,35 +947,49 @@ class HybridIntegrator:
                         y = int(value.get('year', '')) if value.get('year', '') else 0
                         if (1 <= d <= 31 or d == 0) and (1 <= m <= 12 or m == 0) and (1000 <= y <= 3000 or y == 0):
                             obj["date"] = {k: str(v).strip() for k, v in value.items() if k in ['day', 'month', 'year']}
+                            obj["rationale"] = f"Parsed date: {obj['date']}"
                             self.logger.debug(f"Created DROP answer: date={obj['date']}")
                         else:
                             raise ValueError("Invalid date components")
                     except (ValueError, TypeError):
+                        obj["status"] = "error"
+                        obj["rationale"] = f"Invalid date component values: {value}"
                         self.logger.warning(f"Invalid date component values: {value}")
                 else:
+                    obj["status"] = "error"
+                    obj["rationale"] = f"Invalid date dictionary value: {value}"
                     self.logger.warning(f"Invalid date dictionary value: {value}")
 
             elif answer_type == "error":
-                obj["error"] = str(value).strip() if value else "Unknown error"
-                self.logger.debug(f"Created DROP error answer: {obj['error']}")
+                obj["status"] = "error"
+                obj["rationale"] = str(value).strip() if value else "Unknown error"
+                self.logger.debug(f"Created DROP error answer: {obj['rationale']}")
 
             else:
-                error_msg = f"Unsupported or invalid answer type: {answer_type}"
-                self.logger.warning(error_msg)
-                obj["error"] = error_msg
+                obj["status"] = "error"
+                obj["rationale"] = f"Unsupported or invalid answer type: {answer_type}"
+                self.logger.warning(obj["rationale"])
 
             return obj
 
         except Exception as e:
             self.logger.error(f"Error creating DROP answer object (Type: {answer_type}, Value: {value}): {str(e)}")
-            error_obj = self._empty_drop()
-            error_obj['error'] = f"Internal error creating answer object: {str(e)}"
+            error_obj = {
+                'number': '',
+                'spans': [],
+                'date': {'day': '', 'month': '', 'year': ''},
+                'status': 'error',
+                'confidence': 0.1,
+                'rationale': f"Internal error creating answer object: {str(e)}",
+                'type': answer_type or 'error'
+            }
             return error_obj
 
     def _are_drop_values_equivalent(self,
                                     obj1: Dict[str, Any],
                                     obj2: Dict[str, Any],
-                                    value_type: str
+                                    value_type: str,
+                                    qid: str = "unknown"
                                     ) -> bool:
         """Compares DROP answer values, handling potential None values."""
         try:
@@ -773,23 +1000,30 @@ class HybridIntegrator:
                 n1 = self._normalize_drop_number_for_comparison(val1)
                 n2 = self._normalize_drop_number_for_comparison(val2)
                 if n1 is None or n2 is None:
+                    self.logger.debug(f"[QID:{qid}] Number comparison failed: One or both values are None (Pred: {val1}, GT: {val2})")
                     return False
-                return abs(n1 - n2) < 1e-6
+                result = abs(n1 - n2) < 1e-6
+                self.logger.debug(f"[QID:{qid}] Number comparison: {n1} == {n2} -> {result}")
+                return result
 
             elif value_type == "spans":
                 spans1 = set(str(s).strip().lower() for s in val1 if str(s).strip()) if isinstance(val1, list) else set()
                 spans2 = set(str(s).strip().lower() for s in val2 if str(s).strip()) if isinstance(val2, list) else set()
-                return spans1 == spans2
+                result = spans1 == spans2
+                self.logger.debug(f"[QID:{qid}] Span comparison: {spans1} == {spans2} -> {result}")
+                return result
 
             elif value_type == "date":
                 if isinstance(val1, dict) and isinstance(val2, dict) and \
                    all(k in val1 for k in ['day','month','year']) and \
                    all(k in val2 for k in ['day','month','year']):
-                    return all(str(val1.get(k,'')).strip() == str(val2.get(k,'')).strip() for k in ['day','month','year'])
+                    result = all(str(val1.get(k,'')).strip() == str(val2.get(k,'')).strip() for k in ['day','month','year'])
+                    self.logger.debug(f"[QID:{qid}] Date comparison: {val1} == {val2} -> {result}")
+                    return result
                 return False
 
         except Exception as e:
-            self.logger.warning(f"Error during DROP value comparison for type '{value_type}': {e}")
+            self.logger.warning(f"[QID:{qid}] Error during DROP value comparison for type '{value_type}': {e}")
             return False
 
         return False
@@ -802,25 +1036,29 @@ class HybridIntegrator:
             return None
         try:
             if isinstance(value_str, (int, float)):
-                return float(value_str)
-
-            s = str(value_str).replace(",", "").strip().lower()
-            if not s:
-                return None
-
-            words = {
-                "zero": 0.0, "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
-                "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0,
-                "ten": 10.0
-            }
-            if s in words:
-                return words[s]
-
-            if re.fullmatch(r'-?\d+(\.\d+)?', s):
-                return float(s)
+                result = float(value_str)
             else:
-                self.logger.debug(f"Could not normalize '{value_str}' to a number.")
-                return None
+                s = str(value_str).replace(",", "").strip().lower()
+                if not s:
+                    return None
+
+                words = {
+                    "zero": 0.0, "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
+                    "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0,
+                    "ten": 10.0
+                }
+                if s in words:
+                    result = words[s]
+                elif re.fullmatch(r'-?\d+(\.\d+)?', s):
+                    result = float(s)
+                else:
+                    self.logger.debug(f"Could not normalize '{value_str}' to a number.")
+                    return None
+
+            # Convert to int if the number is a whole number
+            if result.is_integer():
+                result = float(int(result))
+            return result
 
         except (ValueError, TypeError) as e:
             self.logger.debug(f"Error normalizing number '{value_str}': {e}")
@@ -830,7 +1068,8 @@ class HybridIntegrator:
                                expected_type_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Parses raw neural output string to extract a structured DROP answer.
-        Enhanced to handle numerical outputs for count, difference, and extreme_value.
+        Enhanced to prioritize spans for 'who'/'which' queries and aggregate counts for 'both' queries.
+        Updated to deduplicate spans, filter using semantic similarity, and whitelist entity types.
         """
         if not neural_raw_output or not neural_raw_output.strip():
             self.logger.debug(f"Cannot parse empty neural output for query: {query[:50]}...")
@@ -861,18 +1100,109 @@ class HybridIntegrator:
         confidence = 0.0
 
         try:
-            # 1. Parse NUMBER (including count, difference, extreme_value as number)
-            if answer_type in ['number', 'count', 'difference'] or (answer_type == 'extreme_value' and 'who' not in query_lower and 'which' not in query_lower):
-                # Regex for leading number, handles commas and decimals
-                match = re.match(r'^\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)\b', output)
-                if match:
-                    num_str = match.group(1).replace(',', '')
-                    parsed_value = self._normalize_drop_number_for_comparison(num_str)
-                    if parsed_value is not None:
-                        confidence = 0.75
-                        self.logger.debug(f"Parsed number via regex: {parsed_value}")
-                # Fallback: check word numbers
+            # 1. Try Parsing SPANS (prioritize for "who"/"which" queries)
+            if answer_type in ['spans', 'entity_span'] or (answer_type == 'extreme_value' and ('who' in query_lower or 'which' in query_lower)):
+                # Use spaCy NER on the output if available
+                if self.nlp:
+                    doc = self.nlp(output)
+                    # Define expected NER labels based on query type
+                    expected_labels = set()
+                    if 'who' in query_lower:
+                        expected_labels = {'PERSON'}
+                    elif 'team' in query_lower:
+                        expected_labels = {'ORG'}
+                    elif 'where' in query_lower:
+                        expected_labels = {'GPE'}
+                    else:
+                        expected_labels = {'PERSON', 'ORG', 'GPE', 'NORP'}
+
+                    # Extract spans and filter by expected labels
+                    extracted_spans = [ent.text.strip() for ent in doc.ents if ent.label_ in expected_labels]
+                    if extracted_spans:
+                        # Filter spans using semantic similarity to query
+                        if self.encoder and util:
+                            query_embedding = self.encoder.encode(query_lower, convert_to_tensor=True)
+                            filtered_spans = []
+                            for span in extracted_spans:
+                                span_embedding = self.encoder.encode(span, convert_to_tensor=True)
+                                similarity = util.cos_sim(query_embedding, span_embedding).item()
+                                if similarity >= 0.5:  # Threshold for relevance
+                                    filtered_spans.append(span)
+                            # Deduplicate spans (case-insensitive) while preserving order
+                            seen = set()
+                            parsed_value = [s for s in filtered_spans if not (s.lower() in seen or seen.add(s.lower()))]
+                            confidence = 0.7
+                            self.logger.debug(f"Parsed spans via spaCy NER with semantic filtering: {parsed_value}")
+                        else:
+                            # Deduplicate spans without semantic filtering
+                            seen = set()
+                            parsed_value = [s for s in extracted_spans if not (s.lower() in seen or seen.add(s.lower()))]
+                            confidence = 0.6
+                            self.logger.debug(f"Parsed spans via spaCy NER without semantic filtering: {parsed_value}")
+                    else:
+                        # Fallback: take first significant phrase/noun chunk if no priority NER
+                        non_stop_chunks = [chunk.text.strip() for chunk in doc.noun_chunks if not all(tok.is_stop for tok in chunk)]
+                        if non_stop_chunks:
+                            if self.encoder and util:
+                                query_embedding = self.encoder.encode(query_lower, convert_to_tensor=True)
+                                best_chunk = None
+                                best_similarity = 0.0
+                                for chunk in non_stop_chunks:
+                                    chunk_embedding = self.encoder.encode(chunk, convert_to_tensor=True)
+                                    similarity = util.cos_sim(query_embedding, chunk_embedding).item()
+                                    if similarity >= 0.5 and similarity > best_similarity:
+                                        best_chunk = chunk
+                                        best_similarity = similarity
+                                if best_chunk:
+                                    parsed_value = [best_chunk]
+                                    confidence = 0.5
+                                    self.logger.debug(f"Parsed span via spaCy Noun Chunk with semantic filtering: {parsed_value}")
+                            else:
+                                parsed_value = [non_stop_chunks[0]]
+                                confidence = 0.5
+                                self.logger.debug(f"Parsed span via spaCy Noun Chunk without semantic filtering: {parsed_value}")
+                # Fallback if no spaCy or no results: Take first line/sentence fragment
                 if parsed_value is None:
+                    first_line = output.split('\n')[0].strip('.,!? ')
+                    if len(first_line) > 1 and len(first_line.split()) < 10:
+                        if self.encoder and util:
+                            query_embedding = self.encoder.encode(query_lower, convert_to_tensor=True)
+                            first_line_embedding = self.encoder.encode(first_line, convert_to_tensor=True)
+                            similarity = util.cos_sim(query_embedding, first_line_embedding).item()
+                            if similarity >= 0.5:
+                                parsed_value = [first_line]
+                                confidence = 0.4
+                                self.logger.debug(f"Parsed span via first line heuristic with semantic filtering: {parsed_value}")
+                        else:
+                            parsed_value = [first_line]
+                            confidence = 0.4
+                            self.logger.debug(f"Parsed span via first line heuristic without semantic filtering: {parsed_value}")
+
+            # 2. Try Parsing NUMBER (including count, difference, extreme_value as number)
+            elif answer_type in ['number', 'count', 'difference'] or (answer_type == 'extreme_value' and 'who' not in query_lower and 'which' not in query_lower):
+                # Aggregate all numbers in the output (e.g., for "both teams" queries)
+                numbers = []
+                matches = re.findall(r'\b\d+(?:,\d{3})*(?:\.\d+)?\b', output)
+                for match in matches:
+                    num_str = match.replace(',', '')
+                    num = self._normalize_drop_number_for_comparison(num_str)
+                    if num is not None:
+                        numbers.append(num)
+                        self.logger.debug(f"Parsed number via regex: {num}")
+
+                if numbers:
+                    # For "difference" queries, take the first number (assumed to be the difference)
+                    if 'difference' in query_lower:
+                        parsed_value = numbers[0]
+                        confidence = 0.75
+                        self.logger.debug(f"Extracted difference number: {parsed_value}")
+                    else:
+                        # For "how many" queries, sum the numbers (e.g., for "both teams")
+                        parsed_value = sum(numbers)
+                        confidence = 0.75
+                        self.logger.debug(f"Aggregated numbers for count: {parsed_value}")
+                else:
+                    # Fallback: check word numbers if regex fails
                     first_word = output.split()[0].lower().strip('.,!?')
                     num_from_word = self._normalize_drop_number_for_comparison(first_word)
                     if num_from_word is not None:
@@ -880,32 +1210,10 @@ class HybridIntegrator:
                         confidence = 0.65
                         self.logger.debug(f"Parsed number via word: {parsed_value}")
 
-            # 2. Parse SPANS (including extreme_value as spans)
-            elif answer_type in ['spans', 'entity_span'] or (answer_type == 'extreme_value' and ('who' in query_lower or 'which' in query_lower)):
-                if self.nlp:
-                    doc = self.nlp(output)
-                    priority_labels = {'PERSON', 'ORG', 'GPE', 'NORP'}
-                    extracted_spans = [ent.text.strip() for ent in doc.ents if ent.label_ in priority_labels]
-                    if extracted_spans:
-                        parsed_value = extracted_spans
-                        confidence = 0.7
-                        self.logger.debug(f"Parsed spans via spaCy NER: {parsed_value}")
-                    else:
-                        non_stop_chunks = [chunk.text.strip() for chunk in doc.noun_chunks if not all(tok.is_stop for tok in chunk)]
-                        if non_stop_chunks:
-                            parsed_value = [non_stop_chunks[0]]
-                            confidence = 0.5
-                            self.logger.debug(f"Parsed span via spaCy Noun Chunk: {parsed_value}")
-                if parsed_value is None:
-                    first_line = output.split('\n')[0].strip('.,!? ')
-                    if len(first_line) > 1 and len(first_line.split()) < 10:
-                        parsed_value = [first_line]
-                        confidence = 0.4
-                        self.logger.debug(f"Parsed span via first line heuristic: {parsed_value}")
-
-            # 3. Parse DATE
+            # 3. Try Parsing DATE
             elif answer_type == 'date':
                 try:
+                    # Use dateutil for robust parsing
                     parsed = date_parser.parse(output, fuzzy=True)
                     parsed_value = {
                         'day': str(parsed.day),

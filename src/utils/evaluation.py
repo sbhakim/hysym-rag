@@ -41,7 +41,7 @@ class Evaluation:
         # Initialize semantic scoring components (primarily for text-based QA)
         self.use_semantic_scoring = use_semantic_scoring
         self.semantic_threshold = semantic_threshold
-        if self.use_semantic_scoring or self.dataset_type != 'drop':
+        if self.use_semantic_scoring:
             try:
                 self.embedder = SentenceTransformer(embedding_model)
                 self.logger.info(f"Successfully loaded SentenceTransformer model '{embedding_model}'.")
@@ -73,7 +73,7 @@ class Evaluation:
             'path_performance': defaultdict(list)
         }
 
-        # Initialize ROUGE scorer and BLEU smoothing
+        # Initialize ROUGE scorer and BLEU smoothing (used only for HotpotQA)
         self.rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
         self.bleu_smoothing = SmoothingFunction().method1
 
@@ -120,11 +120,19 @@ class Evaluation:
                     # DROP evaluation
                     drop_eval = self._evaluate_drop_answer(pred_value, gt_value, query_id)
                     current_query_metrics.update(drop_eval)
-                    # ROUGE-L and BLEU for DROP (stringified answers)
-                    pred_str = self._stringify_drop_answer(pred_value, query_id)
-                    gt_str = self._stringify_drop_answer(gt_value, query_id)
-                    current_query_metrics['rougeL'] = self._calculate_rouge_l(pred_str, gt_str, query_id)
-                    current_query_metrics['bleu'] = self._calculate_bleu(pred_str, gt_str, query_id)
+                    # Semantic similarity for spans if applicable
+                    if drop_eval['answer_type_drop'] == 'spans' and self.use_semantic_scoring and self.embedder:
+                        pred_spans = pred_value.get('spans', [])
+                        gt_spans = gt_value.get('spans', [])
+                        pred_str = ' '.join(str(s).strip() for s in pred_spans) if pred_spans else ''
+                        gt_str = ' '.join(str(s).strip() for s in gt_spans) if gt_spans else ''
+                        if pred_str and gt_str:
+                            sem_sim = self._calculate_semantic_similarity(pred_str, gt_str, query_id)
+                            current_query_metrics['semantic_similarity'] = sem_sim
+                        else:
+                            current_query_metrics['semantic_similarity'] = 0.0
+                    else:
+                        current_query_metrics['semantic_similarity'] = 0.0
                 else:  # HotpotQA / text-based evaluation
                     # Extract predicted text
                     pred_text = pred_value[0] if isinstance(pred_value, tuple) else str(pred_value)
@@ -173,20 +181,27 @@ class Evaluation:
                 current_query_metrics.update({
                     'exact_match': 0.0,
                     'f1': 0.0,
-                    'rougeL': 0.0,
-                    'bleu': 0.0,
                     'semantic_similarity': 0.0
                 })
+                if self.dataset_type != 'drop':
+                    current_query_metrics.update({
+                        'rougeL': 0.0,
+                        'bleu': 0.0
+                    })
                 all_query_metrics.append(current_query_metrics)
 
         # Aggregate metrics
         aggregated_metrics = {
             'average_exact_match': 0.0,
             'average_f1': 0.0,
-            'average_semantic_similarity': 0.0,
-            'average_rougeL': 0.0,
-            'average_bleu': 0.0
+            'average_semantic_similarity': 0.0
         }
+        if self.dataset_type != 'drop':
+            aggregated_metrics.update({
+                'average_rougeL': 0.0,
+                'average_bleu': 0.0
+            })
+
         if not all_query_metrics:
             self.logger.info("No queries processed for evaluation")
             return aggregated_metrics
@@ -227,11 +242,35 @@ class Evaluation:
     def _compute_f1_spans(self, pred_spans: List[str], gold_spans: List[str], query_id: str) -> float:
         """
         Compute F1 for DROP spans with semantic similarity for partial matches.
+        Updated to deduplicate spans before comparison.
         """
         try:
-            pred_set = set(self._normalize_drop_answer_str(str(s), query_id) for s in pred_spans if str(s).strip())
-            gt_set = set(self._normalize_drop_answer_str(str(s), query_id) for s in gold_spans if str(s).strip())
-            self.logger.debug(f"[QID:{query_id}] Pred spans: {pred_set}, Gold spans: {gt_set}")
+            # Normalize and deduplicate spans while preserving order
+            seen = set()
+            pred_set = set()
+            pred_list = []
+            for s in pred_spans:
+                if not str(s).strip():
+                    continue
+                norm_s = self._normalize_drop_answer_str(str(s), query_id)
+                if norm_s not in seen:
+                    seen.add(norm_s)
+                    pred_set.add(norm_s)
+                    pred_list.append(norm_s)
+
+            seen = set()
+            gt_set = set()
+            gt_list = []
+            for s in gold_spans:
+                if not str(s).strip():
+                    continue
+                norm_s = self._normalize_drop_answer_str(str(s), query_id)
+                if norm_s not in seen:
+                    seen.add(norm_s)
+                    gt_set.add(norm_s)
+                    gt_list.append(norm_s)
+
+            self.logger.debug(f"[QID:{query_id}] Pred spans (deduplicated): {pred_set}, Gold spans (deduplicated): {gt_set}")
 
             if not pred_set and not gt_set:
                 self.logger.debug(f"[QID:{query_id}] Both pred and gold spans empty: F1=1.0")
@@ -242,18 +281,18 @@ class Evaluation:
 
             # Exact match component
             exact_matches = len(pred_set.intersection(gt_set))
-            exact_precision = exact_matches / len(pred_set)
-            exact_recall = exact_matches / len(gt_set)
+            exact_precision = exact_matches / len(pred_set) if pred_set else 0.0
+            exact_recall = exact_matches / len(gt_set) if gt_set else 0.0
 
             # Semantic similarity component
             semantic_score = 0.0
             if self.embedder and self.use_semantic_scoring:
-                for pred_span in pred_set:
+                for pred_span in pred_list:
                     max_sim = 0.0
-                    for gt_span in gt_set:
+                    for gt_span in gt_list:
                         sim = self._calculate_semantic_similarity(pred_span, gt_span, query_id)
                         max_sim = max(max_sim, sim)
-                    semantic_score += max_sim / len(pred_set)
+                    semantic_score += max_sim / len(pred_list) if pred_list else 0.0
                 self.logger.debug(f"[QID:{query_id}] Semantic similarity score for spans: {semantic_score:.2f}")
             else:
                 semantic_score = exact_precision  # Fallback to exact precision
@@ -282,6 +321,7 @@ class Evaluation:
         """
         Evaluate a single DROP answer, comparing number, spans, or date fields.
         Enhanced to handle structured answers and edge cases robustly.
+        Updated to normalize predictions and remove ROUGE-L/BLEU for DROP.
         """
         try:
             # Handle invalid or error predictions
@@ -293,7 +333,18 @@ class Evaluation:
                 self.logger.debug(f"[QID:{qid}] Invalid ground truth format: {gt}")
                 return {'exact_match': 0.0, 'f1': 0.0, 'answer_type_drop': 'invalid'}
 
-            # Determine answer type
+            # Normalize prediction format to match expected DROP structure
+            normalized_pred = {
+                'number': pred.get('number', ''),
+                'spans': pred.get('spans', []),
+                'date': pred.get('date', {'day': '', 'month': '', 'year': ''}),
+                'status': pred.get('status', 'success'),
+                'confidence': pred.get('confidence', 0.0),
+                'rationale': pred.get('rationale', ''),
+                'type': pred.get('type', '')
+            }
+
+            # Determine answer type based on ground truth
             if gt.get('number'):
                 answer_type = 'number'
             elif gt.get('spans'):
@@ -306,20 +357,20 @@ class Evaluation:
 
             # Exact Match and F1
             if answer_type == 'number':
-                em = float(self._are_drop_values_equivalent(pred, gt, 'number', qid))
+                em = float(self._are_drop_values_equivalent(normalized_pred, gt, 'number', qid))
                 f1 = em  # F1 same as EM for numbers
             elif answer_type == 'spans':
-                em = float(self._are_drop_values_equivalent(pred, gt, 'spans', qid))
-                f1 = self._compute_f1_spans(pred.get('spans', []), gt.get('spans', []), qid)
+                em = float(self._are_drop_values_equivalent(normalized_pred, gt, 'spans', qid))
+                f1 = self._compute_f1_spans(normalized_pred.get('spans', []), gt.get('spans', []), qid)
             elif answer_type == 'date':
-                em = float(self._are_drop_values_equivalent(pred, gt, 'date', qid))
+                em = float(self._are_drop_values_equivalent(normalized_pred, gt, 'date', qid))
                 f1 = em  # F1 same as EM for dates
             else:
                 self.logger.debug(f"[QID:{qid}] Unsupported answer type: {answer_type}")
                 em, f1 = 0.0, 0.0
                 answer_type = 'unknown'
 
-            self.logger.debug(f"[QID:{qid}] DROP evaluation: Pred={pred}, GT={gt}, EM={em:.2f}, F1={f1:.2f}, Type={answer_type}")
+            self.logger.debug(f"[QID:{qid}] DROP evaluation: Pred={normalized_pred}, GT={gt}, EM={em:.2f}, F1={f1:.2f}, Type={answer_type}")
             return {'exact_match': em, 'f1': f1, 'answer_type_drop': answer_type}
 
         except Exception as e:
@@ -363,8 +414,10 @@ class Evaluation:
         """
         Normalize number strings for comparison.
         Consistent with hybrid_integrator.py.
+        Updated to convert whole numbers to integers for consistent comparison.
         """
         if value_str is None:
+            self.logger.debug(f"[QID:{qid}] Number value is None, cannot normalize")
             return None
         try:
             s = str(value_str).replace(",", "").strip().lower()
@@ -374,6 +427,9 @@ class Evaluation:
                 "ten": 10.0
             }
             result = words.get(s, float(s))
+            # Convert to integer if the number is a whole number for consistency
+            if result.is_integer():
+                result = float(int(result))
             self.logger.debug(f"[QID:{qid}] Normalized number: '{value_str}' -> {result}")
             return result
         except Exception as e:
@@ -386,7 +442,7 @@ class Evaluation:
         Preserve essential content while removing irrelevant punctuation.
         """
         text = str(text).lower()
-        # Remove specific punctuation but preserve meaningful characters
+        # Remove specific punctuation but preserve meaningful characters like hyphens
         text = text.translate(str.maketrans('', '', string.punctuation.replace('-', '')))
         text = re.sub(r'\b(a|an|the)\b', '', text)
         text = ' '.join(text.split())
@@ -396,6 +452,7 @@ class Evaluation:
     def _tokenize_drop(self, text: str, qid: str) -> List[str]:
         """
         Tokenize for DROP F1 calculation.
+        Used only for HotpotQA BLEU computation.
         """
         tokens = self._normalize_drop_answer_str(text, qid).split()
         self.logger.debug(f"[QID:{qid}] Tokenized text: {tokens}")
@@ -403,7 +460,7 @@ class Evaluation:
 
     def _stringify_drop_answer(self, answer: Dict[str, Any], qid: str) -> str:
         """
-        Convert a DROP answer to a string for ROUGE-L and BLEU metrics.
+        Convert a DROP answer to a string for ROUGE-L and BLEU metrics (used only for HotpotQA).
         """
         try:
             if answer.get('number'):
@@ -452,6 +509,7 @@ class Evaluation:
     def _calculate_rouge_l(self, prediction: str, ground_truth: str, qid: str) -> float:
         """
         Calculate ROUGE-L score.
+        Used only for HotpotQA evaluation.
         """
         try:
             prediction_str = str(prediction)
@@ -470,6 +528,7 @@ class Evaluation:
     def _calculate_bleu(self, prediction: str, ground_truth: str, qid: str) -> float:
         """
         Calculate BLEU score.
+        Used only for HotpotQA evaluation.
         """
         try:
             prediction_str = str(prediction)

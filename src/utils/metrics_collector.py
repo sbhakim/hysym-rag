@@ -173,10 +173,10 @@ class MetricsCollector:
         # Performance metrics if ground truth available
         if ground_truth is not None:
             try:
-                query_metrics.update(self._calculate_performance_metrics(prediction, ground_truth))
+                query_metrics.update(self._calculate_performance_metrics(prediction, ground_truth, qid))
             except Exception as e:
                 self.logger.error(f"[QID:{qid}] Error calculating performance metrics: {str(e)}")
-                query_metrics['performance_metrics'] = {'exact_match': 0.0, 'f1': 0.0}
+                query_metrics['performance_metrics'] = {'exact_match': 0.0, 'f1': 0.0, 'semantic_similarity': 0.0}
 
         # Reasoning metrics
         if confidence is not None:
@@ -207,28 +207,70 @@ class MetricsCollector:
         if self.query_count % self.save_frequency == 0:
             self._save_metrics()
 
-    def _calculate_performance_metrics(self, prediction: Any, ground_truth: Any) -> Dict[str, float]:
+    def _calculate_performance_metrics(self, prediction: Any, ground_truth: Any, query_id: str) -> Dict[str, float]:
         """
         Calculate performance metrics based on dataset type.
         Handles DROP's structured answers and HotpotQA's text-based answers.
+        [Updated May 16, 2025]: Enhanced validation to accept valid DROP predictions (number, spans, date),
+        handle empty predictions, and log specific errors for type mismatches, with improved robustness.
         """
-        metrics = {'exact_match': 0.0, 'f1': 0.0}
+        metrics = {'exact_match': 0.0, 'f1': 0.0, 'semantic_similarity': 0.0}
         try:
             if self.dataset_type == 'drop':
-                # DROP: Structured comparison
-                if isinstance(prediction, dict) and isinstance(ground_truth, dict):
-                    if ground_truth.get('number'):
-                        metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'number'))
-                        metrics['f1'] = metrics['exact_match']
-                    elif ground_truth.get('spans'):
-                        metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'spans'))
-                        metrics['f1'] = self._compute_f1_spans(prediction.get('spans', []), ground_truth.get('spans', []))
-                    elif ground_truth.get('date') and any(ground_truth['date'].values()):
-                        metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'date'))
-                        metrics['f1'] = metrics['exact_match']
-                    metrics['success'] = metrics['exact_match'] == 1.0
-                else:
-                    self.logger.warning("Invalid DROP prediction or ground truth format")
+                # Validate prediction structure
+                if not isinstance(prediction, dict) or not all(k in prediction for k in ['number', 'spans', 'date']):
+                    self.logger.warning(f"[QID:{query_id}] Invalid DROP prediction structure: {prediction}")
+                    return metrics
+                # Validate ground truth structure
+                if not isinstance(ground_truth, dict) or not all(
+                        k in ground_truth for k in ['number', 'spans', 'date']):
+                    self.logger.warning(f"[QID:{query_id}] Invalid DROP ground truth structure: {ground_truth}")
+                    return metrics
+
+                # Check if prediction is empty (no meaningful content)
+                is_pred_empty = (not prediction.get('number') and
+                                 not prediction.get('spans') and
+                                 not any(prediction.get('date', {}).values()))
+                if is_pred_empty:
+                    self.logger.debug(f"[QID:{query_id}] Empty DROP prediction: {prediction}")
+                    return metrics
+
+                # Determine ground truth type
+                gt_type = ('number' if ground_truth.get('number') else
+                           ('spans' if ground_truth.get('spans') else
+                            ('date' if any(ground_truth.get('date', {}).values()) else None)))
+                if gt_type is None:
+                    self.logger.warning(
+                        f"[QID:{query_id}] Invalid ground truth format: No valid number, spans, or date")
+                    return metrics
+
+                # Determine prediction type, prioritizing actual content over 'type' field
+                pred_type = ('number' if prediction.get('number') else
+                             ('spans' if prediction.get('spans') else
+                              ('date' if any(prediction.get('date', {}).values()) else None)))
+                # Fallback to 'type' field if no content-based type is determined
+                if pred_type is None:
+                    pred_type = prediction.get('type', 'unknown')
+                    self.logger.debug(
+                        f"[QID:{query_id}] No content-based type detected, using prediction type: {pred_type}")
+
+                # Check for type mismatch
+                if pred_type != gt_type:
+                    self.logger.debug(f"[QID:{query_id}] Type mismatch: Predicted {pred_type}, Expected {gt_type}")
+                    return metrics
+
+                # Compute metrics based on type
+                if gt_type == 'number':
+                    metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'number'))
+                    metrics['f1'] = metrics['exact_match']
+                elif gt_type == 'spans':
+                    metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'spans'))
+                    metrics['f1'] = self._compute_f1_spans(prediction.get('spans', []), ground_truth.get('spans', []))
+                    metrics['semantic_similarity'] = self._compute_semantic_similarity(
+                        prediction.get('spans', []), ground_truth.get('spans', []))
+                elif gt_type == 'date':
+                    metrics['exact_match'] = float(self._are_drop_values_equivalent(prediction, ground_truth, 'date'))
+                    metrics['f1'] = metrics['exact_match']
             else:
                 # HotpotQA: Text-based comparison
                 pred_text = str(prediction)
@@ -236,10 +278,10 @@ class MetricsCollector:
                 metrics['exact_match'] = float(pred_text == gt_text)
                 metrics['char_error_rate'] = self._calculate_char_error_rate(pred_text, gt_text)
                 metrics['prediction_length_ratio'] = (float(len(pred_text) / len(gt_text))
-                                                     if len(gt_text) != 0 else 0.0)
-                metrics['success'] = metrics['exact_match'] == 1.0
+                                                      if len(gt_text) != 0 else 0.0)
         except Exception as e:
-            self.logger.error(f"Error in performance metrics calculation: {str(e)}")
+            self.logger.error(f"[QID:{query_id}] Error in performance metrics calculation: {str(e)}")
+            return metrics
         return metrics
 
     def _are_drop_values_equivalent(self, obj1: Dict[str, Any], obj2: Dict[str, Any], value_type: str) -> bool:
@@ -312,6 +354,25 @@ class MetricsCollector:
             return 2 * (precision * recall) / (precision + recall)
         except Exception as e:
             self.logger.error(f"Error computing F1 for spans: {str(e)}")
+            return 0.0
+
+    def _compute_semantic_similarity(self, pred_spans: List[str], gold_spans: List[str]) -> float:
+        """
+        Compute semantic similarity for spans using SentenceTransformer.
+        """
+        try:
+            from sentence_transformers import SentenceTransformer, util
+            embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cuda' if torch.cuda.is_available() else 'cpu')
+            pred_text = ' '.join(str(s) for s in pred_spans if str(s).strip())
+            gold_text = ' '.join(str(s) for s in gold_spans if str(s).strip())
+            if not pred_text or not gold_text:
+                return 0.0
+            pred_emb = embedder.encode(pred_text, convert_to_tensor=True)
+            gold_emb = embedder.encode(gold_text, convert_to_tensor=True)
+            similarity = util.cos_sim(pred_emb, gold_emb).item()
+            return float(similarity)
+        except Exception as e:
+            self.logger.error(f"Error computing semantic similarity: {str(e)}")
             return 0.0
 
     def _calculate_metrics(self, values: List[float]) -> Dict[str, float]:
@@ -440,7 +501,7 @@ class MetricsCollector:
         if not path_metrics:
             return 0.0
         successes = sum(1 for m in path_metrics if
-                        m.get('performance_metrics', {}).get('success', False))
+                        m.get('performance_metrics', {}).get('exact_match', 0.0) == 1.0)
         return (successes / len(path_metrics)) * 100 if path_metrics else 0.0
 
     def _analyze_reasoning_patterns(self) -> Dict[str, Any]:

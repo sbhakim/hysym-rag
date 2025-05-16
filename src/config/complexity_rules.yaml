@@ -1,0 +1,16 @@
+# src/config/complexity_rules.yaml
+
+drop:
+  # symbolic-only if a COUNT or EXTREME_VALUE pattern matches exactly:
+  symbolic:
+    priority_triggers: ["how many", "first", "last", "longest", "shortest"]
+    max_query_length: 12
+
+  # hybrid when there’s comparison or arithmetic beyond simple count:
+  hybrid:
+    triggers: ["more", "difference", "sum", "total", "average"]
+    max_query_length: 20
+
+  # neural-only fallback for anything longer or with date math:
+  neural:
+    min_query_length: 21

@@ -1,7 +1,7 @@
 # src/ablation_study.py
 
 from collections import defaultdict
-from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
+from src.reasoners.networkx_symbolic_reasoner_base import GraphSymbolicReasoner
 from src.integrators.hybrid_integrator import HybridIntegrator
 from src.system.system_control_manager import SystemControlManager, UnifiedResponseAggregator
 from src.utils.metrics_collector import MetricsCollector

@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from src.config.config_loader import ConfigLoader
 from src.reasoners.neural_retriever import NeuralRetriever
-from src.reasoners.networkx_symbolic_reasoner import GraphSymbolicReasoner
+from src.reasoners.networkx_symbolic_reasoner_base import GraphSymbolicReasoner
 from src.integrators.hybrid_integrator import HybridIntegrator
 from src.resources.resource_manager import ResourceManager
 from src.utils.evaluation import Evaluation

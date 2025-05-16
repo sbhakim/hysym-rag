@@ -94,7 +94,7 @@ HySym-RAG/
 │   │   ├── config.yaml            # Main system configuration
 │   │   ├── resource_config.yaml   # Resource management thresholds
 │   └── reasoners/                 # Symbolic and neural reasoning modules
-│       ├── networkx_symbolic_reasoner.py  # Graph-based symbolic reasoner
+│       ├── networkx_symbolic_reasoner_base.py  # Graph-based symbolic reasoner
 │       ├── neural_retriever.py    # Transformer-based neural retriever
 │   ├── integrators/               # Hybrid integration logic
 │       ├── hybrid_integrator.py   # Decides between symbolic and neural reasoning

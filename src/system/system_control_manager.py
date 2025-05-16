@@ -1,648 +1,697 @@
 # src/system/system_control_manager.py
 
-import logging
 import time
-from typing import Any, Dict, Optional, Tuple
-from datetime import datetime
-import torch  # Not directly used in this file but often present in PyTorch projects
-import numpy as np
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 from collections import defaultdict
-from src.utils.metrics_collector import MetricsCollector
+import numpy as np
+from datetime import datetime
+
+# Ensure necessary imports from sibling directories are correct
+# Assuming standard project structure where src is discoverable
+try:
+    from src.resources.resource_manager import ResourceManager
+    from src.utils.metrics_collector import MetricsCollector
+except ImportError:
+    # Fallback if run directly or structure differs
+    import sys
+    import os
+    sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
+    from src.resources.resource_manager import ResourceManager
+    from src.utils.metrics_collector import MetricsCollector
 
 
-# Assuming HybridIntegrator might be type hinted or for isinstance checks later if needed
-# from src.integrators.hybrid_integrator import HybridIntegrator
-
+logger = logging.getLogger(__name__)
 
 class UnifiedResponseAggregator:
     """
-    Aggregator for academic evaluation responses with detailed reasoning.
+    Aggregates responses with optional explanations, supporting both HotpotQA (string) and DROP (dict) results.
     """
-
-    def __init__(self, include_explanations: bool = True):
+    def __init__(self, include_explanations: bool = False):
         self.include_explanations = include_explanations
-        self.logger = logging.getLogger("UnifiedResponseAggregator")  # Added logger initialization
+        self.logger = logging.getLogger("UnifiedResponseAggregator")
+
+    def aggregate(self, result: Any, source: str, confidence: float = 1.0, debug_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Aggregates the result with metadata, handling both HotpotQA and DROP result types.
+        """
+        output = {
+            'result': result,
+            'source': source,
+            'confidence': confidence,
+            'reasoning_path': source  # Keep reasoning_path consistent with source for now
+        }
+        # Ensure debug_info is checked before accessing keys within it
+        if self.include_explanations and debug_info:
+            output['debug_info'] = debug_info  # Store the whole debug info
+            # Safely add specific keys if they exist in debug_info
+            if 'fusion_strategy_text' in debug_info:
+                output['fusion_strategy'] = debug_info['fusion_strategy_text']
+            elif 'fusion_strategy_drop' in debug_info:
+                output['fusion_strategy'] = debug_info['fusion_strategy_drop']
+            # Add timings if present
+            output['symbolic_time'] = debug_info.get('symbolic_time', 0.0)
+            output['neural_time'] = debug_info.get('neural_time', 0.0)
+            output['fusion_time'] = debug_info.get('fusion_time', 0.0)
+        return output
 
     def format_response(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        # Ensure 'result' is present, especially for DROP which might return structured dicts
+        """
+        Formats the response dictionary for consistent output, handling different result types.
+        """
+        # Ensure 'result' key exists, providing a default if missing
         if 'result' not in data:
-            self.logger.warning("Formatting response: 'result' key missing from data.")
-            data['result'] = data.get('error', "No result available")  # Default to error or a placeholder
+            self.logger.warning(f"Formatting response for QID {data.get('query_id', 'unknown')}: 'result' key missing. Setting default error.")
+            data['result'] = data.get('error', "Error: No result generated.")  # Use provided error or a default
 
+        result = data['result']
+
+        # Handle DROP dataset specific formatting/validation
+        if data.get('dataset_type') == 'drop':  # Assuming dataset_type might be passed in data
+            if isinstance(result, dict):
+                # Ensure essential DROP keys exist, provide defaults if not
+                result.setdefault('number', '')
+                result.setdefault('spans', [])
+                result.setdefault('date', {'day': '', 'month': '', 'year': ''})
+                # If an error key exists, ensure it's represented correctly
+                if 'error' in result:
+                     result.setdefault('type', 'error_object')  # Add type if error exists
+            elif isinstance(result, str) and result.startswith("Error:"):
+                 # If result is an error string, convert to standard DROP error format
+                 error_msg = result
+                 data['result'] = {'error': error_msg, 'type': 'error_object', 'spans': [], 'number': '', 'date': {'day':'','month':'','year':''}}
+                 self.logger.warning(f"Converted error string to DROP dict for QID {data.get('query_id', 'unknown')}")
+            else:
+                # If it's not a dict or known error string, format is unexpected for DROP
+                self.logger.warning(f"Unexpected result format for DROP QID {data.get('query_id', 'unknown')}: {result}. Wrapping as error.")
+                error_msg = f"Unexpected result structure: {str(result)[:100]}"
+                data['result'] = {'error': error_msg, 'type': 'error_object', 'spans': [], 'number': '', 'date': {'day':'','month':'','year':''}}
+
+        # Handle Text QA (e.g., HotpotQA) - ensure result is a string
+        elif not isinstance(result, str):
+            self.logger.warning(f"Unexpected result type for Text QA QID {data.get('query_id', 'unknown')}: {type(result)}. Converting to string.")
+            data['result'] = str(result)
+
+        # Add explanation if requested and possible
         if self.include_explanations:
+            # Ensure explanation is generated even if some keys are missing in 'data'
             data.setdefault("explanation", self._generate_detailed_explanation(data))
+
+        # Ensure standard keys are present
+        data.setdefault('query_id', 'unknown')
+        data.setdefault('processing_time', 0.0)
+        data.setdefault('resource_usage', {})
+        data.setdefault('reasoning_path', 'unknown')
+        data.setdefault('retries', 0)
+        data.setdefault('status', 'unknown')  # e.g., 'success', 'failed'
+
         return data
 
-
     def _generate_detailed_explanation(self, data: Dict[str, Any]) -> str:
-        """Generate detailed reasoning explanation for academic analysis."""
+        """Generate detailed reasoning explanation string."""
         parts = []
-        if 'reasoning_path' in data:  # This is the string like 'symbolic', 'hybrid'
-            parts.append(f"Reasoning Approach: {data['reasoning_path']}")
+        path = data.get('reasoning_path', 'unknown')
+        parts.append(f"Reasoning Approach: {path}")
 
-        # For DROP, data['result'] might be a dict. For HotpotQA, it might be a string.
-        # We probably don't want to print the whole structured result in the explanation.
-        # The main result should be handled by the caller.
-        # This explanation focuses on metadata.
+        proc_time = data.get('processing_time')
+        if isinstance(proc_time, (int, float)):
+             parts.append(f"Processing Time: {proc_time:.3f}s")
 
-        if 'processing_time' in data:
-            parts.append(f"Processing Time: {data['processing_time']:.3f}s")
-        if 'resource_usage' in data:
-            parts.append("Resource Utilization:")
-            for resource, usage in data['resource_usage'].items():
-                # Ensure usage is a number before formatting
+        resource_usage = data.get('resource_usage')
+        if isinstance(resource_usage, dict):
+            usage_parts = []
+            for resource, usage in resource_usage.items():
                 if isinstance(usage, (int, float)):
-                    parts.append(f"- {resource.capitalize()}: {usage * 100:.1f}%")
+                    # Assume delta values don't need *100 anymore if calculated correctly before
+                    usage_parts.append(f"{resource.capitalize()}: {usage:.2f} delta")
                 else:
-                    parts.append(f"- {resource.capitalize()}: {usage}")  # Print as is if not a number
+                    usage_parts.append(f"{resource.capitalize()}: {usage}")
+            if usage_parts:
+                 parts.append(f"Resource Delta: [{', '.join(usage_parts)}]")
+
+        # Add component timings if available
+        sym_time = data.get('symbolic_time')
+        neu_time = data.get('neural_time')
+        fus_time = data.get('fusion_time')
+        timings = []
+        if isinstance(sym_time, (int, float)) and sym_time > 0: timings.append(f"Sym: {sym_time:.3f}s")
+        if isinstance(neu_time, (int, float)) and neu_time > 0: timings.append(f"Neu: {neu_time:.3f}s")
+        if isinstance(fus_time, (int, float)) and fus_time > 0: timings.append(f"Fus: {fus_time:.3f}s")
+        if timings:
+             parts.append(f"Component Times: [{', '.join(timings)}]")
 
         if data.get('retries', 0) > 0:
             parts.append(f"Retries Attempted: {data['retries']}")
 
-        return " | ".join(parts) if parts else "No additional explanation metadata provided."
+        status = data.get('status', 'unknown')
+        if status == 'failed':
+             parts.append(f"Status: Failed ({data.get('error', 'Unknown reason')})")
+
+        return " | ".join(parts) if parts else "No detailed explanation available."
 
 
 class SystemControlManager:
     """
-    Enhanced SystemControlManager for academic evaluation of HySym-RAG.
-    Focuses on reproducible metrics, detailed analysis, and academic logging.
+    Orchestrates the hybrid reasoning pipeline with resource management and fallback strategies.
+    Supports both HotpotQA and DROP datasets through dataset_type parameter.
     """
 
     def __init__(
             self,
-            hybrid_integrator,  # Should be an instance of HybridIntegrator
-            resource_manager,
-            aggregator,  # Should be an instance of UnifiedResponseAggregator
-            metrics_collector: Optional[MetricsCollector] = None,
+            hybrid_integrator,
+            resource_manager: ResourceManager,
+            aggregator: UnifiedResponseAggregator,
+            metrics_collector: MetricsCollector,
             error_retry_limit: int = 2,
-            max_query_time: float = 10.0,  # Default, consider increasing for complex tasks
-            performance_window: int = 100  # For rolling metrics, not heavily used here yet
+            max_query_time: float = 30.0,
     ):
+        if not all([hybrid_integrator, resource_manager, aggregator, metrics_collector]):
+            raise ValueError("All core components (integrator, resource_manager, aggregator, metrics_collector) must be provided.")
+
         self.hybrid_integrator = hybrid_integrator
         self.resource_manager = resource_manager
         self.aggregator = aggregator
-        self.error_retry_limit = error_retry_limit
-        self.max_query_time = max_query_time  # Currently not enforced with a timeout mechanism here
-        self.metrics_collector = metrics_collector or MetricsCollector()
-        self.logger = logging.getLogger("SystemControlManager")
-        self.logger.setLevel(logging.INFO)
+        self.metrics_collector = metrics_collector
+        self.error_retry_limit = max(error_retry_limit, 0)  # Ensure non-negative
+        self.max_query_time = max(max_query_time, 1.0)  # Ensure positive time limit
+        self.logger = logger
+        self.logger.setLevel(logging.INFO)  # Set default level
 
+        # Performance tracking
         self.performance_metrics = {
             'total_queries': 0,
             'successful_queries': 0,
-            'failed_queries': 0,
-            'avg_response_time': 0.0,
-            'path_performance': defaultdict(list),  # Stores lists of response times per path
-            # 'resource_efficiency' and 'reasoning_quality' are more complex and likely aggregated
-            # by MetricsCollector from detailed per-query resource_usage and reasoning_path_details
+            'error_count': 0,
+            'path_usage': defaultdict(int)  # Tracks how often each path is *chosen*
         }
-        self.path_history = []  # Stores dicts about path selection decisions
-
-        # Adaptive thresholds for path determination
-        self.adaptive_thresholds = {
-            'complexity_threshold': 0.75,  # Queries below this might go symbolic
-            'resource_pressure_threshold': 0.80,  # If system resource usage above this, might favor symbolic
-            'efficiency_threshold': 0.6  # Not directly used in path determination logic here
-        }
+        # Stores counts, success counts, and average time per path type (updated upon completion)
+        self.reasoning_path_stats = defaultdict(lambda: {'count': 0, 'success': 0, 'total_time': 0.0, 'avg_time': 0.0})
+        # Stores details about each path selection decision made
+        self.path_history = []
+        # Dynamic path selection thresholds (will be adjusted by _optimize_resources)
+        self.low_complexity_thr = 0.4
+        self.high_complexity_thr = 0.8
+        self.low_resource_thr = 0.6
+        self.high_resource_thr = 0.85
 
     def process_query_with_fallback(
             self,
             query: str,
             context: str,
-            max_retries: Optional[int] = None,
+            query_id: str,
             forced_path: Optional[str] = None,
-            query_complexity: Optional[float] = None,
-            query_id: Optional[str] = None  # <-- ADDED PARAMETER
-    ) -> Dict[str, Any]:
+            query_complexity: float = 0.5,
+            supporting_facts: Optional[List[Tuple[str, int]]] = None,
+            dataset_type: Optional[str] = None
+    ) -> Tuple[Dict[str, Any], str]:
         """
-        Process query with enhanced error handling and metrics collection.
-        Now accepts and forwards query_id.
+        Processes a query with fallback strategies in case of errors.
+        Now accepts dataset_type for path selection.
+        Returns a tuple containing:
+            - A dictionary representing the final formatted response or error details.
+            - A string indicating the final reasoning path taken ('symbolic', 'neural', 'hybrid', 'fallback_error', etc.).
         """
-        if not isinstance(query, str) or not query.strip():
-            # Consider raising ValueError for main.py to catch or return a specific error structure
-            self.logger.error(f"Invalid query provided (query_id: {query_id}): Must be a non-empty string.")
-            return self._handle_final_failure(time.time(), "Invalid query string", query_id, is_error_object=True)
-
-        start_time = time.time()
-        retries = 0
-        max_retries_effective = max_retries if max_retries is not None else self.error_retry_limit
-
-        self.logger.info(f"Processing query_id: {query_id}, Query: '{query[:100]}...'")
+        self.logger.info(f"Processing query_id: {query_id}, Query: '{query[:50]}...', Dataset: {dataset_type or 'unknown'}")
+        self.performance_metrics['total_queries'] += 1
+        attempts = 0
+        max_retries = self.error_retry_limit
+        reasoning_path_taken = 'unknown'  # Will be updated after path selection
 
         # Record initial resource state for delta calculation
         initial_resources = self.resource_manager.check_resources()
+        overall_start_time = time.time()  # Track start time for overall processing, including retries
 
-        final_result_obj: Any = None
-        reasoning_path_taken: str = "unknown"
-
-        while retries <= max_retries_effective:
+        while attempts <= max_retries:
+            attempt_start_time = time.time()  # Start timer for this specific attempt
             try:
-                resource_status = self.resource_manager.check_resources()
-                if not self._validate_resources(resource_status):
-                    self.logger.warning(f"Resource limits exceeded (CPU: {resource_status.get('cpu', 0):.2f}, "
-                                        f"Mem: {resource_status.get('memory', 0):.2f}, GPU: {resource_status.get('gpu', 0):.2f}). "
-                                        f"Optimizing allocation for query_id: {query_id}...")
-                    self._optimize_resources()  # Placeholder for actual optimization logic
+                # Optimize resources before processing (adjust thresholds if needed)
+                self._optimize_resources()
 
-                # query_complexity is calculated once before the loop if not provided.
-                # If it's None initially, _timed_process_query will calculate it.
-                current_query_complexity = query_complexity
-                if current_query_complexity is None and hasattr(self.hybrid_integrator,
-                                                                "query_expander") and self.hybrid_integrator.query_expander:
-                    current_query_complexity = self.hybrid_integrator.query_expander.get_query_complexity(query)
-                    self.logger.info(
-                        f"Calculated query complexity for query_id {query_id}: {current_query_complexity:.4f}")
-                elif current_query_complexity is None:
-                    current_query_complexity = 0.8  # Default if still None
-
+                # Select path and execute the query processing along that path
                 final_result_obj, reasoning_path_taken = self._timed_process_query(
                     query,
                     context,
                     forced_path,
-                    current_query_complexity,  # Use the potentially calculated complexity
-                    query_id  # Pass query_id
+                    query_complexity,
+                    supporting_facts,
+                    query_id,
+                    dataset_type
                 )
 
-                # Check if the result indicates an internal processing error from lower levels
-                if isinstance(final_result_obj, dict) and final_result_obj.get("type") == "error_object":
-                    raise RuntimeError(
-                        f"Downstream processing error for query_id {query_id}: {final_result_obj.get('error')}")
+                # Calculate processing time for this successful attempt
+                processing_time_seconds = time.time() - attempt_start_time
 
-                processing_time_seconds = time.time() - start_time
+                # Check if the result object indicates an internal error occurred
+                is_error_result = False
+                if isinstance(final_result_obj, dict) and (final_result_obj.get("type") == "error_object" or final_result_obj.get("status") == "error"):
+                    is_error_result = True
+                    self.logger.error(f"QID {query_id} Path {reasoning_path_taken} resulted in error object: {final_result_obj.get('error', 'Unknown internal error')}")
+                elif isinstance(final_result_obj, str) and final_result_obj.startswith("Error:"):
+                    is_error_result = True
+                    self.logger.error(f"QID {query_id} Path {reasoning_path_taken} resulted in error string: {final_result_obj}")
+
+                # If an error occurred *within* the successful execution of a path
+                if is_error_result:
+                    # Still counts as an attempt, log error, maybe retry differently?
+                    # For now, let's treat it like other exceptions for retry logic
+                    raise ValueError(f"Internal error returned from path {reasoning_path_taken}: {final_result_obj}")
+
+                # --- Success Case ---
+                # Calculate resource delta based on overall start
                 final_utilized_resources = self.resource_manager.check_resources()
-                resource_delta = self._calculate_resource_delta(initial_resources, final_utilized_resources)
+                resource_delta = {k: final_utilized_resources[k] - initial_resources.get(k, 0.0)
+                                  for k in final_utilized_resources if k != 'timestamp'}
 
-                self._update_overall_metrics(start_time, True, reasoning_path_taken, query_id)  # Mark as success
+                # Update Success Stats
+                self.performance_metrics['successful_queries'] += 1
+                self.performance_metrics['path_usage'][reasoning_path_taken] += 1  # Track chosen path usage
+                self._update_reasoning_path_stats(reasoning_path_taken, success=True, time_taken=processing_time_seconds)
 
                 # Collect academic metrics
-                if self.metrics_collector:
-                    # For DROP, final_result_obj is structured. For text, it's a string.
-                    # MetricsCollector.collect_query_metrics expects a string prediction for some of its generic logic.
-                    prediction_for_metrics = str(final_result_obj)  # Default to string representation
-                    if self.hybrid_integrator.dataset_type == 'drop' and isinstance(final_result_obj, dict):
-                        # Create a concise string representation for general logging if needed,
-                        # but primary evaluation uses the object.
-                        if 'number' in final_result_obj:
-                            prediction_for_metrics = f"DROP_Num: {final_result_obj['number']}"
-                        elif 'spans' in final_result_obj:
-                            prediction_for_metrics = f"DROP_Spans: {str(final_result_obj['spans'])[:50]}"
-                        elif 'date' in final_result_obj:
-                            prediction_for_metrics = f"DROP_Date: {final_result_obj['date']}"
-                        elif 'error' in final_result_obj:
-                            prediction_for_metrics = f"DROP_Error: {final_result_obj['error']}"
+                prediction_for_metrics = str(final_result_obj)  # Default string representation
+                if dataset_type == 'drop' and isinstance(final_result_obj, dict):
+                    # Create specific string representations for DROP types for logging/metrics
+                    num = final_result_obj.get('number')
+                    spans = final_result_obj.get('spans')
+                    date = final_result_obj.get('date')
+                    error = final_result_obj.get('error')
+                    if num: prediction_for_metrics = f"DROP_Num: {num}"
+                    elif spans: prediction_for_metrics = f"DROP_Spans: {str(spans)[:50]}"
+                    elif date and any(date.values()): prediction_for_metrics = f"DROP_Date: {date.get('month','')}/{date.get('day','')}/{date.get('year','')}"
+                    elif error: prediction_for_metrics = f"DROP_Error: {error}"
+                    else: prediction_for_metrics = "DROP_Empty"
 
-                    self.metrics_collector.collect_query_metrics(
-                        query=query,  # Consider adding query_id here too if MC schema supports
-                        prediction=prediction_for_metrics,
-                        ground_truth=None,  # Ground truth is handled by Evaluation class later
-                        reasoning_path=reasoning_path_taken,
-                        processing_time=processing_time_seconds,
-                        resource_usage=resource_delta,
-                        complexity_score=current_query_complexity
-                    )
+                # Collect metrics using the metrics collector
+                if hasattr(self, 'metrics_collector') and self.metrics_collector:
+                     self.metrics_collector.collect_query_metrics(
+                         query=query,
+                         prediction=prediction_for_metrics,
+                         ground_truth=None,  # Compared later
+                         reasoning_path=reasoning_path_taken,
+                         processing_time=processing_time_seconds,
+                         resource_usage=resource_delta,
+                         complexity_score=query_complexity,
+                         query_id=query_id
+                     )
 
-                # Format response using aggregator
-                # The 'result' key here will hold the final_result_obj (string or dict for DROP)
-                return self.aggregator.format_response({
+                # Format the final response structure using the aggregator
+                # Add component timings extracted from the result object if they exist
+                component_timings = {}
+                if isinstance(final_result_obj, dict):
+                    component_timings = {
+                        k: final_result_obj.get(k) for k in ['symbolic_time', 'neural_time', 'fusion_time']
+                        if k in final_result_obj and isinstance(final_result_obj.get(k), (int, float))
+                    }
+
+                formatted_response = self.aggregator.format_response({
                     'query_id': query_id,
                     'result': final_result_obj,
                     'processing_time': processing_time_seconds,
-                    'resource_usage': resource_delta,
+                    'resource_usage': resource_delta,  # Store the calculated delta
                     'reasoning_path': reasoning_path_taken,
-                    'retries': retries
+                    'retries': attempts,
+                    'status': 'success',
+                    'dataset_type': dataset_type,  # Include dataset type
+                    **component_timings  # Merge timings if they exist
                 })
 
-            except TimeoutError as e:  # This would require an actual timeout mechanism implementation
-                self.logger.error(f"Query processing timeout for query_id {query_id}: {str(e)}")
-                retries += 1
-                if retries > max_retries_effective:
-                    return self._handle_final_failure(start_time, "Timeout", query_id, is_error_object=True)
-                self.logger.info(f"Retrying query_id {query_id} ({retries}/{max_retries_effective})...")
-                time.sleep(0.5 * retries)  # Basic backoff
-                continue
+                return formatted_response, reasoning_path_taken  # Return success dict and path string
 
             except Exception as e:
-                self.logger.exception(
-                    f"Error processing query_id {query_id} (attempt {retries + 1}/{max_retries_effective + 1}): {str(e)}")
-                retries += 1
-                if retries > max_retries_effective:
-                    return self._handle_final_failure(start_time, str(e), query_id, is_error_object=True)
-                self.logger.info(f"Retrying query_id {query_id} ({retries}/{max_retries_effective})...")
-                time.sleep(0.5 * retries)  # Basic backoff
+                # --- Error during attempt ---
+                self.logger.exception(f"Error processing query_id {query_id} (attempt {attempts + 1}/{max_retries + 1}): {str(e)}")
+                attempts += 1
+                self.performance_metrics['error_count'] += 1  # Increment error count here
+                if attempts > max_retries:
+                    # Final failure after all retries
+                    # Pass the *overall* start time for accurate duration logging
+                    failure_dict, failure_path = self._handle_final_failure(
+                        overall_start_time, str(e), query_id, dataset_type
+                    )
+                    return failure_dict, failure_path  # Return error dict and 'fallback_error' path
+                # Log retry attempt
+                self.logger.info(f"Retrying query_id {query_id} ({attempts}/{max_retries})...")
+                time.sleep(0.5 * attempts)  # Exponential backoff before next attempt
+                # Continue to the next iteration of the while loop to retry
                 continue
 
-        # Should not be reached if loop exits correctly, but as a safeguard:
-        return self._handle_final_failure(start_time, "Max retries exceeded without explicit error type.", query_id,
-                                          is_error_object=True)
+        # Should not be reached if logic is correct, but acts as a final fallback
+        self.logger.error(f"Exited retry loop unexpectedly for QID {query_id}")
+        return self._handle_final_failure(overall_start_time, "Exited retry loop unexpectedly", query_id, dataset_type)
 
     def _timed_process_query(
             self,
             query: str,
             context: str,
-            forced_path: Optional[str] = None,
-            query_complexity: Optional[float] = None,  # Should be pre-calculated now
-            query_id: Optional[str] = None  # <-- ADDED PARAMETER
-    ) -> Tuple[Any, str]:  # Return type is Any for result_obj
+            forced_path: Optional[str],
+            query_complexity: float,
+            supporting_facts: Optional[List[Tuple[str, int]]],
+            query_id: str,
+            dataset_type: Optional[str]
+    ) -> Tuple[Any, str]:
         """
-        Process query with enhanced timing and path selection logging.
-        Accepts query_id and passes it along.
+        Selects the processing path and executes the query along that path with fallbacks.
+        Returns the raw result object (string or dict) and the actual path taken.
+        Handles exceptions during execution with fallback paths for DROP.
         """
+        self.logger.debug(f"Executing query for QID {query_id} with dataset_type '{dataset_type}'...")
+        dt_lower = dataset_type.lower() if dataset_type else 'unknown'
+        attempted_paths = []
+
+        # Initial path selection
         path_selection_start_time = time.time()
+        initial_path = forced_path if forced_path else self.select_reasoning_path(query_complexity, query_id, dataset_type)
+        self.logger.debug(f"Path selection for QID {query_id} took: {time.time() - path_selection_start_time:.4f}s. Initial Path: {initial_path}")
 
-        # Use pre-calculated query_complexity if available
-        current_query_complexity = query_complexity
-        if current_query_complexity is None:  # Fallback if not passed, though main.py should pass it
-            if hasattr(self.hybrid_integrator, "query_expander") and self.hybrid_integrator.query_expander:
-                current_query_complexity = self.hybrid_integrator.query_expander.get_query_complexity(query)
-                self.logger.info(f"Re-calculated query complexity for qid {query_id}: {current_query_complexity:.4f}")
-            else:
-                current_query_complexity = 0.8  # Default fallback
-                self.logger.warning(
-                    f"Query complexity not provided or calculable for qid {query_id}, using default: {current_query_complexity}")
+        # List of paths to try in order (starting with the selected path)
+        paths_to_try = [initial_path]
+        if dt_lower == 'drop' and not forced_path:
+            # For DROP, define fallback paths if the initial path fails
+            if initial_path == 'hybrid':
+                paths_to_try.extend(['symbolic', 'neural'])
+            elif initial_path == 'symbolic':
+                paths_to_try.extend(['hybrid', 'neural'])
+            elif initial_path == 'neural':
+                paths_to_try.extend(['hybrid', 'symbolic'])
 
-        if forced_path:
-            optimal_path = forced_path
-            self.logger.info(f"Forced reasoning path for qid {query_id}: {optimal_path}")
-        else:
-            optimal_path = self._determine_optimal_path(
-                current_query_complexity,  # Use the resolved complexity
-                self.resource_manager.check_resources(),
-                query_id
-            )
-            # _determine_optimal_path already logs
+        for path in paths_to_try:
+            attempted_paths.append(path)
+            self.logger.debug(f"[DROP QID:{query_id}] Attempting path '{path}' (Attempted: {attempted_paths})")
+            try:
+                result_obj = self._execute_processing_path(
+                    path, query, context, query_complexity, supporting_facts, query_id, dataset_type
+                )
+                self.logger.info(f"[DROP QID:{query_id}] Successfully executed path '{path}'")
+                return result_obj, path
+            except Exception as e:
+                self.logger.warning(f"[DROP QID:{query_id}] Path '{path}' failed: {str(e)}. Trying next path...")
+                continue
 
-        self.logger.debug(
-            f"Path selection for qid {query_id} took: {time.time() - path_selection_start_time:.4f}s. Path: {optimal_path}")
+        # If all paths fail, raise the last exception to trigger retry logic in process_query_with_fallback
+        self.logger.error(f"[DROP QID:{query_id}] All paths failed: {attempted_paths}")
+        raise ValueError(f"All paths failed for QID {query_id}: {attempted_paths}")
 
-        # Execute along the determined path
-        execution_start_time = time.time()
-        result_obj = self._execute_processing_path(
-            optimal_path,
-            query,
-            context,
-            current_query_complexity,  # Pass complexity to execution
-            query_id  # Pass query_id
-        )
-        path_execution_time = time.time() - execution_start_time
-        self.logger.debug(f"Path execution for qid {query_id} on '{optimal_path}' took: {path_execution_time:.4f}s")
-
-        self._update_path_specific_metrics(optimal_path, path_execution_time, query_id)
-        return result_obj, optimal_path
-
-    def _determine_optimal_path(
+    def select_reasoning_path(
             self,
             query_complexity: float,
-            resource_status: Dict[str, float],
-            query_id: Optional[str] = None  # For logging
+            query_id: str,
+            dataset_type: Optional[str]
     ) -> str:
         """
-        Determine optimal processing path based on query complexity and resource status.
+        Selects reasoning path based on query complexity, resource availability, and dataset type.
+        Logs the decision factors and outcome.
+        Enhanced for DROP to consider query complexity more granularly.
         """
-        # Ensure GPU usage is 0 if no GPU is available or tracked
-        gpu_usage = resource_status.get('gpu', 0.0) if self.resource_manager._gpu_available else 0.0
-
-        resource_pressure = max(
-            resource_status.get('cpu', 0.0),
-            resource_status.get('memory', 0.0),
-            gpu_usage
-        )
+        resource_metrics = self.resource_manager.check_resources()
+        # Handle potential None values from resource check if GPU is unavailable
+        cpu_usage = resource_metrics.get('cpu', 0.0) or 0.0
+        memory_usage = resource_metrics.get('memory', 0.0) or 0.0
+        gpu_usage = resource_metrics.get('gpu', 0.0) or 0.0
+        overall_resource_pressure = max(cpu_usage, memory_usage, gpu_usage)
 
         decision_factors = {
-            'query_complexity': round(query_complexity, 4),
-            'cpu_usage': round(resource_status.get('cpu', 0.0), 4),
-            'memory_usage': round(resource_status.get('memory', 0.0), 4),
-            'gpu_usage': round(gpu_usage, 4),
-            'overall_resource_pressure': round(resource_pressure, 4)
+            'query_complexity': round(query_complexity, 3),
+            'cpu_usage': round(cpu_usage, 3),
+            'memory_usage': round(memory_usage, 3),
+            'gpu_usage': round(gpu_usage, 3),
+            'overall_resource_pressure': round(overall_resource_pressure, 3),
+            'dataset_type': dataset_type or 'unknown'
         }
+        self.logger.info(f"Path Selection Factors for QID {query_id}: {decision_factors}")
 
-        path = "hybrid"  # Default path
-        reason = "Default to hybrid; conditions for symbolic not met."
+        # --- Path Selection Logic ---
+        path = "hybrid"
+        reason = "Default choice: suitable for balanced complexity/resources or DROP dataset."
 
-        # Logic for path selection:
-        # Prefer symbolic if query complexity is low OR if resource pressure is high.
-        # This needs to be adapted based on whether the symbolic reasoner can handle the dataset_type
-        can_symbolic_handle_dataset = True  # Assume true by default
-        if self.hybrid_integrator.dataset_type == 'drop':
-            # Check if symbolic reasoner is actually equipped for DROP
-            # This might involve a check on symbolic_reasoner's capabilities
-            if not hasattr(self.hybrid_integrator.symbolic_reasoner, 'process_drop_query'):  # Example check
-                self.logger.warning(
-                    f"Symbolic reasoner may not be fully equipped for DROP. Path selection might default to hybrid/neural for qid {query_id}.")
-                # can_symbolic_handle_dataset = False # If symbolic cannot do DROP, don't choose it based on complexity/pressure alone
+        dt_lower = dataset_type.lower() if dataset_type else 'unknown'
 
-        if can_symbolic_handle_dataset:
-            if query_complexity < self.adaptive_thresholds['complexity_threshold']:
+        if dt_lower == 'drop':
+            # Enhanced logic for DROP queries
+            if query_complexity < self.low_complexity_thr and overall_resource_pressure < self.low_resource_thr:
                 path = "symbolic"
-                reason = f"Low query complexity ({query_complexity:.2f} < {self.adaptive_thresholds['complexity_threshold']}) favors symbolic."
-            elif resource_pressure > self.adaptive_thresholds['resource_pressure_threshold']:
-                path = "symbolic"
-                reason = f"High resource pressure ({resource_pressure:.2f} > {self.adaptive_thresholds['resource_pressure_threshold']}) favors symbolic."
+                reason = f"DROP dataset: Low complexity (<{self.low_complexity_thr}) and low resources (<{self.low_resource_thr}) favor symbolic."
+            elif query_complexity > self.high_complexity_thr or overall_resource_pressure > self.high_resource_thr:
+                path = "neural"
+                if query_complexity > self.high_complexity_thr:
+                    reason = f"DROP dataset: High query complexity (> {self.high_complexity_thr}) favors neural."
+                else:
+                    reason = f"DROP dataset: High resource pressure (> {self.high_resource_thr}) favors neural."
             else:
-                path = "hybrid"  # Explicitly state hybrid if conditions for symbolic aren't met
-                reason = "Balanced complexity and resource usage favor hybrid approach."
-        else:  # If symbolic cannot handle this dataset type
-            path = "hybrid"  # Or "neural" if hybrid also can't handle it well without symbolic
-            reason = f"Symbolic path not fully supported for {self.hybrid_integrator.dataset_type}; defaulting to hybrid/neural."
+                path = "hybrid"
+                reason = f"DROP dataset: Balanced complexity ({query_complexity}) and resources ({overall_resource_pressure}) favor hybrid."
+        else:
+            # Logic for text-based QA (e.g., HotpotQA)
+            if query_complexity < self.low_complexity_thr and overall_resource_pressure < self.low_resource_thr:
+                path = "symbolic"
+                reason = f"Low complexity (<{self.low_complexity_thr}) and low resources (<{self.low_resource_thr}) favor symbolic."
+            elif query_complexity >= self.high_complexity_thr or overall_resource_pressure >= self.high_resource_thr:
+                path = "neural"
+                if query_complexity >= self.high_complexity_thr:
+                    reason = f"High query complexity (>= {self.high_complexity_thr}) favors neural."
+                else:
+                    reason = f"High resource pressure (>= {self.high_resource_thr}) favors neural."
 
-        self.logger.info(
-            f"Path Selection for QID {query_id} - Factors: {decision_factors} -> Selected Path: {path} (Reason: {reason})")
+        # --- Logging Decision ---
+        self.logger.info(f"Path Selection Decision for QID {query_id}: Chosen Path='{path}' (Reason: {reason})")
 
-        self.path_history.append({
-            'timestamp': datetime.now().isoformat(),
-            'query_id': query_id,
-            'path': path,
-            'factors': decision_factors,
-            'reason': reason
-        })
+        # Append decision details to path_history list
+        try:
+            self.path_history.append({
+                'timestamp': datetime.now().isoformat(),
+                'query_id': query_id,
+                'chosen_path': path,
+                'factors': decision_factors,
+                'reason': reason
+            })
+        except Exception as hist_err:
+            self.logger.error(f"Failed to append to path_history for QID {query_id}: {hist_err}")
+
         return path
+
+    def _optimize_resources(self):
+        """
+        Implements resource optimization logic by analyzing resource usage trends and path performance.
+        Adjusts path selection thresholds dynamically.
+        """
+        try:
+            # Analyze recent resource usage trends
+            resource_metrics = self.resource_manager.check_resources()
+            cpu_usage = resource_metrics.get('cpu', 0.0) or 0.0
+            memory_usage = resource_metrics.get('memory', 0.0) or 0.0
+            gpu_usage = resource_metrics.get('gpu', 0.0) or 0.0
+            overall_pressure = max(cpu_usage, memory_usage, gpu_usage)
+
+            # Analyze path performance from reasoning_path_stats
+            path_performance = {}
+            for path, stats in self.reasoning_path_stats.items():
+                count = stats.get('count', 0)
+                if count > 0:
+                    success_rate = (stats.get('success', 0) / count) * 100
+                    avg_time = stats.get('avg_time', 0.0)
+                    path_performance[path] = {'success_rate': success_rate, 'avg_time': avg_time}
+                else:
+                    path_performance[path] = {'success_rate': 0.0, 'avg_time': 0.0}
+
+            self.logger.debug(f"Resource Optimization: Current Usage - CPU: {cpu_usage:.2f}, Memory: {memory_usage:.2f}, GPU: {gpu_usage:.2f}, Overall Pressure: {overall_pressure:.2f}")
+            self.logger.debug(f"Path Performance: {path_performance}")
+
+            # Adjust thresholds based on resource usage and path performance
+            adjustments = []
+            if overall_pressure > 0.9:
+                # High resource pressure: make symbolic path more likely
+                if self.low_complexity_thr < 0.6:
+                    self.low_complexity_thr += 0.05
+                    adjustments.append(f"Increased low_complexity_thr to {self.low_complexity_thr:.2f} due to high resource pressure")
+                if self.high_complexity_thr > 0.6:
+                    self.high_complexity_thr -= 0.05
+                    adjustments.append(f"Decreased high_complexity_thr to {self.high_complexity_thr:.2f} due to high resource pressure")
+            elif overall_pressure < 0.3:
+                # Low resource pressure: make neural path more likely
+                if self.low_complexity_thr > 0.2:
+                    self.low_complexity_thr -= 0.05
+                    adjustments.append(f"Decreased low_complexity_thr to {self.low_complexity_thr:.2f} due to low resource pressure")
+                if self.high_complexity_thr < 0.9:
+                    self.high_complexity_thr += 0.05
+                    adjustments.append(f"Increased high_complexity_thr to {self.high_complexity_thr:.2f} due to low resource pressure")
+
+            # Adjust based on path performance
+            if 'neural' in path_performance and path_performance['neural']['success_rate'] < 50 and path_performance['neural']['avg_time'] > 1.0:
+                # Neural path is underperforming and slow, shift towards symbolic/hybrid
+                if self.high_complexity_thr > 0.6:
+                    self.high_complexity_thr -= 0.05
+                    adjustments.append(f"Decreased high_complexity_thr to {self.high_complexity_thr:.2f} due to poor neural performance")
+            if 'symbolic' in path_performance and path_performance['symbolic']['success_rate'] < 50 and path_performance['symbolic']['avg_time'] > 1.0:
+                # Symbolic path is underperforming and slow, shift towards neural/hybrid
+                if self.low_complexity_thr > 0.2:
+                    self.low_complexity_thr -= 0.05
+                    adjustments.append(f"Decreased low_complexity_thr to {self.low_complexity_thr:.2f} due to poor symbolic performance")
+
+            if adjustments:
+                self.logger.info(f"Resource Optimization Adjustments: {', '.join(adjustments)}")
+            else:
+                self.logger.info("Resource Optimization: No adjustments needed at this time.")
+
+        except Exception as e:
+            self.logger.error(f"Error in resource optimization: {str(e)}")
+            # Revert to default thresholds if optimization fails
+            self.low_complexity_thr = 0.4
+            self.high_complexity_thr = 0.8
+            self.low_resource_thr = 0.6
+            self.high_resource_thr = 0.85
+            self.logger.info("Reverted to default thresholds due to optimization error.")
 
     def _execute_processing_path(
             self,
             path: str,
             query: str,
             context: str,
-            query_complexity: float,  # Now consistently available
-            query_id: Optional[str] = None  # <-- ADDED PARAMETER
-    ) -> Any:  # Return type is Any, as DROP might return structured objects
+            query_complexity: float,
+            supporting_facts: Optional[List[Tuple[str, int]]],
+            query_id: str,
+            dataset_type: Optional[str]
+    ) -> Any:
         """
-        Execute query processing along the selected path.
-        Now accepts and forwards query_id.
+        Executes the query processing along the specified path.
+        Returns the raw result object (string or dict) or raises an exception on failure.
+        Component timings are now primarily handled within the HybridIntegrator if possible.
         """
-        execution_path_start_time = time.time()
-        result_obj: Any = None  # Default result object
-        component_success = True  # Assume success initially
+        self.logger.debug(f"Executing path '{path}' for QID {query_id}...")
+        result_obj: Any = None
 
         try:
             if path == "symbolic":
-                # Symbolic reasoner might need context and query_id for dataset-specific logic (e.g., DROP)
+                if not hasattr(self.hybrid_integrator, 'symbolic_reasoner') or not self.hybrid_integrator.symbolic_reasoner:
+                     raise RuntimeError("Symbolic reasoner component is not available.")
                 result_obj = self.hybrid_integrator.symbolic_reasoner.process_query(
-                    query,
-                    context=context,  # Pass context
-                    dataset_type=self.hybrid_integrator.dataset_type,  # Pass dataset type
-                    query_id=query_id  # Pass query_id
+                    query, context=context, dataset_type=dataset_type, query_id=query_id
                 )
             elif path == "neural":
-                # Neural retriever might also benefit from dataset_type for prompting
-                result_obj = self.hybrid_integrator.neural_retriever.retrieve_answer(
-                    context,
-                    query,
-                    query_complexity=query_complexity,
-                    dataset_type=self.hybrid_integrator.dataset_type  # Pass dataset type
-                    # query_id is not explicitly in retrieve_answer signature yet, add if needed for logging/cache there
-                )
-            elif path == "hybrid":  # Default/Hybrid path
-                # HybridIntegrator's process_query is the main entry point for hybrid logic
-                # It now also accepts query_id
-                result_obj, _ = self.hybrid_integrator.process_query(  # Unpack, we only need the result object here
-                    query,
-                    context,
-                    query_complexity=query_complexity,
-                    query_id=query_id,  # Pass query_id
-                    # supporting_facts are not directly available to SCM, HI gets them if needed via main.py
-                )
+                 if not hasattr(self.hybrid_integrator, 'neural_retriever') or not self.hybrid_integrator.neural_retriever:
+                      raise RuntimeError("Neural retriever component is not available.")
+                 # Assuming symbolic guidance isn't available/needed for a pure neural path
+                 result_obj = self.hybrid_integrator.neural_retriever.retrieve_answer(
+                     context, query, symbolic_guidance=None, query_complexity=query_complexity, dataset_type=dataset_type
+                 )
+            elif path == "hybrid":
+                 if not self.hybrid_integrator:
+                      raise RuntimeError("Hybrid integrator component is not available.")
+                 # process_query returns tuple (result, source), we need the result
+                 result_obj, _ = self.hybrid_integrator.process_query(
+                     query, context, query_complexity=query_complexity, supporting_facts=supporting_facts, query_id=query_id
+                 )
             else:
-                self.logger.error(f"Unknown processing path for qid {query_id}: {path}. Defaulting to error.")
-                result_obj = "Error: Unknown processing path."
-                if self.hybrid_integrator.dataset_type == 'drop':
-                    result_obj = {"error": f"Unknown processing path: {path}", "type": "error_object"}
-                component_success = False
+                # This case should ideally be prevented by path selection validation
+                self.logger.error(f"Attempted to execute unknown path '{path}' for QID {query_id}.")
+                raise ValueError(f"Unknown processing path: {path}")
 
-            # Check for error objects from downstream
-            if isinstance(result_obj, dict) and result_obj.get("type") == "error_object":
-                self.logger.error(
-                    f"Error object received from path '{path}' for qid {query_id}: {result_obj.get('error')}")
-                component_success = False  # Mark as failure for metrics if an error object is returned
+            self.logger.debug(f"Path '{path}' execution completed for QID {query_id}.")
+            # Basic validation of the result before returning
+            if result_obj is None:
+                 self.logger.warning(f"Path '{path}' execution for QID {query_id} returned None.")
+                 # Return a standard error format based on dataset type
+                 error_msg = f"Error: Path '{path}' returned no result."
+                 if dataset_type == 'drop':
+                      return {"error": error_msg, "type": "error_object", "spans": [], 'number': '', 'date': {'day':'','month':'','year':''}}
+                 else:
+                      return error_msg
+
+            return result_obj  # Return the result (string, dict, or error object)
 
         except Exception as e:
-            self.logger.exception(f"Exception during path execution '{path}' for qid {query_id}: {str(e)}")
-            result_obj = f"Error during {path} execution."
-            if self.hybrid_integrator.dataset_type == 'drop':
-                result_obj = {"error": f"Exception in {path} path: {str(e)}", "type": "error_object"}
-            component_success = False
-            # Re-raise to be caught by the main retry loop in process_query_with_fallback
-            raise e
-        finally:
-            path_component_time = time.time() - execution_path_start_time
-            if self.metrics_collector:
-                # For hybrid, component_times in HybridIntegrator are used.
-                # For direct symbolic/neural, log here.
-                if path in ["symbolic", "neural"]:
-                    self.metrics_collector.collect_component_metrics(
-                        component=path,
-                        execution_time=path_component_time,
-                        success=component_success,  # Based on whether an exception occurred or error object returned
-                        error_rate=0.0 if component_success else 1.0,
-                        resource_usage=self.resource_manager.check_resources()  # Snapshot after execution
-                    )
+            # Log the exception details and re-raise it
+            # The retry logic in process_query_with_fallback will catch this
+            self.logger.exception(f"Critical exception during path execution '{path}' for QID {query_id}: {str(e)}")
+            raise e  # Re-raise the original exception
 
-            # Add timing to the result object if it's a dictionary (common for hybrid/DROP)
-            # This is more for debugging path execution time itself. Overall time is handled by caller.
-            if isinstance(result_obj, dict):
-                result_obj['path_execution_time_ms'] = round(path_component_time * 1000, 2)
-
-        if result_obj is None:  # Safeguard if no path was taken or result was not set
-            self.logger.error(f"Execution path '{path}' for qid {query_id} resulted in None. Returning error object.")
-            result_obj = "Error: No result from processing path."
-            if self.hybrid_integrator.dataset_type == 'drop':
-                result_obj = {"error": "No result from processing path", "type": "error_object"}
-
-        return result_obj
-
-    def _optimize_resources(self):
-        """
-        Optimize resource allocation based on current system state.
-        Placeholder for actual implementation.
-        """
-        self.logger.info("Placeholder: Resource optimization triggered.")
-        # current_allocation = self.resource_manager.check_resources()
-        # optimal_allocation = self.resource_manager.optimize_resources()
-        # if self._should_reallocate(current_allocation, optimal_allocation):
-        #     self.resource_manager.apply_optimal_allocations(optimal_allocation)
-        #     self.logger.info("Applied new resource allocation")
-
-    def _update_overall_metrics(self, start_time_float: float, success: bool, reasoning_path_str: str,
-                                query_id: Optional[str]):
-        """
-        Update overall system performance metrics.
-        """
-        try:
-            response_time_seconds = time.time() - start_time_float
-            self.performance_metrics['total_queries'] += 1
-            if success:
-                self.performance_metrics['successful_queries'] += 1
-            else:
-                self.performance_metrics['failed_queries'] += 1
-
-            total_q = self.performance_metrics['total_queries']
-            current_avg_rt = self.performance_metrics['avg_response_time']
-            # Robust average calculation
-            self.performance_metrics['avg_response_time'] = \
-                ((current_avg_rt * (
-                            total_q - 1)) + response_time_seconds) / total_q if total_q > 0 else response_time_seconds
-
-            # Path performance (list of times per path) is updated in _update_path_specific_metrics
-
-            # The complex reasoning_metrics update that was here is very specific to HotpotQA's
-            # textual chain characteristics. For a more general SCM, it's better to let
-            # MetricsCollector handle the details based on the data it receives.
-            # If specific chain info (like length, confidence) is available from HybridIntegrator's result,
-            # it could be passed to MetricsCollector.collect_query_metrics.
-
-        except Exception as e:
-            self.logger.error(f"Error updating overall metrics for qid {query_id}: {str(e)}")
-
-    def _update_path_specific_metrics(self, path: str, duration_seconds: float, query_id: Optional[str]):
-        """
-        Update performance statistics for a specific reasoning path.
-        """
-        if path not in self.performance_metrics['path_performance']:
-            self.performance_metrics['path_performance'][path] = []
-        self.performance_metrics['path_performance'][path].append(duration_seconds)
-        self.logger.debug(f"QID {query_id}: Path '{path}' took {duration_seconds:.4f}s. "
-                          f"Count for this path: {len(self.performance_metrics['path_performance'][path])}, "
-                          f"Avg time: {np.mean(self.performance_metrics['path_performance'][path]):.4f}s")
+    def _update_reasoning_path_stats(self, path: str, success: bool, time_taken: Optional[float] = None):
+        """Update statistics for a specific reasoning path upon completion."""
+        if not path or path == 'unknown':  # Don't track 'unknown' path stats
+             return
+        # Ensure path entry exists using defaultdict behavior
+        stats = self.reasoning_path_stats[path]
+        stats['count'] += 1
+        if success:
+            stats['success'] += 1
+        if time_taken is not None:
+             # Ensure time_taken is a valid number
+             if isinstance(time_taken, (int, float)) and time_taken >= 0:
+                  stats['total_time'] += time_taken
+                  # Calculate running average safely
+                  stats['avg_time'] = stats['total_time'] / stats['count'] if stats['count'] > 0 else 0.0
+             else:
+                  self.logger.warning(f"Invalid time_taken value ({time_taken}) received for path '{path}'. Ignoring for average calculation.")
 
     def get_performance_metrics(self) -> Dict[str, Any]:
-        """
-        Get comprehensive system performance metrics.
-        """
-        total_q = max(1, self.performance_metrics['total_queries'])  # Avoid division by zero
+        """Returns a summary of overall system performance metrics."""
+        total_q = self.performance_metrics.get('total_queries', 0)
+        successful_queries = self.performance_metrics.get('successful_queries', 0)
 
-        success_rate = 0.0
-        if self.performance_metrics['total_queries'] > 0:  # ensure total_queries is not zero
-            success_rate = (self.performance_metrics['successful_queries'] / self.performance_metrics[
-                'total_queries']) * 100
+        # Calculate overall average response time from successful path stats
+        total_time_all_successful = sum(stats.get('total_time', 0.0) for path, stats in self.reasoning_path_stats.items() if path != 'fallback_error')
+        total_successful_runs = successful_queries  # Use the successful query count
 
-        error_rate = 0.0
-        if self.performance_metrics['total_queries'] > 0:
-            error_rate = (self.performance_metrics['failed_queries'] / self.performance_metrics['total_queries']) * 100
+        avg_resp_time = (total_time_all_successful / total_successful_runs) if total_successful_runs > 0 else 0.0
 
         metrics = {
-            'total_queries': self.performance_metrics['total_queries'],
-            'successful_queries': self.performance_metrics['successful_queries'],
-            'failed_queries': self.performance_metrics['failed_queries'],
-            'success_rate': success_rate,
-            'error_rate': error_rate,
-            'avg_response_time_seconds': self.performance_metrics['avg_response_time'],
-            'path_distribution_percent': self._calculate_path_distribution_percentage(),
-            'path_avg_times_seconds': {
-                p: np.mean(times) if times else 0
-                for p, times in self.performance_metrics['path_performance'].items()
-            }
-            # resource_efficiency is better calculated by MetricsCollector from detailed logs
+            'total_queries': total_q,
+            'successful_queries': successful_queries,
+            'success_rate': (successful_queries / total_q) * 100 if total_q > 0 else 0.0,
+            'error_count': self.performance_metrics.get('error_count', 0),
+            'avg_successful_response_time_sec': avg_resp_time,
+            'path_chosen_distribution': dict(self.performance_metrics.get('path_usage', defaultdict(int)))
         }
         return metrics
 
-    def _calculate_path_distribution_percentage(self) -> Dict[str, float]:
-        """
-        Calculate the percentage distribution of reasoning paths taken.
-        """
-        total_recorded_paths = len(self.path_history)
-        if not total_recorded_paths:
-            return {}
+    def get_reasoning_path_stats(self) -> Dict[str, Any]:
+        """Returns detailed statistics for each reasoning path executed."""
+        total_q = self.performance_metrics.get('total_queries', 0)
+        if total_q == 0: total_q = 1  # Avoid division by zero if no queries processed
 
-        distribution_counts = defaultdict(int)
-        for record in self.path_history:
-            distribution_counts[record['path']] += 1
-
-        return {
-            path: (count / total_recorded_paths) * 100
-            for path, count in distribution_counts.items()
-        }
-
-    def _calculate_resource_delta(
-            self,
-            initial_resources: Dict[str, float],
-            final_resources: Dict[str, float]
-    ) -> Dict[str, float]:
-        """
-        Calculate difference in resource usage, ensuring keys exist.
-        """
-        delta = {}
-        all_keys = set(initial_resources.keys()) | set(final_resources.keys())
-        for key in all_keys:
-            delta[key] = final_resources.get(key, 0.0) - initial_resources.get(key, 0.0)
-        return delta
-
-    def _validate_resources(self, resource_status: Dict[str, float]) -> bool:
-        """
-        Check if resources are within acceptable limits based on configuration.
-        """
-        # Using thresholds from self.adaptive_thresholds for general pressure
-        # More specific thresholds per resource could be in resource_manager's config
-        if resource_status.get("cpu", 0.0) > self.adaptive_thresholds[
-            'resource_pressure_threshold']:  # Example: 95% CPU
-            self.logger.warning("High CPU usage detected.")
-            return False
-        if resource_status.get("memory", 0.0) > self.adaptive_thresholds[
-            'resource_pressure_threshold']:  # Example: 95% Memory
-            self.logger.warning("High Memory usage detected.")
-            return False
-        if self.resource_manager._gpu_available and resource_status.get("gpu", 0.0) > 0.99:  # Stricter for GPU
-            self.logger.warning("High GPU usage detected.")
-            return False
-        return True
-
-    def _should_reallocate(  # Not currently used, part of _optimize_resources placeholder
-            self,
-            current_allocation: Dict[str, float],
-            optimal_allocation: Dict[str, float]
-    ) -> bool:
-        """
-        Check if there's a significant difference to warrant reallocation.
-        """
-        threshold = 0.05  # Reallocate if difference is more than 5% for any resource
-        for resource_key in current_allocation:
-            if abs(optimal_allocation.get(resource_key, 0.0) - current_allocation[resource_key]) > threshold:
-                return True
-        return False
-
-    def _handle_final_failure(self, start_time_float: float, reason_str: str, query_id: Optional[str],
-                              is_error_object: bool = False) -> Dict[str, Any]:
-        """
-        Log failure and return a structured error response.
-        """
-        self.logger.error(f"Final failure for query_id {query_id} after retries or fatal error: {reason_str}")
-        self._update_overall_metrics(start_time_float, False, "fallback_error",
-                                     query_id)  # Mark as failure, path "fallback_error"
-
-        error_payload: Any = reason_str
-        if is_error_object:  # If the reason is already structured for DROP error
-            if self.hybrid_integrator.dataset_type == 'drop':
-                error_payload = {"error": reason_str, "type": "error_object",
-                                 "spans": []}  # Ensure DROP eval can handle
-
-        return {
-            "query_id": query_id,
-            "result": error_payload,  # For DROP, this might be the structured error object
-            "error": reason_str,
-            "status": "failed",
-            "reasoning_path": "fallback_error",
-            "processing_time": time.time() - start_time_float
-        }
-
-    def get_reasoning_path_stats(self) -> Dict[str, Any]:  # Used by main.py for summary
-        """
-        Get statistics on reasoning path distribution counts.
-        """
-        path_counts = defaultdict(lambda: {"count": 0, "total_time_seconds": 0.0})
-        for record in self.path_history:
-            path_counts[record['path']]["count"] += 1
-
-        for path_name, time_list in self.performance_metrics['path_performance'].items():
-            if time_list:
-                path_counts[path_name]["total_time_seconds"] = sum(time_list)
-                path_counts[path_name]["avg_time_seconds"] = np.mean(time_list)
-
-        # Calculate percentage based on total_queries from overall metrics for consistency
-        total_q_overall = self.performance_metrics['total_queries']
-
-        final_path_stats = {}
-        for path_name, data in path_counts.items():
-            count = data["count"]
-            final_path_stats[path_name] = {
-                "count": count,
-                "percentage": (count / total_q_overall) * 100 if total_q_overall > 0 else 0,
-                "avg_time_seconds": data.get("avg_time_seconds", 0.0)
+        stats = {}
+        for path, data in self.reasoning_path_stats.items():
+            count = data.get('count', 0)
+            success = data.get('success', 0)
+            avg_time = data.get('avg_time', 0.0)
+            # Calculate success rate for this specific path
+            path_success_rate = (success / count) * 100 if count > 0 else 0.0
+            stats[path] = {
+                'execution_count': count,
+                'success_count': success,
+                'path_success_rate_percent': round(path_success_rate, 2),
+                'avg_time_sec': round(avg_time, 3),
+                'percentage_of_total_queries': round((count / total_q) * 100, 2)
             }
-        return final_path_stats
+        return stats
+
+    def _handle_final_failure(self, overall_start_time: float, reason_str: str, query_id: str, dataset_type: Optional[str]) -> Tuple[Dict[str, Any], str]:
+        """Logs final failure, updates stats, and returns a structured error response tuple (dict, str)."""
+        self.logger.error(f"Final failure processing QID {query_id} after retries or fatal error: {reason_str}")
+        processing_time = time.time() - overall_start_time
+        error_path_name = 'fallback_error'
+
+        # Create dataset-specific error structure for the 'result' field
+        error_result_payload: Union[str, Dict]
+        if dataset_type == 'drop':
+            error_result_payload = {"error": reason_str, "type": "error_object", "spans": [], 'number': '', 'date': {'day':'','month':'','year':''}}
+        else:
+            error_result_payload = f"Error: {reason_str}"  # Simple error string for text QA
+
+        # Update stats for the 'fallback_error' path
+        self._update_reasoning_path_stats(error_path_name, success=False, time_taken=processing_time)
+
+        # Construct the final error response dictionary to be returned
+        error_response_dict = {
+            'query_id': query_id,
+            'result': error_result_payload,  # Contains the error string or dict
+            'error': reason_str,  # Explicit error reason string
+            'status': 'failed',
+            'reasoning_path': error_path_name,
+            'processing_time': processing_time,
+            'retries': self.error_retry_limit  # Indicates max retries were used
+        }
+
+        # Format using aggregator to ensure consistent structure
+        formatted_error_response = self.aggregator.format_response(error_response_dict)
+
+        # Return the formatted error dictionary and the standard error path name
+        return formatted_error_response, error_path_name
