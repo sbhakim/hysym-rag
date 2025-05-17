@@ -890,6 +890,7 @@ class MetricsCollector:
         """
         Aggregate stored metrics from self.metrics['query_metrics'] into summary stats
         for the academic report.
+        Ensures 'processing_time' is structured as a dictionary with mean, std, count, etc.fv
         """
         if not self.metrics['query_metrics']:
             self.logger.warning("No query metrics available to calculate overall statistics.")
@@ -900,7 +901,8 @@ class MetricsCollector:
                 'avg_exact_match': 0.0, 'std_exact_match': 0.0,
                 'avg_f1': 0.0, 'std_f1': 0.0,
                 'avg_semantic_similarity': 0.0, 'std_semantic_similarity': 0.0,
-                'avg_processing_time': 0.0, 'std_processing_time': 0.0,
+                'processing_time': {'mean': 0.0, 'std': 0.0, 'median': 0.0, 'percentile_95': 0.0, 'count': 0},
+                # Corrected structure
                 'avg_query_length': 0.0,
                 'avg_prediction_length': 0.0,
                 'avg_complexity_score': 0.0,
@@ -910,44 +912,40 @@ class MetricsCollector:
                 'count_drop_date_answers': 0,
             }
             if self.dataset_type != 'drop':
-                default_stats.update({'avg_rougeL': 0.0, 'std_rougeL': 0.0,
-                                      'avg_bleu': 0.0, 'std_bleu': 0.0,
-                                      'avg_char_error_rate': 0.0,
-                                      'avg_prediction_length_ratio': 0.0})
+                default_stats.update({
+                    'avg_rougeL': 0.0, 'std_rougeL': 0.0,
+                    'avg_bleu': 0.0, 'std_bleu': 0.0,
+                    'avg_char_error_rate': 0.0,
+                    'avg_prediction_length_ratio': 0.0
+                })
             return default_stats
 
-        # Use self.query_metrics (set of unique QIDs processed by collect_query_metrics)
-        # for the true count of queries for which metrics were attempted.
-        total_q_collected = len(self.query_metrics)
+        total_q_collected = len(self.query_metrics)  # Using the set of unique QIDs
         self.logger.info(f"Calculating overall statistics for {total_q_collected} unique queries.")
 
-        # Initialize lists to store metric values for aggregation
-        exact_matches = []
-        f1_scores = []
-        semantic_similarities = []
-        processing_times = []
-        query_lengths = []
-        prediction_lengths = []  # Will store lengths of raw predictions
-        complexity_scores = []
-        confidences = []  # Prediction confidences
+        exact_matches: List[float] = []
+        f1_scores: List[float] = []
+        semantic_similarities: List[float] = []
+        processing_times_list: List[float] = []  # Renamed for clarity
+        query_lengths: List[int] = []
+        prediction_lengths: List[int] = []
+        complexity_scores: List[float] = []
+        confidences: List[float] = []  # Prediction confidences
 
-        # For DROP specific answer types
         num_drop_number_answers = 0
         num_drop_span_answers = 0
         num_drop_date_answers = 0
 
-        # For text-specific metrics (HotpotQA)
-        rouge_l_scores = []
-        bleu_scores = []
-        char_error_rates = []
-        prediction_length_ratios = []
+        rouge_l_scores: List[float] = []
+        bleu_scores: List[float] = []
+        char_error_rates: List[float] = []
+        prediction_length_ratios: List[float] = []
 
         for qid, q_metrics_dict in self.metrics['query_metrics'].items():
             if not isinstance(q_metrics_dict, dict):
                 self.logger.warning(f"Skipping QID {qid} in overall stats: q_metrics_dict is not a dict.")
                 continue
 
-            # Extract performance metrics if they exist and are valid
             perf_metrics = q_metrics_dict.get('performance_metrics')
             if isinstance(perf_metrics, dict):
                 exact_matches.append(perf_metrics.get('exact_match', 0.0))
@@ -959,24 +957,39 @@ class MetricsCollector:
                     char_error_rates.append(perf_metrics.get('char_error_rate', 0.0))
                     prediction_length_ratios.append(perf_metrics.get('prediction_length_ratio', 0.0))
 
-            processing_times.append(q_metrics_dict.get('processing_time', 0.0))
+            # Ensure processing_time is float before appending
+            pt = q_metrics_dict.get('processing_time', 0.0)
+            if isinstance(pt, (int, float)):
+                processing_times_list.append(float(pt))
+            else:
+                self.logger.warning(f"Invalid processing_time type for QID {qid}: {type(pt)}. Skipping for stats.")
+
             query_lengths.append(q_metrics_dict.get('query_length', 0))
-            # Use the 'prediction_length' directly stored by collect_query_metrics
             prediction_lengths.append(q_metrics_dict.get('prediction_length', 0))
             complexity_scores.append(q_metrics_dict.get('complexity_score', 0.0))
-            confidences.append(q_metrics_dict.get('confidence', 0.0))
 
-            # Count DROP answer types from the 'prediction' object if it's structured
-            raw_prediction = q_metrics_dict.get('raw_prediction_object')  # The one we will add
+            conf = q_metrics_dict.get('confidence')
+            if isinstance(conf, (int, float)):
+                confidences.append(float(conf))
+
+            raw_prediction = q_metrics_dict.get('raw_prediction_object')
             if self.dataset_type == 'drop' and isinstance(raw_prediction, dict):
-                if raw_prediction.get('number'):
+                if raw_prediction.get('number'):  # Intentionally checking for non-empty or non-None
                     num_drop_number_answers += 1
-                if raw_prediction.get('spans'):
+                if raw_prediction.get('spans'):  # Intentionally checking for non-empty
                     num_drop_span_answers += 1
                 if raw_prediction.get('date') and any(raw_prediction['date'].values()):
                     num_drop_date_answers += 1
 
-        # Calculate and store overall statistics
+        # Calculate processing time statistics dictionary
+        processing_time_stats = {
+            'mean': float(np.mean(processing_times_list)) if processing_times_list else 0.0,
+            'std': float(np.std(processing_times_list)) if processing_times_list else 0.0,
+            'median': float(np.median(processing_times_list)) if processing_times_list else 0.0,
+            'percentile_95': float(np.percentile(processing_times_list, 95)) if processing_times_list else 0.0,
+            'count': len(processing_times_list)
+        }
+
         stats = {
             'total_queries_collected': total_q_collected,
             'avg_exact_match': float(np.mean(exact_matches)) if exact_matches else 0.0,
@@ -985,8 +998,7 @@ class MetricsCollector:
             'std_f1': float(np.std(f1_scores)) if f1_scores else 0.0,
             'avg_semantic_similarity': float(np.mean(semantic_similarities)) if semantic_similarities else 0.0,
             'std_semantic_similarity': float(np.std(semantic_similarities)) if semantic_similarities else 0.0,
-            'avg_processing_time': float(np.mean(processing_times)) if processing_times else 0.0,
-            'std_processing_time': float(np.std(processing_times)) if processing_times else 0.0,
+            'processing_time': processing_time_stats,  # Assign the structured dict here
             'avg_query_length': float(np.mean(query_lengths)) if query_lengths else 0.0,
             'avg_prediction_length': float(np.mean(prediction_lengths)) if prediction_lengths else 0.0,
             'avg_complexity_score': float(np.mean(complexity_scores)) if complexity_scores else 0.0,

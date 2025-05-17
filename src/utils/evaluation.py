@@ -333,6 +333,8 @@ class Evaluation:
             self.logger.error(f"[QID:{query_id}] Error computing F1 for spans: {str(e)}", exc_info=True)
             return 0.0
 
+
+
     def _evaluate_drop_answer(self,
                               pred: Any,  # Prediction from the system
                               gt: Dict[str, Any],  # Ground truth
@@ -554,13 +556,38 @@ class Evaluation:
         """
         Normalize DROP answer strings for span comparison.
         Preserves hyphens to maintain meaningful compound words (e.g., 'well-known').
+        Enhanced to remove common trailing LLM artifacts.
         """
-        text = str(text).lower()
-        # Remove specific punctuation but preserve meaningful characters like hyphens
-        text = text.translate(str.maketrans('', '', string.punctuation.replace('-', '')))
-        text = re.sub(r'\b(a|an|the)\b', '', text)
-        text = ' '.join(text.split())
-        self.logger.debug(f"[QID:{qid}] Normalized span text: '{text[:50]}...'")
+        text = str(text)  # Ensure input is a string
+
+        # Aggressively strip common LLM-appended metadata or explanations
+        # Pattern: " | " followed by anything, often used for confidence, source, etc.
+        text = re.sub(r"\s*\|\s*Confidence.*$", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*\|\s*Explanation.*$", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*\|\s*Rationale.*$", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*\(Conf.*\)$", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*\[Source:.*\]$", "", text, flags=re.IGNORECASE).strip()
+
+        # Remove "Explanation:" or "Rationale:" if they appear at the end of a string,
+        # potentially after a core answer.
+        text = re.sub(r"\s*(Explanation:|Rationale:).*", "", text, flags=re.IGNORECASE).strip()
+
+        text = text.lower()
+
+        # Remove specific punctuation but preserve meaningful characters like hyphens.
+        # Allow ampersand as it might be part of names.
+        # Keep apostrophes for possessives or contractions that might be part of an entity.
+        # Remove other punctuation that is less likely to be part of a core entity name.
+        # The original was: string.punctuation.replace('-', '')
+        # A more targeted removal might be better:
+        # Define punctuation to remove, explicitly keeping '-', '\'', '&'
+        punctuation_to_remove = ''.join(c for c in string.punctuation if c not in ['-', '\'', '&'])
+        text = text.translate(str.maketrans('', '', punctuation_to_remove))
+
+        text = re.sub(r'\b(a|an|the)\b', '', text)  # Remove articles
+        text = ' '.join(text.split())  # Normalize whitespace
+
+        # self.logger.debug(f"[QID:{qid}] Normalized span text: '{text[:100]}...'") # Can be noisy
         return text
 
     def _tokenize_drop(self, text: str, qid: str) -> List[str]:

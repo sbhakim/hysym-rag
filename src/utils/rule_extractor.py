@@ -600,63 +600,102 @@ class RuleExtractor:
         Returns:
             List of extracted rules for DROP.
         """
-        logger.info(f"Starting extract_rules_from_drop with {len(questions)} questions, {len(passages)} passages, min_support={min_support}")
+        logger.info(
+            f"Starting extract_rules_from_drop with {len(questions)} questions, {len(passages)} passages, min_support={min_support}")
         rules = []
         counts = Counter()
-        by_key = {}
+        by_key: Dict[Tuple[Any, ...], Dict[str, Any]] = {}  # type annotation for by_key
 
-        # Dependency-based patterns with temporal constraints
-        dep_rules = self.extract_dep_patterns_with_temporal(questions, min_freq=1)
-        for p in dep_rules:
-            key = (p['type'], p['pattern'])
-            counts[key] += p['support']
-            if key not in by_key:
-                by_key[key] = p
+        # Strategy 1: Dependency-based patterns with temporal constraints
+        # Potential for effectiveness improvement:
+        # - More sophisticated linguistic patterns.
+        # - Better generalization of extracted entities/temporal constraints.
+        dep_rules = self.extract_dep_patterns_with_temporal(questions,
+                                                            min_freq=1)  # min_freq=1 means all unique patterns are kept initially
+        for p_dep in dep_rules:  # renamed p to p_dep for clarity
+            key = (p_dep['type'], p_dep['pattern'])
+            counts[key] += p_dep.get('support', 1)  # Use .get for support, default to 1
+            if key not in by_key or p_dep.get('support', 1) > by_key[key].get('support',
+                                                                              0):  # Store/update if new or higher support
+                by_key[key] = p_dep
         rules.extend(dep_rules)
         logger.info(f"Dependency patterns extracted: {len(dep_rules)} rules")
 
-        # Answer-span-guided patterns
+        # Strategy 2: Answer-span-guided patterns
+        # Potential for effectiveness improvement:
+        # - Better generalization of context windows around spans.
+        # - More robust identification of relevant context words.
         span_rules = self.extract_span_context_patterns(drop_json_path, min_freq=1)
-        for p in span_rules:
-            key = (p['type'], p['pattern'])
-            counts[key] += p['support']
-            if key not in by_key:
-                by_key[key] = p
+        for p_span in span_rules:  # renamed p to p_span
+            key = (p_span['type'], p_span['pattern'])
+            counts[key] += p_span.get('support', 1)
+            if key not in by_key or p_span.get('support', 1) > by_key[key].get('support', 0):
+                by_key[key] = p_span
         rules.extend(span_rules)
         logger.info(f"Span context patterns extracted: {len(span_rules)} rules")
 
-        # Hybrid semantic-symbolic rules
+        # Strategy 3: Hybrid semantic-symbolic rules
+        # Potential for effectiveness improvement:
+        # - Broader set of semantic relations or predicate mappings.
+        # - Better filtering of noisy semantic triples.
         semantic_rules = self.extract_semantic_drop_rules(questions, min_support=1)
-        for p in semantic_rules:
-            key = (p['type'], p['pattern'])
-            counts[key] += p['support']
-            if key not in by_key:
-                by_key[key] = p
+        for p_sem in semantic_rules:  # renamed p to p_sem
+            key = (p_sem['type'], p_sem['pattern'])
+            counts[key] += p_sem.get('support', 1)
+            if key not in by_key or p_sem.get('support', 1) > by_key[key].get('support', 0):
+                by_key[key] = p_sem
         rules.extend(semantic_rules)
         logger.info(f"Semantic rules extracted: {len(semantic_rules)} rules")
 
-        # Machine learning-based rules
-        classifier_rules = self._train_rule_classifier(drop_json_path, subset_size=100)
-        for p in classifier_rules:
-            key = (p['type'], p['pattern'])
-            counts[key] += p['support']
-            if key not in by_key:
-                by_key[key] = p
+        # Strategy 4: Machine learning-based rules
+        # Potential for effectiveness improvement:
+        # - More training data for the classifier.
+        # - Better features for the classifier.
+        # - More sophisticated mapping from classifier output to rule patterns.
+        classifier_rules = self._train_rule_classifier(drop_json_path,
+                                                       subset_size=100)  # subset_size is small, might limit classifier performance
+        for p_cls in classifier_rules:  # renamed p to p_cls
+            key = (p_cls['type'], p_cls['pattern'])
+            counts[key] += p_cls.get('support', 1)  # Use .get for support
+            # Consider confidence from classifier as part of the key or update logic if rules can be identical otherwise
+            if key not in by_key or p_cls.get('confidence', 0.0) > by_key[key].get('confidence', 0.0):
+                by_key[key] = p_cls  # Prefer higher confidence rule if pattern is same
         rules.extend(classifier_rules)
         logger.info(f"Classifier-based rules extracted: {len(classifier_rules)} rules")
 
-        # Deduplicate and filter rules by (type, pattern)
-        final_rules = []
-        for key, support in counts.items():
-            if support >= min_support:
-                rule = by_key[key]
-                rule['support'] = support
-                final_rules.append(rule)
+        # Deduplicate and filter rules based on aggregated support from all strategies
+        # The current logic for by_key and counts might lead to double counting if rules are identical across strategies
+        # A better approach would be to populate by_key and counts uniquely first, then create final_rules.
 
-        logger.info(f"Total rules before final filtering: {len(rules)}. After filtering with min_support={min_support}, retained {len(final_rules)} rules")
-        if not final_rules:
-            logger.warning("No rules met the final min_support threshold. Consider lowering min_support or checking the dataset format.")
-        return final_rules
+        # Revised aggregation logic:
+        final_aggregated_rules: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for rule_item in rules:  # Iterate through all collected rules
+            key = (rule_item['type'], rule_item['pattern'])
+            if key not in final_aggregated_rules:
+                final_aggregated_rules[key] = rule_item.copy()  # Store the first instance
+                final_aggregated_rules[key]['support'] = rule_item.get('support', 1)
+            else:
+                # Aggregate support for identical rules (type, pattern)
+                final_aggregated_rules[key]['support'] = final_aggregated_rules[key].get('support', 0) + rule_item.get(
+                    'support', 1)
+                # Optionally, update other fields like confidence if a better one comes along
+                if rule_item.get('confidence', 0.0) > final_aggregated_rules[key].get('confidence', 0.0):
+                    final_aggregated_rules[key]['confidence'] = rule_item.get('confidence', 0.0)
+
+        final_rules_list = []
+        for key_tuple, rule_content in final_aggregated_rules.items():
+            if rule_content.get('support', 0) >= min_support:
+                final_rules_list.append(rule_content)
+
+        # Sort by support and confidence for better rule prioritization if needed later
+        final_rules_list.sort(key=lambda r: (r.get('support', 0), r.get('confidence', 0.0)), reverse=True)
+
+        logger.info(
+            f"Total unique rule patterns considered: {len(final_aggregated_rules)}. After filtering with min_support={min_support}, retained {len(final_rules_list)} rules.")
+        if not final_rules_list:
+            logger.warning(
+                "No rules met the final min_support threshold. Consider lowering min_support, improving rule generation strategies, or checking the dataset format.")
+        return final_rules_list
 
     # --- Shared Methods for Both Datasets ---
 

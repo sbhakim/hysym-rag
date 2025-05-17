@@ -228,105 +228,110 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
             self.logger.exception(f"[DROP QID:{query_id}] Unhandled exception processing DROP query: {str(e)}")
             return {**DEFAULT_DROP_ANSWER, 'status': 'error', 'confidence': 0.0, 'rationale': f"Unhandled Exception: {str(e)}"}
 
+
     def _extract_drop_operation_and_args(self, query: str, context: str, query_id: str) -> Dict[str, Any]:
         """
         Extract operation type and arguments from a DROP query using regex and spaCy.
         Used as a fallback when no predefined rule from self.rules matches.
         Ensures patterns are prioritized and argument extraction is robust.
+        Refined to better distinguish specific event queries from total calculations.
         """
         query_lower = query.lower().strip()
         self.logger.debug(
             f"[DROP QID:{query_id}] Fallback Extraction: Attempting to extract operation for query: '{query_lower[:100]}...'")
 
         # Define patterns with priority (more specific or common first).
-        # 'direction': 'total' is already extracted by a pattern, and execute_extreme_value_numeric was updated.
         operation_patterns = [
-            # 1. Numerical Total/Extremum (e.g., "how many yards did [player] score/kick/hit?")
-            # This pattern already extracts 'total' correctly as a direction.
+            # Pattern 1.A: More specific "how many [unit] did [entity] [verb] (in the [specific event])?"
+            # Aims to get a specific event's value.
             (
-            r"^how many ([a-z\s]+?) (?:did|were) ([\w\s'-]+?) (?:score|intercept|lead with|take off|make|hit|kick|throw|rush for|pass for|have)\??$",
-            OP_EXTREME_VALUE_NUMERIC,  # Could also be a sum if context implies multiple events.
-            lambda m: {'unit': m.group(1).strip(),
-                       'entity_desc': m.group(2).strip() + " " + m.group(1).strip(),  # e.g. "Akers yards"
-                       'direction': 'total'},  # 'total' will be handled by execute_extreme_value_numeric
-            0.95),
+                r"^how many ([a-z\s]+?) (?:did|was|were) ([\w\s'-]+?) (score|kick|hit|throw|rush for|pass for|gain|intercept|complete|make)(?:\s+in the\s+([\w\s'-]+))?\??$",
+                OP_EXTREME_VALUE_NUMERIC,
+                lambda m: {'unit': m.group(1).strip(),
+                           'entity_desc': m.group(2).strip(),  # Player/Team
+                           'verb_action': m.group(3).strip(),  # Specific action
+                           'specific_event_modifier': m.group(
+                               4).strip() if m.lastindex and m.lastindex >= 4 and m.group(4) else None,
+                           'direction': 'specific_event'},  # Signals it's not a blind total
+                0.92),
 
-            # 2. Count with optional temporal constraint (e.g., "how many field goals in first half")
+            # Pattern 1.B: Explicit "how many total [unit] did [entity] [verb]?"
             (
-            r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+(?:in|during|for|on)\s+(first half|second half|1st quarter|2nd quarter|3rd quarter|4th quarter|the game|overtime))?(?:\s+were\s+there|\s+did|\s+was|\s+score|\?)?$",
-            OP_COUNT,
-            lambda m: {'entity': m.group(1).strip(),
-                       'temporal_constraint': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(
-                           2) else None},
-            0.90),
+                r"^how many total ([a-z\s]+?) (?:did|were) ([\w\s'-]+?) (?:score|gain|have|intercept|lead with|take off|make|hit|kick|throw|rush for|pass for)\??$",
+                OP_EXTREME_VALUE_NUMERIC,
+                lambda m: {'unit': m.group(1).strip(),
+                           'entity_desc': m.group(2).strip(),
+                           'direction': 'total'},  # Explicit 'total'
+                0.95),
 
-            # This was your original simpler count, the one above is more comprehensive.
-            # (r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+were\s+there|\s+did|\s+was|\s+in|\s+score|\?)?$",
-            #  OP_COUNT,
-            #  lambda m: {'entity': m.group(1).strip()},
-            #  0.85),
+            # Original Pattern 1 (less specific, now lower priority or covered by 1.B if "total" is intended)
+            # This pattern could be re-evaluated or further refined if still needed after the more specific ones.
+            # For now, the combination of 1.A and 1.B should handle "how many [unit] did [entity] [action]" better.
+            # If a query is "how many yards did PlayerX have?" and the intent is total, pattern 1.B should catch it if "total" is used.
+            # If "total" is not used, and it's not a specific event, the system might need other cues or it defaults to sum in execute_extreme_value_numeric if 'total' direction is set.
+            # Let's assume for now that if "total" isn't explicit in the query, we don't default to 'total' direction here unless other patterns imply it.
 
-            # 3. Difference (e.g., "difference between X and Y", "how many more yards X than Y")
+            # Pattern 2: Count with optional temporal constraint
             (
-            r"(?:difference between|how many more|how many less)\s+([\w\s'-]+?)(?:\s+(?:and|than)\s+([\w\s'-]+?))?\??$",
-            # Made second entity optional
-            OP_DIFFERENCE,
-            # If only one entity after "difference", it implies difference within that entity (max-min).
-            # If two, it's between them.
-            lambda m: {'entity1': m.group(1).strip(),
-                       'entity2': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None},
-            0.95),
+                r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+(?:in|during|for|on)\s+(first half|second half|1st quarter|2nd quarter|3rd quarter|4th quarter|the game|overtime))?(?:\s+were\s+there|\s+did|\s+was|\s+score|\?)?$",
+                OP_COUNT,
+                lambda m: {'entity': m.group(1).strip(),
+                           'temporal_constraint': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(
+                               2) else None},
+                0.90),
 
-            # 4. Extreme Value - Entity (e.g., "who scored the longest pass", "first player")
-            # Needs to be fairly specific to avoid overly broad matches.
+            # Pattern 3: Difference
             (
-            r"^(?:who|what player|what team|which player|which team)\s+(?:had|made|scored|threw|kicked|ran for|caught)\s+(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\??$",
-            OP_EXTREME_VALUE,  # This usually implies a span is the answer
-            lambda m: {'entity_desc': m.group(2).strip(),  # The thing being measured (e.g., "pass", "touchdown")
-                       'direction': m.group(1).lower().strip()},
-            0.90),
-            (
-            r"^(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\s+(?:was by whom|was by which player|was by what player)\??$",
-            OP_EXTREME_VALUE,
-            lambda m: {'entity_desc': m.group(2).strip(), 'direction': m.group(1).lower().strip()},
-            0.90),
+                r"(?:difference between|how many more|how many less)\s+([\w\s'-]+?)(?:\s+(?:and|than)\s+([\w\s'-]+?))?\??$",
+                OP_DIFFERENCE,
+                lambda m: {'entity1': m.group(1).strip(),
+                           'entity2': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None},
+                0.95),
 
-            # 5. Extreme Value - Numeric (e.g., "how many yards was the longest touchdown")
-            # This pattern should correctly capture unit, direction, and entity.
+            # Pattern 4: Extreme Value - Entity
             (
-            r"^how many ([a-z\s]+?) was the (longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+?)(?: of the game)?\??$",
-            OP_EXTREME_VALUE_NUMERIC,
-            lambda m: {'unit': m.group(1).strip(),
-                       'direction': m.group(2).lower().strip(),
-                       'entity_desc': m.group(3).strip()},
-            0.90),
+                r"^(?:who|what player|what team|which player|which team)\s+(?:had|made|scored|threw|kicked|ran for|caught)\s+(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\??$",
+                OP_EXTREME_VALUE,
+                lambda m: {'entity_desc': m.group(2).strip(),
+                           'direction': m.group(1).lower().strip()},
+                0.90),
+            (
+                r"^(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\s+(?:was by whom|was by which player|was by what player)\??$",
+                OP_EXTREME_VALUE,
+                lambda m: {'entity_desc': m.group(2).strip(), 'direction': m.group(1).lower().strip()},
+                0.90),
 
-            # 6. Temporal Difference (e.g., "how many years between X and Y")
+            # Pattern 5: Extreme Value - Numeric (general, for non-action specific queries)
+            (
+                r"^how many ([a-z\s]+?) was the (longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+?)(?: of the game)?\??$",
+                OP_EXTREME_VALUE_NUMERIC,
+                lambda m: {'unit': m.group(1).strip(),
+                           'direction': m.group(2).lower().strip(),
+                           'entity_desc': m.group(3).strip()},  # e.g., "longest field goal", "shortest run"
+                0.90),
+
+            # Pattern 6: Temporal Difference
             (r"^how many years between\s+([\w\s'-]+?)\s+and\s+([\w\s'-]+?)\??$",
              OP_TEMPORAL_DIFFERENCE,
              lambda m: {'entity1': m.group(1).strip(), 'entity2': m.group(2).strip()},
              0.85),
 
-            # 7. Date (e.g., "when did X happen", "what year was X")
-            (r"^(?:when|what date|what year|which year)\s+(?:did|was|is)\s+(.*)\??$",  # Made verb optional too
-             OP_DATE,
-             lambda m: {'entity': m.group(1).strip().rstrip('?')},  # Entity associated with the date
-             0.80),
-            (r"^(?:when|what date|what year|which year)\s+(.*)\??$",  # More general
+            # Pattern 7: Date
+            (r"^(?:when|what date|what year|which year)\s+(?:did|was|is)?\s*(.*)\??$",
              OP_DATE,
              lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.78),
+             0.80),
 
-            # 8. Entity Span (e.g., "who scored", "which team won") - General fallback for specific entities
+            # Pattern 8: Entity Span (General fallback)
             (
-            r"^(?:who|which team|what team|which player|what player|what was the name of the|tell me the name of the)\s+(.*)\??$",
-            OP_ENTITY_SPAN,
-            lambda m: {'entity': m.group(1).strip().rstrip('?')},  # The rest of the query often describes the entity
-            0.80),
-            (r"^(?:who|which|what)\s+(.*)\??$",  # Most general, lower confidence
+                r"^(?:who|which team|what team|which player|what player|what was the name of the|tell me the name of the)\s+(.*)\??$",
+                OP_ENTITY_SPAN,
+                lambda m: {'entity': m.group(1).strip().rstrip('?')},
+                0.80),
+            (r"^(?:who|which|what)\s+(.*)\??$",
              OP_ENTITY_SPAN,
              lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.70),  # Lowered confidence for very generic who/what/which
+             0.70),
         ]
 
         temporal_keywords = ["first half", "second half", "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
@@ -334,10 +339,10 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
 
         matched_op_details = None
         for pattern_regex, op_type, arg_func, base_conf in operation_patterns:
-            match = re.search(pattern_regex, query_lower, re.IGNORECASE)  # Ensure IGNORECASE for all
+            match = re.search(pattern_regex, query_lower, re.IGNORECASE)
             if match:
                 matched_op_details = {
-                    'pattern_regex': pattern_regex,  # Store the regex for debugging
+                    'pattern_regex': pattern_regex,
                     'type': op_type,
                     'arg_func': arg_func,
                     'match_obj': match,
@@ -350,7 +355,6 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         if not matched_op_details:
             self.logger.warning(
                 f"[DROP QID:{query_id}] No fallback operation pattern reliably matched for question: '{query[:70]}...'. Defaulting to entity span on full query.")
-            # Defaulting to OP_ENTITY_SPAN on the whole query if nothing else matches
             return {'status': 'success',
                     'operation': OP_ENTITY_SPAN,
                     'args': {'entity': query.strip().rstrip('?'),
@@ -360,40 +364,42 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
 
         try:
             args = matched_op_details['arg_func'](matched_op_details['match_obj'])
-            if not args or not any(
-                    v for v in args.values() if v is not None):  # Check if args dict is empty or all values are None
+            if not args or not any(v for v in args.values() if v is not None):
                 self.logger.warning(
                     f"[DROP QID:{query_id}] Argument function for pattern '{matched_op_details['pattern_regex']}' returned empty or None arguments: {args}")
-                # If args are crucial and missing, this might be an issue. Fallback to general entity span.
-                return {'status': 'success', 'operation': OP_ENTITY_SPAN, 'args': {'entity': query.strip().rstrip('?'),
-                                                                                   'query_keywords': self._get_query_keywords(
-                                                                                       query_lower, query_id)},
+                return {'status': 'success', 'operation': OP_ENTITY_SPAN,
+                        'args': {'entity': query.strip().rstrip('?'),
+                                 'query_keywords': self._get_query_keywords(query_lower, query_id)},
                         'confidence': 0.3,
                         'rationale': 'Args extraction failed for matched pattern, defaulting to entity span.'}
 
             self.logger.debug(f"[DROP QID:{query_id}] Fallback Extracted Raw Args: {args}")
+            args['query_keywords'] = self._get_query_keywords(query_lower, query_id)
 
-            args['query_keywords'] = self._get_query_keywords(query_lower, query_id)  # Add keywords
+            # Refine extracted arguments
+            for key_to_refine in ['entity', 'entity_desc', 'entity1', 'entity2']:
+                if key_to_refine in args and isinstance(args[key_to_refine], str):
+                    args[key_to_refine] = self._refine_extracted_entity(args[key_to_refine],
+                                                                        query_doc=self.nlp(query) if self.nlp else None,
+                                                                        query_id=query_id)
 
-            # Standardize/refine extracted arguments (especially 'entity' and 'entity_desc')
-            if 'entity' in args and isinstance(args['entity'], str):
-                args['entity'] = self._refine_extracted_entity(args['entity'],
-                                                               query_doc=self.nlp(query) if self.nlp else None,
-                                                               query_id=query_id)
-            if 'entity_desc' in args and isinstance(args['entity_desc'], str):
-                args['entity_desc'] = self._refine_extracted_entity(args['entity_desc'],
-                                                                    query_doc=self.nlp(query) if self.nlp else None,
-                                                                    query_id=query_id)
-            if 'entity1' in args and isinstance(args['entity1'], str):
-                args['entity1'] = self._refine_extracted_entity(args['entity1'],
-                                                                query_doc=self.nlp(query) if self.nlp else None,
-                                                                query_id=query_id)
-            if 'entity2' in args and isinstance(args['entity2'], str):
-                args['entity2'] = self._refine_extracted_entity(args['entity2'],
-                                                                query_doc=self.nlp(query) if self.nlp else None,
-                                                                query_id=query_id)
+            # Consolidate entity_desc from verb_action if specific_event matched (Pattern 1.A)
+            if args.get('direction') == 'specific_event' and args.get('verb_action'):
+                current_entity_desc = args.get('entity_desc', '')
+                verb_action = args.get('verb_action', '')
+                unit = args.get('unit', '')
+                # Construct a more specific entity_desc for downstream number finding
+                # e.g., "Morris gain yards", "Akers score points"
+                # This helps _find_associated_numbers focus better.
+                if current_entity_desc and verb_action and unit:
+                    args['entity_desc'] = f"{current_entity_desc} {verb_action} {unit}"
+                elif current_entity_desc and verb_action:
+                    args['entity_desc'] = f"{current_entity_desc} {verb_action}"
+                # If unit is missing from query but part of entity_desc, it might already be there.
+                # The goal is for execute_extreme_value_numeric to use this refined entity_desc
+                # to find a *single specific* value associated with this action, not sum totals.
 
-            # Check for temporal constraints if not already set by a specific pattern
+            # Check for temporal constraints if not already set
             if 'temporal_constraint' not in args or not args['temporal_constraint']:
                 temporal_constraint_found = None
                 for keyword in temporal_keywords:
@@ -406,12 +412,15 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                         f"[DROP QID:{query_id}] Detected temporal constraint via keywords: {temporal_constraint_found}")
 
             final_confidence = matched_op_details['base_confidence']
-            # Optional: Adjust confidence based on how well args were populated
-            if not all(args.get(k) for k in ['entity', 'entity_desc', 'entity1', 'entity2'] if
-                       k in args):  # If some expected entities are missing
-                final_confidence *= 0.8
+
+            # Ensure direction is set if it's an OP_EXTREME_VALUE_NUMERIC but wasn't set by a specific pattern
+            if matched_op_details['type'] == OP_EXTREME_VALUE_NUMERIC and 'direction' not in args:
                 self.logger.debug(
-                    f"[DROP QID:{query_id}] Reduced confidence to {final_confidence:.2f} due to partially extracted arguments.")
+                    f"[DROP QID:{query_id}] No explicit direction for OP_EXTREME_VALUE_NUMERIC, defaulting direction to 'value_of_event' or 'total' if query implies sum")
+                if "total" in query_lower or "sum of" in query_lower:  # Check if query implies a sum
+                    args['direction'] = 'total'
+                else:
+                    args['direction'] = 'value_of_event'  # A generic direction if not extremum or total
 
             self.logger.info(
                 f"[DROP QID:{query_id}] Fallback Final Extracted Operation: {matched_op_details['type']}, Args: {args}, Confidence: {final_confidence:.2f}")
@@ -945,110 +954,119 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         str, Any]:
         """
         Execute EXTREME_VALUE_NUMERIC operation for DROP queries.
-        Handles queries expecting a numerical value (e.g., "how many yards was the longest touchdown").
-        If direction is 'total', it sums the relevant values.
+        Handles queries expecting a numerical value.
+        If direction is 'total', it sums relevant values.
+        If direction is 'specific_event' or 'value_of_event', it tries to find a single relevant value.
+        Otherwise, it applies min/max based on 'longest', 'shortest', etc.
         """
         try:
             entity_desc = args.get('entity_desc') or args.get('entity')
-            direction_arg = args.get('direction', 'longest')  # Store original arg
+            # Default to 'value_of_event' if no specific direction like longest/shortest/total is provided
+            direction_arg = args.get('direction', 'value_of_event')
             unit = args.get('unit')
             temporal_constraint = args.get('temporal_constraint')
             query_keywords = args.get('query_keywords', [])
 
             if not entity_desc:
+                self.logger.warning(f"[DROP QID:{query_id}] Missing entity_desc for EXTREME_VALUE_NUMERIC.")
                 return {'type': 'number', 'value': 0, 'confidence': 0.1,
-                        'error': 'Missing entity description for extreme_value_numeric'}  # Return 0
+                        'error': 'Missing entity description for extreme_value_numeric'}
 
+            # _find_values_and_spans or a more targeted _find_associated_numbers should be used.
+            # Given entity_desc can now be more specific (e.g., "Morris gain yards"),
+            # _find_associated_numbers might be more appropriate here.
+            # Let's assume _find_associated_numbers is designed to leverage the refined entity_desc.
+            # relevant_numbers = self._find_associated_numbers(context, entity_desc, query_id, query_keywords)
+
+            # Using _find_values_and_spans for now as per existing structure, then extracting numbers.
+            # This might need further refinement if _find_values_and_spans isn't precise enough.
             value_span_pairs = self._find_values_and_spans(context, entity_desc, query_id, query_keywords)
 
-            if temporal_constraint and value_span_pairs and self.nlp:
-                # (Keep existing temporal filtering logic from source [667] - [673])
-                # Ensure value_span_pairs is updated with filtered_pairs
-                filtered_pairs = []
+            relevant_numbers = [val for val, span in value_span_pairs if isinstance(val, (int, float))]
+
+            if temporal_constraint and relevant_numbers and self.nlp:
+                # Temporally filter the numbers if applicable
+                # This requires knowing which number came from which part of the context,
+                # so filtering value_span_pairs first is better.
+                filtered_value_span_pairs = []
                 try:
                     doc = self.nlp(context)
-                    for value, span in value_span_pairs:
-                        span_lower = span.lower()
-                        # Simpler check: does any sentence containing the span also contain the temporal phrase?
+                    for value, span_text in value_span_pairs:  # Use original pairs for context checking
+                        if not isinstance(value, (int, float)):  # only consider numeric values for filtering here
+                            continue
+                        # Logic to check if the span_text (origin of value) is within a temporally relevant sentence
+                        span_text_lower = span_text.lower()
                         sent_found_with_temporal = False
                         for sent in doc.sents:
-                            if span_lower in sent.text.lower():  # Span is in this sentence
-                                sent_text_lower = sent.text.lower()
+                            if span_text_lower in sent.text.lower():
+                                sent_text_lower_content = sent.text.lower()
                                 match_temporal = False
                                 if temporal_constraint == "first half":
-                                    if "1st quarter" in sent_text_lower or "2nd quarter" in sent_text_lower: match_temporal = True
+                                    if "1st quarter" in sent_text_lower_content or "2nd quarter" in sent_text_lower_content: match_temporal = True
                                 elif temporal_constraint == "second half":
-                                    if "3rd quarter" in sent_text_lower or "4th quarter" in sent_text_lower: match_temporal = True
-                                elif temporal_constraint in sent_text_lower:
+                                    if "3rd quarter" in sent_text_lower_content or "4th quarter" in sent_text_lower_content: match_temporal = True
+                                elif temporal_constraint in sent_text_lower_content:
                                     match_temporal = True
-
                                 if match_temporal:
                                     sent_found_with_temporal = True
-                                    break  # Found a matching sentence for this span
+                                    break
                         if sent_found_with_temporal:
-                            filtered_pairs.append((value, span))
+                            filtered_value_span_pairs.append((value, span_text))
 
-                    value_span_pairs = filtered_pairs
+                    relevant_numbers = [val for val, _ in filtered_value_span_pairs if isinstance(val, (int, float))]
                     self.logger.debug(
-                        f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to EXTREME_VALUE_NUMERIC: {len(value_span_pairs)} pairs remain.")
+                        f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to EXTREME_VALUE_NUMERIC. {len(relevant_numbers)} numbers remain: {relevant_numbers}")
                 except Exception as temp_err:
                     self.logger.error(
                         f"[DROP QID:{query_id}] Error during temporal filtering for EXTREME_VALUE_NUMERIC: {temp_err}")
 
-            if not value_span_pairs:
+            if not relevant_numbers:
                 self.logger.warning(
-                    f"[DROP QID:{query_id}] No relevant values/spans found for '{entity_desc}' for EXTREME_VALUE_NUMERIC (after filtering).")
+                    f"[DROP QID:{query_id}] No relevant numeric values found for '{entity_desc}' (Unit: {unit}) for EXTREME_VALUE_NUMERIC (after filtering).")
                 return {'type': 'number', 'value': 0, 'confidence': 0.2,
-                        'error': f"No relevant values/spans found for '{entity_desc}'"}  # Return 0
+                        'error': f"No relevant numeric values found for '{entity_desc}' (Unit: {unit})"}
 
-            direction_to_use = direction_arg.lower()  # Normalize direction for comparison
-
-            extreme_value_result: Union[int, float]
-            selector = None
+            direction_to_use = direction_arg.lower()
+            extreme_value_result: Union[int, float, None] = None  # Initialize to None
 
             if direction_to_use == 'total':
-                # Special handling for 'total' - implies summing relevant values
-                self.logger.debug(
-                    f"[DROP QID:{query_id}] Direction 'total' detected for EXTREME_VALUE_NUMERIC. Will sum values.")
+                extreme_value_result = sum(relevant_numbers)
+                self.logger.debug(f"[DROP QID:{query_id}] Direction 'total': sum = {extreme_value_result}")
             elif direction_to_use in ['longest', 'highest', 'most', 'last']:
-                selector = max
+                extreme_value_result = max(relevant_numbers)
             elif direction_to_use in ['shortest', 'lowest', 'least', 'first']:
-                selector = min
+                extreme_value_result = min(relevant_numbers)
+            elif direction_to_use in ['specific_event', 'value_of_event']:
+                # For a specific event, we expect one primary value.
+                # If _find_associated_numbers (or _find_values_and_spans) was precise due to a refined entity_desc,
+                # relevant_numbers should ideally contain few, highly relevant numbers.
+                if len(relevant_numbers) == 1:
+                    extreme_value_result = relevant_numbers[0]
+                elif relevant_numbers:
+                    # Heuristic: if multiple numbers, could take the first, largest, or log warning.
+                    # Taking the first one found that's associated with the more specific entity_desc.
+                    # This part might need more sophisticated disambiguation if many numbers are still found.
+                    extreme_value_result = relevant_numbers[0]
+                    self.logger.warning(
+                        f"[DROP QID:{query_id}] Multiple numbers ({relevant_numbers}) found for 'specific_event' direction for '{entity_desc}'. Defaulting to first: {extreme_value_result}.")
+                else:  # Should be caught by 'if not relevant_numbers:' above
+                    pass
             else:
                 self.logger.warning(
-                    f"[DROP QID:{query_id}] Unknown direction '{direction_to_use}' (original: '{direction_arg}'), defaulting to 'longest'.")
-                selector = max  # Default to max if direction is unknown but not 'total'
+                    f"[DROP QID:{query_id}] Unknown direction '{direction_to_use}' (original: '{direction_arg}') for EXTREME_VALUE_NUMERIC. Attempting to use first relevant number.")
+                if relevant_numbers:
+                    extreme_value_result = relevant_numbers[0]
 
-            try:
-                valid_pairs = [(val, span) for val, span in value_span_pairs if
-                               isinstance(val, (int, float))]  # Ensure val is numeric
-                if not valid_pairs:
-                    # Check if original value_span_pairs had non-numeric values that were filtered out
-                    if value_span_pairs:
-                        self.logger.warning(
-                            f"[DROP QID:{query_id}] No *numeric* values found in value_span_pairs: {value_span_pairs}")
-                    raise ValueError("No valid numeric values found among pairs.")
-
-                if direction_to_use == 'total':
-                    extreme_value_result = sum(pair[0] for pair in valid_pairs)
-                else:  # Original extremum logic using selector
-                    extreme_value_result = selector(pair[0] for pair in valid_pairs)
-
-                # Cast to int if it's a whole number
-                if isinstance(extreme_value_result, float) and extreme_value_result.is_integer():
-                    extreme_value_result = int(extreme_value_result)
-
-            except ValueError as ve:
+            if extreme_value_result is None:
                 self.logger.error(
-                    f"[DROP QID:{query_id}] Could not determine extreme value/total for '{entity_desc}': {ve}")
-                return {'type': 'number', 'value': 0, 'confidence': 0.1, 'error': str(ve)}  # Return 0
+                    f"[DROP QID:{query_id}] Could not determine extreme/specific value for '{entity_desc}' (Direction: {direction_to_use}). Numbers found: {relevant_numbers}")
+                return {'type': 'number', 'value': 0, 'confidence': 0.1,
+                        'error': f"Could not resolve value for {direction_to_use}."}
 
-            # Confidence calculation can remain similar
-            # associated_spans logic is more for when the *span* is the answer, not the number.
-            # For EXTREME_VALUE_NUMERIC, the number itself is the primary answer.
-            # A simple confidence boost if we found valid pairs.
-            confidence = 0.8 if valid_pairs else 0.55
+            if isinstance(extreme_value_result, float) and extreme_value_result.is_integer():
+                extreme_value_result = int(extreme_value_result)
 
+            confidence = 0.8 if relevant_numbers else 0.5  # Adjusted confidence based on finding numbers
             self.logger.info(
                 f"[DROP QID:{query_id}] EXTREME_VALUE_NUMERIC: Entity='{entity_desc}', Unit='{unit}', Direction='{direction_arg}', ResultValue={extreme_value_result}, Conf={confidence:.2f}")
             return {'type': 'number', 'value': extreme_value_result, 'confidence': confidence}
@@ -1057,71 +1075,131 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
             self.logger.exception(
                 f"[DROP QID:{query_id}] Error in EXTREME_VALUE_NUMERIC for entity '{args.get('entity_desc')}': {str(e)}")
             return {'type': 'number', 'value': 0, 'confidence': 0.0,
-                    'error': f'Exception in extreme_value_numeric: {str(e)}'}  # Return 0
+                    'error': f'Exception in extreme_value_numeric: {str(e)}'}
 
-    def _find_values_and_spans(self, context: str, entity_desc: str, query_id: str, query_keywords: List[str] = None) -> List[Tuple[Optional[float], str]]:
+    def _find_values_and_spans(self, context: str, entity_desc: str, query_id: str,
+                               query_keywords: Optional[List[str]] = None) -> List[
+        Tuple[Optional[Union[int, float]], str]]:
         """
-        Helper to find numbers and associated entity spans, using keywords.
+        Helper to find numbers (values) and their original text spans, attempting to associate
+        them with the entity_desc using query_keywords for better precision.
+        Query_keywords should ideally include lemmatized components of entity_desc (noun, verbs, adjs).
         """
-        pairs = []
+        pairs: List[Tuple[Optional[Union[int, float]], str]] = []
         if not self.nlp:
-            self.logger.warning(f"[DROP QID:{query_id}] spaCy unavailable, cannot accurately find value/span pairs.")
-            return []
+            self.logger.warning(
+                f"[DROP QID:{query_id}] spaCy unavailable. _find_values_and_spans will be less accurate.")
+            # Basic regex fallback to find any number and associate with any entity_desc mention
+            # This is very imprecise.
+            numbers_in_context = self._find_numbers_in_passage(context, query_id)
+            if entity_desc.lower() in context.lower() and numbers_in_context:
+                # Associate all numbers with the first mention of entity_desc (highly heuristic)
+                for num in numbers_in_context:
+                    pairs.append((num, str(num)))  # Span is just the number itself
+            return list(set(pairs))  # Return unique pairs
 
         doc = self.nlp(context)
-        entity_desc_lemmas = {token.lemma_.lower() for token in self.nlp(entity_desc) if not token.is_stop and token.pos_ != 'DET'}
-        query_keywords_set = set(query_keywords or []) | entity_desc_lemmas
 
-        for ent in doc.ents:
-            if ent.label_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT']:
-                num_val = None
-                try:
-                    num_str = ent.text.replace(',', '').replace('$', '').replace('%', '').strip()
-                    if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
-                        num_val = float(num_str) if '.' in num_str else int(num_str)
-                except ValueError: continue
+        # Prepare keywords from entity_desc for matching
+        # These keywords should ideally include verbs if entity_desc is action-specific
+        # e.g., if entity_desc = "Tony Romo throw touchdown passes", keywords could include "romo", "throw", "pass", "touchdown"
+        processed_entity_desc_keywords = set()
+        if query_keywords:  # query_keywords are already lemmatized and filtered
+            processed_entity_desc_keywords.update(kw.lower() for kw in query_keywords)
+        else:  # Fallback if no pre-processed keywords
+            # Simple tokenization and lemmatization of entity_desc
+            desc_doc = self.nlp(entity_desc.lower())
+            processed_entity_desc_keywords.update(
+                token.lemma_ for token in desc_doc if
+                not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ']
+            )
 
-                if num_val is not None:
-                    associated_span = ent.text
-                    found_association = False
+        if not processed_entity_desc_keywords:
+            self.logger.warning(
+                f"[DROP QID:{query_id}] No keywords derived from entity_desc: '{entity_desc}'. Value association will be weak.")
+            # As a last resort, use all nouns/propns from entity_desc
+            desc_doc = self.nlp(entity_desc.lower())
+            processed_entity_desc_keywords.update(
+                token.lemma_ for token in desc_doc if token.pos_ in ['NOUN', 'PROPN']
+            )
 
-                    window = 7
-                    start = max(0, ent.start - window)
-                    end = min(len(doc), ent.end + window)
+        self.logger.debug(
+            f"[DROP QID:{query_id}] _find_values_and_spans: entity_desc='{entity_desc}', keywords for matching: {processed_entity_desc_keywords}")
 
-                    best_assoc_span = None
-                    for i in range(start, end):
-                        token = doc[i]
-                        if ent.start <= token.i < ent.end:
+        # Iterate through sentences to find numbers and check association
+        for sent in doc.sents:
+            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop and not token.is_punct}
+
+            # Check if the sentence seems relevant to the entity_desc based on keyword overlap
+            # Require a significant overlap of keywords to consider the sentence relevant
+            # This threshold might need tuning.
+            keyword_overlap_count = len(processed_entity_desc_keywords.intersection(sent_lemmas))
+            relevance_threshold = 1 if len(
+                processed_entity_desc_keywords) <= 2 else 2  # Need at least 1 or 2 keywords matching
+
+            if keyword_overlap_count >= relevance_threshold:
+                self.logger.debug(
+                    f"[DROP QID:{query_id}] Relevant sentence for '{entity_desc}': '{sent.text[:100]}...' (Overlap: {keyword_overlap_count})")
+                # Find numbers (CARDINAL, QUANTITY, etc.) within this relevant sentence
+                for ent in sent.ents:  # Iterate entities within the relevant sentence
+                    if ent.label_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT']:
+                        num_val = None
+                        try:
+                            num_str = ent.text.replace(',', '').replace('$', '').replace('%', '').strip()
+                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):  # Check if it's a valid number string
+                                num_val = float(num_str) if '.' in num_str else int(num_str)
+                        except ValueError:
+                            continue  # Skip if not a parseable number
+
+                        if num_val is not None:
+                            # Further check: is this number related to the *specific* entity_desc?
+                            # For now, if sentence is relevant and contains a number, we associate it.
+                            # More advanced logic could check dependency paths between the number and keywords here.
+                            pairs.append((num_val, ent.text))  # Store the original text span of the number
+                            self.logger.debug(
+                                f"[DROP QID:{query_id}] Associated value={num_val} (from span='{ent.text}') with entity_desc='{entity_desc}' in relevant sentence.")
+
+                # Also check for token.like_num in relevant sentences if NER missed it
+                for token in sent:
+                    if token.like_num and not token.is_punct and not token.is_stop:
+                        is_part_of_ner_num = any(token.i >= ent.start and token.i < ent.end for ent in sent.ents if
+                                                 ent.label_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT'])
+                        if is_part_of_ner_num:
+                            continue  # Already processed as part of an entity
+
+                        num_val = None
+                        try:
+                            num_str = token.text.replace(',', '').strip()
+                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
+                                num_val = float(num_str) if '.' in num_str else int(num_str)
+                        except ValueError:
                             continue
 
-                        if token.lemma_.lower() in query_keywords_set and token.pos_ in ['NOUN','PROPN','VERB']:
-                            found_association = True
-                            potential_subj = token.text
-                            if token.dep_ == 'pobj' and token.head.pos_ == 'ADP':
-                                head_verb = token.head.head
-                                if head_verb.pos_ == 'VERB':
-                                    subjects = [child for child in head_verb.children if child.dep_ == 'nsubj' and child.pos_ == 'PROPN']
-                                    if subjects: best_assoc_span = subjects[0].text; break
-                            elif token.pos_ == 'PROPN':
-                                best_assoc_span = token.text; break
-                            elif token.head.pos_ == 'PROPN':
-                                best_assoc_span = token.head.text; break
+                        if num_val is not None:
+                            pairs.append((num_val, token.text))
+                            self.logger.debug(
+                                f"[DROP QID:{query_id}] Associated token.like_num value={num_val} (from token='{token.text}') with entity_desc='{entity_desc}' in relevant sentence.")
 
-                        if not found_association and token.ent_type_ in ['PERSON', 'ORG', 'GPE'] and token.i not in range(ent.start, ent.end):
-                            ent_context_lemmas = {t.lemma_.lower() for t in doc[max(0, token.i-2):min(len(doc), token.i+3)]}
-                            if query_keywords_set.intersection(ent_context_lemmas):
-                                best_assoc_span = token.text
-                                found_association = True; break
+        # Deduplicate pairs based on (value, original_span_text)
+        # Using a set of tuples to ensure uniqueness
+        unique_pairs_set = set()
+        final_pairs: List[Tuple[Optional[Union[int, float]], str]] = []
+        for val, span_str in pairs:
+            if (val, span_str) not in unique_pairs_set:
+                final_pairs.append((val, span_str))
+                unique_pairs_set.add((val, span_str))
 
-                    if found_association:
-                        final_span = best_assoc_span if best_assoc_span else associated_span
-                        pairs.append((num_val, final_span))
-                        self.logger.debug(f"[DROP QID:{query_id}] Associated value={num_val} with entity_desc='{entity_desc}' via span='{final_span}'")
+        if not final_pairs:
+            self.logger.warning(
+                f"[DROP QID:{query_id}] No specific numbers found associated with '{entity_desc}' using keyword sentence filtering. Falling back to finding any number in context if entity_desc is generally mentioned.")
+            # Fallback: if entity_desc (e.g. player name) is in context, get all numbers from context - less precise.
+            # This fallback might be too broad and re-introduce the "165" problem if not careful.
+            # For now, let's restrict this fallback. If keywords didn't find anything, it means low relevance.
+            # Consider just returning empty if no specific association.
 
-        unique_pairs = list({pair for pair in pairs})
-        self.logger.debug(f"[DROP QID:{query_id}] Found {len(unique_pairs)} value/span pairs for '{entity_desc}'.")
-        return unique_pairs
+        self.logger.debug(
+            f"[DROP QID:{query_id}] Found {len(final_pairs)} value/span pairs for '{entity_desc}': {final_pairs}")
+        return final_pairs
 
     def execute_difference(self, args: Dict[str, Any], context: str, query_id: str) -> Dict[str, Any]:
         """

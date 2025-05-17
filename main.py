@@ -7,22 +7,22 @@ import time
 import warnings
 import argparse
 import logging
-import urllib3
+import urllib3 # type: ignore
 from collections import defaultdict
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 import torch
-import torch.nn as nn  # This import seems unused in main.py, consider removing if not needed elsewhere via main
-import numpy as np  # This import seems unused in main.py, consider removing if not needed elsewhere via main
+# import torch.nn as nn  # Removed: This import seems unused in main.py based on provided snippets
+# import numpy as np  # Removed: This import seems unused in main.py based on provided snippets
 
 try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoTokenizer, AutoModelForCausalLM # type: ignore
 except ImportError:
     print("Transformers library not found. Please install it: pip install transformers")
     sys.exit(1)
 
 try:
-    from sentence_transformers import SentenceTransformer
+    from sentence_transformers import SentenceTransformer # type: ignore
 except ImportError:
     print("Sentence-transformers library not found. Please install it: pip install sentence-transformers")
     sys.exit(1)
@@ -36,7 +36,7 @@ try:
     from src.utils.rule_extractor import RuleExtractor
     from src.queries.query_logger import QueryLogger
     from src.resources.resource_manager import ResourceManager
-    from src.feedback.feedback_manager import FeedbackManager
+    from src.feedback.feedback_manager import FeedbackManager # Assuming this is used or intended
     from src.config.config_loader import ConfigLoader
     from src.queries.query_expander import QueryExpander
     from src.utils.evaluation import Evaluation
@@ -51,7 +51,7 @@ except ImportError as e:
     print("Please ensure main.py is run from the project root directory or PYTHONPATH is set correctly.")
     sys.exit(1)
 
-urllib3.disable_warnings()
+urllib3.disable_warnings() # type: ignore
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
 ProgressManager.SHOW_PROGRESS = False
 
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Default to DEBUG, can be overridden by args
 
 
-def load_hotpotqa(hotpotqa_path, max_samples=None):
+def load_hotpotqa(hotpotqa_path: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Loads a portion of the HotpotQA dataset.
     Each sample includes a query, ground-truth answer,
@@ -69,7 +69,7 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
     if not os.path.exists(hotpotqa_path):
         logger.error(f"HotpotQA dataset file not found at: {hotpotqa_path}")
         return []
-    dataset = []
+    dataset: List[Dict[str, Any]] = []
     try:
         with open(hotpotqa_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -110,14 +110,14 @@ def load_hotpotqa(hotpotqa_path, max_samples=None):
     return dataset
 
 
-def load_drop_dataset(drop_path, max_samples=None):
+def load_drop_dataset(drop_path: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Loads a portion of the DROP dataset.
     """
     if not os.path.exists(drop_path):
         logger.error(f"DROP dataset file not found at: {drop_path}")
         return []
-    dataset = []
+    dataset: List[Dict[str, Any]] = []
     try:
         with open(drop_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -165,11 +165,10 @@ def load_drop_dataset(drop_path, max_samples=None):
     return dataset
 
 
-def run_hysym_system(samples=200, dataset_type='hotpotqa'):
+def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     """Main execution function for the HySym-RAG system."""
     print(f"\n=== Initializing HySym-RAG System for Dataset: {dataset_type.upper()} ===")
 
-    # ProgressManager.SHOW_PROGRESS = False # Set by args later if applicable
     # Configure library logging levels
     for lib in ['transformers', 'sentence_transformers', 'urllib3.connectionpool', 'h5py', 'numexpr', 'spacy']:
         logging.getLogger(lib).setLevel(logging.WARNING)
@@ -180,10 +179,9 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
     logging.getLogger('src.reasoners.networkx_symbolic_reasoner_base').setLevel(logging.INFO)
     logging.getLogger('src.reasoners.networkx_symbolic_reasoner_drop').setLevel(logging.INFO)
     logging.getLogger('src.reasoners.neural_retriever').setLevel(logging.INFO)
-    logging.getLogger('src.system.system_control_manager').setLevel(logging.INFO)  # Default INFO
+    logging.getLogger('src.system.system_control_manager').setLevel(logging.INFO)
     logging.getLogger('src.system.response_aggregator').setLevel(logging.INFO)
     logging.getLogger('src.system.system_logic_helpers').setLevel(logging.INFO)
-    # Main logger level is set based on --debug flag later
 
     # 1. Load configuration
     print("Loading configuration...")
@@ -200,19 +198,18 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             logger.error("model_name not found in configuration.")
             return {"error": "model_name missing from configuration."}
 
-        project_root = os.path.dirname(script_dir)  # Assuming main.py is in the root
+        project_root = os.path.dirname(script_dir)
 
-        # Safely get paths with defaults rooted at project_root/data
         default_data_dir = os.path.join(project_root, "data")
         hotpotqa_path = config.get("hotpotqa_dataset_path",
                                    os.path.join(default_data_dir, "hotpot_dev_distractor_v1.json"))
         drop_path = config.get("drop_dataset_path", os.path.join(default_data_dir, "drop_dataset_dev.json"))
 
-        rules_path_default_name = "rules.json"  # A generic default name
+        rules_path_default_name = "rules.json"
         hotpotqa_rules_path = config.get("hotpotqa_rules_file",
-                                         os.path.join(default_data_dir, "rules_hotpotqa.json"))  # More specific default
+                                         os.path.join(default_data_dir, "rules_hotpotqa.json"))
         drop_rules_path = config.get("drop_rules_file",
-                                     os.path.join(default_data_dir, "rules_drop.json"))  # More specific default
+                                       os.path.join(default_data_dir, "rules_drop.json"))
 
         kb_path_default = os.path.join(default_data_dir, "small_knowledge_base.txt")
         kb_path = config.get("knowledge_base", kb_path_default)
@@ -232,22 +229,22 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
         logger.warning(
             f"Resource configuration file not found at {resource_config_path}. ResourceManager will use defaults.")
     resource_manager = ResourceManager(
-        config_path=resource_config_path,  # Will use defaults if path not found
+        config_path=resource_config_path,
         enable_performance_tracking=True,
         history_window_size=100
     )
 
     # 4. DimensionalityManager
     print("Initializing Dimensionality Manager...")
-    alignment_config = config.get('alignment', {})  # Default to empty dict if 'alignment' not in config
-    target_dim = alignment_config.get('target_dim', 768)  # Default if 'target_dim' not in alignment_config
+    alignment_config = config.get('alignment', {})
+    target_dim = alignment_config.get('target_dim', 768)
     dimensionality_manager = DimensionalityManager(target_dim=target_dim, device=device)
 
     # 5. Select and Ensure Rules File
-    # rules_path will be either for DROP or HotpotQA, or a very generic default if those aren't specified
+    rules_path = "" # Initialize rules_path
     if dataset_type.lower() == 'drop':
         rules_path = drop_rules_path
-        if not os.path.exists(rules_path):  # If specific drop_rules_path doesn't exist, maybe fallback to a generic one
+        if not os.path.exists(rules_path):
             rules_path = os.path.join(default_data_dir, rules_path_default_name)
     else:  # hotpotqa or other
         rules_path = hotpotqa_rules_path
@@ -260,7 +257,7 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
         try:
             os.makedirs(os.path.dirname(rules_path), exist_ok=True)
             with open(rules_path, "w", encoding="utf-8") as f:
-                json.dump([], f)  # Create an empty JSON list
+                json.dump([], f)
         except Exception as e:
             logger.error(f"Failed to create empty rules file at {rules_path}: {e}")
             return {"error": f"Failed to ensure rules file exists at {rules_path}"}
@@ -271,8 +268,8 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
 
     # 7. Load Evaluation Dataset and Extract Rules
     print(f"Loading evaluation dataset: {dataset_type.upper()}...")
-    test_queries = []
-    ground_truths = {}  # query_id -> answer
+    test_queries: List[Dict[str, Any]] = []
+    ground_truths: Dict[str, Any] = {}
 
     if dataset_type.lower() == 'drop':
         if not os.path.exists(drop_path):
@@ -282,20 +279,18 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
         test_queries = load_drop_dataset(drop_path, max_samples=samples)
         ground_truths = {s["query_id"]: s["answer"] for s in test_queries if "query_id" in s and "answer" in s}
 
-        # Dynamically extract DROP rules if configured or necessary
         questions = [qa['query'] for qa in test_queries if qa.get('query')]
         passages = [qa['context'] for qa in test_queries if qa.get('context')]
 
-        if questions and passages:  # Only extract if we have data
+        if questions and passages:
             print("Extracting DROP-specific rules dynamically...")
             try:
                 dynamic_rules = rule_extractor.extract_rules_from_drop(
-                    drop_json_path=drop_path,  # Pass the main DROP json for context pattern learning
+                    drop_json_path=drop_path,
                     questions=questions,
                     passages=passages,
-                    min_support=config.get('drop_rule_min_support', 5)  # Make min_support configurable
+                    min_support=config.get('drop_rule_min_support', 5)
                 )
-                # Override rules_path to the dynamically generated one for DROP
                 rules_path = os.path.join(default_data_dir, "rules_drop_dynamic.json")
                 os.makedirs(os.path.dirname(rules_path), exist_ok=True)
                 with open(rules_path, "w", encoding="utf-8") as f:
@@ -307,10 +302,10 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             except Exception as e:
                 logger.error(
                     f"Failed to extract dynamic DROP rules: {e}. Continuing with potentially pre-existing rules file: {drop_rules_path}")
-                rules_path = drop_rules_path  # Fallback to configured/default DROP rules path
+                rules_path = drop_rules_path
         else:
             logger.warning("Not enough data from loaded samples to extract dynamic DROP rules.")
-            rules_path = drop_rules_path  # Use configured/default if no dynamic extraction
+            rules_path = drop_rules_path
 
     elif dataset_type.lower() == 'hotpotqa':
         if not os.path.exists(hotpotqa_path):
@@ -318,9 +313,9 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             return {"error": f"HotpotQA dataset not found at {hotpotqa_path}"}
         print(f"Loading HotpotQA dataset from {hotpotqa_path}...")
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=samples)
-        for sample_item in test_queries:  # Renamed variable to avoid conflict
+        for sample_item in test_queries:
             ground_truths[sample_item["query_id"]] = sample_item["answer"]
-        rules_path = hotpotqa_rules_path  # Use configured HotpotQA rules
+        rules_path = hotpotqa_rules_path
     else:
         logger.error(f"Unknown dataset_type '{dataset_type}'. Cannot load data.")
         return {"error": f"Unknown dataset_type '{dataset_type}'"}
@@ -332,21 +327,21 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
 
     # 8. GraphSymbolicReasoner
     print(f"Initializing Symbolic Reasoner for {dataset_type.upper()} using rules from: {rules_path}...")
-    symbolic = None
+    symbolic: Optional[Union[GraphSymbolicReasoner, GraphSymbolicReasonerDrop]] = None
     embedding_model_name = config.get('embeddings', {}).get('model_name', 'all-MiniLM-L6-v2')
     try:
         if dataset_type.lower() == 'drop':
             symbolic = GraphSymbolicReasonerDrop(
-                rules_file=rules_path,  # This now points to dynamic or specified DROP rules
+                rules_file=rules_path,
                 match_threshold=config.get('symbolic_match_threshold_drop', 0.1),
                 max_hops=config.get('symbolic_max_hops_drop', 3),
                 embedding_model=embedding_model_name,
                 device=device,
                 dim_manager=dimensionality_manager
             )
-        else:  # hotpotqa or other
+        else:
             symbolic = GraphSymbolicReasoner(
-                rules_file=rules_path,  # This points to specified HotpotQA rules
+                rules_file=rules_path,
                 match_threshold=config.get('symbolic_match_threshold_hotpot', 0.1),
                 max_hops=config.get('symbolic_max_hops_hotpot', 5),
                 embedding_model=embedding_model_name,
@@ -366,8 +361,8 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
     print("Initializing Neural Retriever...")
     try:
         neural = NeuralRetriever(
-            model_name,  # From main config
-            use_quantization=config.get('neural_use_quantization', False),  # Make configurable
+            model_name,
+            use_quantization=config.get('neural_use_quantization', False),
             max_context_length=config.get('neural_max_context_length', 2048),
             chunk_size=config.get('neural_chunk_size', 512),
             overlap=config.get('neural_overlap', 128),
@@ -379,8 +374,8 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
 
     # 10. Support components
     print("Initializing support components...")
-    query_logger = QueryLogger(log_dir=os.path.join(args.log_dir, dataset_type))  # Pass dataset-specific log dir
-    # feedback_manager = FeedbackManager() # Currently unused directly in this flow
+    log_dir_for_query_logger = args.log_dir if args and hasattr(args, 'log_dir') else 'logs'
+    query_logger = QueryLogger(log_dir=os.path.join(log_dir_for_query_logger, dataset_type))
 
     complexity_config_path = os.path.join(script_dir, "src", "config", "complexity_rules.yaml")
     if not os.path.exists(complexity_config_path):
@@ -389,7 +384,7 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
     expander = QueryExpander(complexity_config=complexity_config_path)
 
     # 11. Initialize Evaluation utility
-    evaluator = Evaluation(dataset_type=dataset_type)  # Pass dataset_type
+    evaluator = Evaluation(dataset_type=dataset_type)
 
     # 12. Create HybridIntegrator
     print("Creating Hybrid Integrator...")
@@ -397,9 +392,9 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
         integrator = HybridIntegrator(
             symbolic_reasoner=symbolic,
             neural_retriever=neural,
-            query_expander=expander,  # Pass expander
+            query_expander=expander,
             dim_manager=dimensionality_manager,
-            dataset_type=dataset_type  # Pass dataset_type
+            dataset_type=dataset_type
         )
     except Exception as e:
         logger.exception(f"Fatal error initializing Hybrid Integrator: {e}")
@@ -407,16 +402,16 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
 
     # 13. SystemControlManager
     print("Initializing System Control Manager...")
-    # Aggregator is now imported from src.system and instantiated here
     aggregator = UnifiedResponseAggregator(include_explanations=True)
+    log_dir_for_metrics_collector = args.log_dir if args and hasattr(args, 'log_dir') else 'logs'
     metrics_collector = MetricsCollector(
         dataset_type=dataset_type,
-        metrics_dir=os.path.join(args.log_dir, dataset_type, "metrics_collection")  # More specific dir
+        metrics_dir=os.path.join(log_dir_for_metrics_collector, dataset_type, "metrics_collection")
     )
     system_manager = SystemControlManager(
         hybrid_integrator=integrator,
         resource_manager=resource_manager,
-        aggregator=aggregator,  # Pass the instance
+        aggregator=aggregator,
         metrics_collector=metrics_collector,
         error_retry_limit=config.get('error_retry_limit', 2),
         max_query_time=config.get('max_query_time', 30.0)
@@ -424,7 +419,7 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
 
     # 14. Optional general knowledge base
     general_context = ""
-    if kb_path and os.path.exists(kb_path):  # Check if kb_path is not None or empty
+    if kb_path and os.path.exists(kb_path):
         try:
             with open(kb_path, "r", encoding="utf-8") as kb_file:
                 general_context = kb_file.read()
@@ -434,39 +429,34 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
                 logger.warning(f"General knowledge base file {kb_path} is empty.")
         except Exception as e:
             logger.warning(f"Could not load general knowledge base from {kb_path}: {e}")
-    elif kb_path:  # Path specified but does not exist
+    elif kb_path:
         logger.warning(f"General knowledge base file specified but not found: {kb_path}")
 
     # Main Query Processing Loop
     print(f"\n=== Testing System with {len(test_queries)} Queries from {dataset_type.upper()} Dataset ===")
-    results_list = []  # To store final dicts from system_manager
+    results_list: List[Dict[str, Any]] = []
 
-    # Make query_iterator respect the global ProgressManager setting
     query_iterator = tqdm(test_queries, desc="Processing Queries", unit="query",
                           disable=not ProgressManager.SHOW_PROGRESS)
 
     for q_info in query_iterator:
         query_id = q_info.get("query_id")
         query = q_info.get("query")
-        the_answer_obj = q_info.get("answer")  # Ground truth answer object
-        local_context = q_info.get("context", general_context)  # Use specific context or general KB
-        forced_path = q_info.get("forced_path")  # For debugging/testing specific paths
-        data_type = q_info.get("type", "")  # e.g., "ground_truth_available_hotpotqa"
-        supporting_facts_for_query = q_info.get("supporting_facts")  # For HotpotQA
+        the_answer_obj = q_info.get("answer")
+        local_context = q_info.get("context", general_context)
+        forced_path = q_info.get("forced_path")
+        data_type = q_info.get("type", "")
+        supporting_facts_for_query = q_info.get("supporting_facts")
 
         if not query_id or not query:
             logger.warning(f"Skipping query due to missing ID or text: {q_info}")
             continue
 
-        # Update tqdm description
         if ProgressManager.SHOW_PROGRESS:
-            query_iterator.set_description(f"Processing QID: {query_id[:8]}")
+            query_iterator.set_description(f"Processing QID: {str(query_id)[:8]}")
 
-        # Log query details at a higher level for better traceability if not in DEBUG mode
         logger.info(f"Processing Query ID: {query_id}, Query: '{query[:100]}...'")
-        # logger.debug(f"Context provided: {local_context[:200]}...") # Context can be very long
         logger.debug(f"Query Type: {data_type}, Forced Path: {forced_path}")
-        # print("-" * 50) # Already printed before loop
 
         final_response_from_system: Dict[str, Any] = {}
         actual_reasoning_path: str = 'error_before_processing'
@@ -475,35 +465,26 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             complexity = expander.get_query_complexity(query)
             logger.info(f"Query '{query_id}' Complexity Score: {complexity:.4f}")
 
-            # Call SystemControlManager to process the query
-            # process_query_with_fallback now returns: (formatted_response_dict, reasoning_path_string)
             final_response_from_system, actual_reasoning_path = system_manager.process_query_with_fallback(
                 query=query,
                 context=local_context,
                 query_id=query_id,
                 forced_path=forced_path,
                 query_complexity=complexity,
-                supporting_facts=supporting_facts_for_query,  # Pass supporting facts
-                dataset_type=dataset_type  # Crucial for SystemControlManager logic
+                supporting_facts=supporting_facts_for_query,
+                dataset_type=dataset_type
             )
 
-            # final_response_from_system is already the formatted dictionary
-            # actual_reasoning_path is the path string
-
-            # Extract prediction for evaluation
-            # The 'result' key in final_response_from_system holds the actual answer payload
             prediction_val = final_response_from_system.get('result',
-                                                            {
-                                                                'error': 'Result key missing in system response'} if dataset_type == 'drop' else "Error: Result key missing")
+                                                         ({'error': 'Result key missing in system response'}
+                                                          if dataset_type == 'drop' else "Error: Result key missing"))
+            results_list.append(final_response_from_system)
 
-            results_list.append(final_response_from_system)  # Store the full formatted response
-
-            # --- Printing results per query ---
             print("\n" + "-" * 10 + f" Results for QID: {query_id} " + "-" * 10)
             if dataset_type == 'drop' and isinstance(prediction_val, dict):
                 print(f"  Prediction (DROP): {prediction_val}")
             else:
-                print(f"  Prediction (Text): {str(prediction_val)[:300]}...")  # Increased preview length
+                print(f"  Prediction (Text): {str(prediction_val)[:300]}...")
 
             print(f"  Reasoning Path: {actual_reasoning_path}")
             print(f"  Overall Processing Time: {final_response_from_system.get('processing_time', 0.0):.3f}s")
@@ -518,62 +499,43 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             explanation = final_response_from_system.get('explanation')
             if explanation:
                 print(f"  Explanation: {explanation}")
-            print("-" * (30 + len(query_id)))
-            # --- End printing results ---
+            print("-" * (30 + len(str(query_id))))
 
-            # Evaluation if ground truth is available
             if data_type.startswith("ground_truth_available") and \
                     the_answer_obj is not None and \
-                    final_response_from_system.get('status') == 'success':  # Only evaluate successful responses
-
+                    final_response_from_system.get('status') == 'success':
                 if query_id in ground_truths:
                     gt_answer = ground_truths[query_id]
-
-                    # Prepare supporting facts and reasoning chain for evaluation if available
-                    sf_for_eval = {
-                        query_id: supporting_facts_for_query} if supporting_facts_for_query and dataset_type != 'drop' else None
+                    sf_for_eval = {query_id: supporting_facts_for_query} if supporting_facts_for_query and dataset_type != 'drop' else None
                     rc_for_eval = None
-                    if 'debug_info' in final_response_from_system and isinstance(
-                            final_response_from_system['debug_info'], dict):
-                        # Assuming AlignmentLayer's debug_info might have 'steps' or similar
+                    if 'debug_info' in final_response_from_system and isinstance(final_response_from_system['debug_info'], dict):
                         chain_steps = final_response_from_system['debug_info'].get('steps',
-                                                                                   final_response_from_system[
-                                                                                       'debug_info'].get('chain_info',
-                                                                                                         {}).get(
-                                                                                       'steps'))
+                                                                                final_response_from_system['debug_info'].get('chain_info', {}).get('steps'))
                         if chain_steps:
                             rc_for_eval = {query_id: chain_steps}
 
                     eval_metrics = evaluator.evaluate(
-                        predictions={query_id: prediction_val},  # prediction_val is the core answer
+                        predictions={query_id: prediction_val},
                         ground_truths={query_id: gt_answer},
                         supporting_facts=sf_for_eval,
                         reasoning_chain=rc_for_eval
                     )
-
                     print("  Evaluation Metrics:")
                     print(f"    Exact Match: {eval_metrics.get('average_exact_match', 0.0):.3f}")
                     print(f"    F1 Score: {eval_metrics.get('average_f1', 0.0):.3f}")
-                    if dataset_type != 'drop':  # Text-specific metrics
+                    if dataset_type != 'drop':
                         print(f"    ROUGE-L: {eval_metrics.get('average_rougeL', 0.0):.3f}")
                         print(f"    BLEU: {eval_metrics.get('average_bleu', 0.0):.3f}")
                         print(f"    Semantic Sim: {eval_metrics.get('average_semantic_similarity', 0.0):.3f}")
-                    # Store these per-query eval metrics if needed, e.g., by adding to final_response_from_system
                     final_response_from_system['evaluation_metrics'] = eval_metrics
                 else:
-                    logger.warning(
-                        f"Ground truth not found in ground_truths map for query_id {query_id} during evaluation.")
+                    logger.warning(f"Ground truth not found for query_id {query_id} during evaluation.")
             elif final_response_from_system.get('status') != 'success':
-                logger.warning(
-                    f"Skipping evaluation for QID {query_id} as its status was '{final_response_from_system.get('status')}'.")
-
+                logger.warning(f"Skipping evaluation for QID {query_id} due to status: '{final_response_from_system.get('status')}'.")
 
         except Exception as e:
-            # This catch block is for unexpected errors in the main loop for a query,
-            # not typically for errors within process_query_with_fallback which should return an error dict.
             print(f"\n--- ERROR in main processing loop for query {query_id} ---")
             logger.exception(f"Unhandled exception for query_id {query_id} in main loop: {e}")
-            # Store a basic error structure if this happens
             results_list.append({
                 'query_id': query_id, 'query': query, 'status': 'critical_error_in_main_loop',
                 'error': str(e), 'reasoning_path': actual_reasoning_path
@@ -582,7 +544,6 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             print("-" * 30)
 
     # After processing all queries
-    # System Performance Summary from SystemControlManager
     print("\n" + "=" * 20 + " System Performance Summary (from SystemControlManager) " + "=" * 20)
     try:
         scm_perf_summary = system_manager.get_performance_metrics()
@@ -591,26 +552,23 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
             print(f"- SCM Successful Queries: {scm_perf_summary['successful_queries']}")
             print(f"- SCM Success Rate: {scm_perf_summary.get('success_rate', 0.0):.1f}%")
             print(f"- SCM Error Count (retries/internal): {scm_perf_summary.get('error_count', 0)}")
-            print(
-                f"- SCM Avg Successful Response Time: {scm_perf_summary.get('avg_successful_response_time_sec', 0.0):.3f}s")
+            print(f"- SCM Avg Successful Response Time: {scm_perf_summary.get('avg_successful_response_time_sec', 0.0):.3f}s")
         else:
             print("- No queries were processed by SystemControlManager according to its metrics.")
 
         print("\nSCM Reasoning Path Distribution (Execution Counts):")
         scm_path_stats = system_manager.get_reasoning_path_stats()
         if scm_path_stats:
-            for path, path_data in scm_path_stats.items():  # Renamed 'stats' to 'path_data'
+            for path, path_data in scm_path_stats.items():
                 count = path_data.get('execution_count', 0)
                 success = path_data.get('success_count', 0)
                 avg_time = path_data.get('avg_time_sec', 0.0)
                 perc_total = path_data.get('percentage_of_total_queries', 0.0)
-                print(
-                    f"- Path '{path}': Executed={count} ({perc_total:.1f}%), Succeeded={success}, AvgTime={avg_time:.3f}s")
+                print(f"- Path '{path}': Executed={count} ({perc_total:.1f}%), Succeeded={success}, AvgTime={avg_time:.3f}s")
         else:
             print("- No path execution statistics available from SystemControlManager.")
             if scm_perf_summary.get('total_queries', 0) > 0:
-                logger.warning(
-                    "SCM reported processing queries but get_reasoning_path_stats() returned empty. Check SCM internal state.")
+                logger.warning("SCM reported processing queries but get_reasoning_path_stats() returned empty.")
 
         print("\nResource Utilization (Final State via ResourceManager):")
         final_res = resource_manager.check_resources()
@@ -618,25 +576,19 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
         mem_final = final_res.get('memory', 0.0) or 0.0
         print(f"- CPU Usage: {cpu_final * 100:.1f}%")
         print(f"- Memory Usage: {mem_final * 100:.1f}%")
-        if 'gpu' in final_res and final_res.get('gpu') is not None:  # Check if GPU info is available
+        if 'gpu' in final_res and final_res.get('gpu') is not None:
             gpu_final = final_res.get('gpu', 0.0) or 0.0
             print(f"- GPU Usage: {gpu_final * 100:.1f}%")
-
     except Exception as report_err:
         logger.error(f"Error generating SystemControlManager performance summary: {report_err}", exc_info=True)
 
-    # Comprehensive Academic Analysis from MetricsCollector
     print("\n" + "=" * 20 + " Comprehensive Academic Analysis (from MetricsCollector) " + "=" * 20)
-    # Determine the correct dataset_log_dir for saving the report
-    # This should be defined based on args if main() is called, or a default if run_hysym_system is called directly
-    current_dataset_log_dir = 'logs'  # Default
-    if 'args' in locals() and hasattr(args, 'log_dir') and hasattr(args, 'dataset'):  # if called via __main__
+    current_dataset_log_dir = 'logs'
+    if args and hasattr(args, 'log_dir') and hasattr(args, 'dataset'):
         current_dataset_log_dir = os.path.join(args.log_dir, args.dataset)
-    elif 'dataset_log_dir' in locals():  # if dataset_log_dir was set by __main__ and passed through
-        current_dataset_log_dir = dataset_log_dir
-    else:  # Fallback if run_hysym_system is called directly without args context
+    else:
         current_dataset_log_dir = os.path.join('logs', dataset_type)
-    os.makedirs(current_dataset_log_dir, exist_ok=True)  # Ensure log dir exists
+    os.makedirs(current_dataset_log_dir, exist_ok=True)
 
     try:
         academic_report = metrics_collector.generate_academic_report()
@@ -646,12 +598,13 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
 
         print("\nPerformance Metrics (from Metrics Collector):")
         perf_metrics = academic_report.get('performance_metrics', {})
-        if 'processing_time' in perf_metrics and perf_metrics['processing_time'].get('count', 0) > 0:
+        if 'processing_time' in perf_metrics and isinstance(perf_metrics['processing_time'], dict) and \
+           perf_metrics['processing_time'].get('count', 0) > 0:
             proc_time_stats = perf_metrics['processing_time']
             print(
                 f"- Avg Processing Time: {proc_time_stats.get('mean', 0.0):.3f}s (Std: {proc_time_stats.get('std', 0.0):.3f}, Median: {proc_time_stats.get('median', 0.0):.3f})")
             if 'percentile_95' in proc_time_stats:
-                print(f"- 95th Percentile Time: {proc_time_stats.get('percentile_95', 0.0):.3f}s")
+                 print(f"- 95th Percentile Time: {proc_time_stats.get('percentile_95', 0.0):.3f}s")
         else:
             print("- No processing time metrics collected by MetricsCollector or count is zero.")
 
@@ -659,46 +612,42 @@ def run_hysym_system(samples=200, dataset_type='hotpotqa'):
         ra = academic_report.get('reasoning_analysis', {})
         cc = ra.get('chain_characteristics', {})
         print(f"- Avg Chain Length: {cc.get('avg_length', 0.0):.2f}")
-        print(f"- Avg Confidence (Fusion): {cc.get('avg_confidence', 0.0):.3f}")  # This comes from fusion_metrics
+        print(f"- Avg Confidence (Fusion): {cc.get('avg_confidence', 0.0):.3f}")
         path_dist_mc = ra.get('path_distribution', {})
         print(f"- Path Distribution (MetricsCollector): {path_dist_mc}")
 
         print("\nResource Efficiency (from Metrics Collector):")
         em = academic_report.get('efficiency_metrics', {})
-        for resource, metrics_val in em.items():  # Renamed metrics_data to metrics_val
+        for resource, metrics_val in em.items():
             if resource != 'trends' and isinstance(metrics_val, dict):
                 mean_u = metrics_val.get('mean_usage', 0.0) * 100
                 peak_u = metrics_val.get('peak_usage', 0.0) * 100
                 score = metrics_val.get('efficiency_score', None)
                 score_str = f"{score:.2f}" if score is not None else "N/A"
-                print(
-                    f"- {resource.capitalize()}: Mean Delta {mean_u:+.1f}%, Peak Delta {peak_u:.1f}%, Score {score_str}")
+                print(f"- {resource.capitalize()}: Mean Delta {mean_u:+.1f}%, Peak Delta {peak_u:.1f}%, Score {score_str}")
         if 'trends' in em:
             print(f"- Efficiency Trends: {em.get('trends', {})}")
 
         print("\nStatistical Analysis (from Metrics Collector):")
         sa = academic_report.get('statistical_analysis', {})
         if 'tests' in sa:
-            for metric, stats_val in sa.get('tests', {}).items():  # Renamed stats_data to stats_val
+            for metric, stats_val in sa.get('tests', {}).items():
                 if isinstance(stats_val, dict) and 'p_value' in stats_val:
-                    print(
-                        f"- {metric}: p-value={stats_val['p_value']:.3g}, effect_size={stats_val.get('effect_size', 0.0):.2f}")
+                    print(f"- {metric}: p-value={stats_val['p_value']:.3g}, effect_size={stats_val.get('effect_size', 0.0):.2f}")
         print(f"- Correlations: {sa.get('correlations', {})}")
         print(f"- Regression: {sa.get('regression_analysis', {})}")
 
-        # Save the academic report
         report_file_name = f"academic_report_{dataset_type}_{time.strftime('%Y%m%d_%H%M%S')}.json"
         report_file_path = os.path.join(current_dataset_log_dir, report_file_name)
         try:
             with open(report_file_path, 'w', encoding='utf-8') as rf:
-                json.dump(academic_report, rf, indent=2,
-                          default=str)  # Use default=str for non-serializable like datetime
+                json.dump(academic_report, rf, indent=2, default=str)
             print(f"\nAcademic report saved to: {report_file_path}")
         except Exception as save_err:
             print(f"Warning: Could not save academic report to {report_file_path}: {save_err}")
 
         print("\n" + "=" * 20 + " End of Run " + "=" * 20)
-        return academic_report  # Return the generated report
+        return academic_report
 
     except Exception as acad_err:
         logger.error(f"Error generating academic report: {acad_err}", exc_info=True)
@@ -715,40 +664,30 @@ if __name__ == "__main__":
     parser.add_argument('--debug', action='store_true', help='Enable DEBUG level logging for main and src components')
     parser.add_argument('--show-progress', action='store_true', help='Show tqdm progress bars')
 
-    args = parser.parse_args()
+    parsed_args = parser.parse_args() # Renamed to avoid conflict with 'args' in run_hysym_system
 
-    if args.debug:
-        logger.setLevel(logging.DEBUG)  # Main logger for main.py
-        logging.getLogger('src').setLevel(logging.DEBUG)  # Set root logger for 'src' package to DEBUG
-        # Individual component loggers inside run_hysym_system might override this if set to INFO there.
-        # The current setup in run_hysym_system sets them to INFO then main logger to DEBUG if args.debug.
-        # For full debug, ensure component loggers in run_hysym_system also respect args.debug.
+    if parsed_args.debug:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger('src').setLevel(logging.DEBUG)
         print("--- DEBUG Logging Enabled for main.py and 'src' package ---")
-        # Override specific component loggers if --debug is set
         logging.getLogger('src.system.system_control_manager').setLevel(logging.DEBUG)
         logging.getLogger('src.integrators.hybrid_integrator').setLevel(logging.DEBUG)
         logging.getLogger('src.reasoners.neural_retriever').setLevel(logging.DEBUG)
         logging.getLogger('src.reasoners.networkx_symbolic_reasoner_drop').setLevel(logging.DEBUG)
 
-    ProgressManager.SHOW_PROGRESS = args.show_progress
+    ProgressManager.SHOW_PROGRESS = parsed_args.show_progress
 
-    # Define log directory based on dataset
-    # This is the base directory for all logs of this run
-    dataset_log_dir = os.path.join(args.log_dir, args.dataset)
-    os.makedirs(dataset_log_dir, exist_ok=True)  # Ensure it exists
+    dataset_log_dir = os.path.join(parsed_args.log_dir, parsed_args.dataset)
+    os.makedirs(dataset_log_dir, exist_ok=True)
 
-    if args.no_output_capture:
-        print(
-            f"--- Running without output capture. Standard logs will go to console and potentially component-specific files if configured. ---")
-        # Pass dataset_log_dir to run_hysym_system so it can be used for academic report pathing
-        run_hysym_system(samples=args.samples, dataset_type=args.dataset)
+    if parsed_args.no_output_capture:
+        print("--- Running without output capture. ---")
+        run_hysym_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)
     else:
         try:
-            # The capture_output context manager will handle creating its own file in dataset_log_dir
             with capture_output(output_dir=dataset_log_dir) as output_path:
                 print(f"Output from this run is being captured to: {output_path}")
-                run_hysym_system(samples=args.samples, dataset_type=args.dataset)
+                run_hysym_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)
         except Exception as e:
-            # This error is if capture_output itself or run_hysym_system within it fails catastrophically
             print(f"ERROR: Failed to set up output capture or run system: {e}", file=sys.stderr)
             logger.error(f"Failed to set up output capture or run system: {e}", exc_info=True)
