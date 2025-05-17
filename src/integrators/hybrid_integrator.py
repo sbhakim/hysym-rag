@@ -637,395 +637,450 @@ class HybridIntegrator:
                                        query: str,
                                        symbolic_result_obj: Dict[str, Any],
                                        neural_output_obj: Union[str, Dict[str, Any]],
-                                       # Can be string or pre-parsed dict from NeuralRetriever
                                        query_complexity: float,
                                        query_id: Optional[str]
                                        ) -> Tuple[Dict[str, Any], float, Dict[str, Any]]:
-        """
-        Fuse symbolic and neural outputs for DROP queries, returning a structured answer.
-        Enhanced fusion logic with improved type handling, decision criteria, and answer formatting.
-        Updated to favor symbolic for numerical queries and check numerical closeness.
-        [Fix applied based on output log analysis to handle pre-parsed neural_output_obj]
-        """
         qid = query_id or "unknown"
         debug = {'fusion_strategy_drop': 'init'}
 
-        # Extract details from symbolic result
+        # --- Process Symbolic Result ---
         sym_conf = symbolic_result_obj.get('confidence', 0.0)
-        sym_type = symbolic_result_obj.get('type')  # This is the operation type (count, spans, etc.)
-        sym_number_val = symbolic_result_obj.get('number', '')
-        sym_spans_val = symbolic_result_obj.get('spans', [])
-        sym_date_val = symbolic_result_obj.get('date', {'day': '', 'month': '', 'year': ''})
+        # sym_type is the OPERATIONAL type from the reasoner (e.g. 'count', 'extreme_value')
+        sym_op_type = symbolic_result_obj.get('type')
         sym_status = symbolic_result_obj.get('status', 'error')
-        sym_rationale = symbolic_result_obj.get('rationale', 'No rationale provided.')
+        sym_rationale = symbolic_result_obj.get('rationale', 'No symbolic rationale.')
 
-        # --- Prepare Neural Answer Object for comparison and decision ---
-        # This will hold the core answer parts (number, spans, date) from neural
-        neu_answer_values_for_comparison = self._empty_drop()
+        # Extract and normalize symbolic values for comparison
+        sym_number_for_comp = self._normalize_drop_number_for_comparison(symbolic_result_obj.get('number'))
+        sym_spans_for_comp = symbolic_result_obj.get('spans', [])  # Already a list of strings
+        sym_date_for_comp = symbolic_result_obj.get('date', {})  # Already a dict
+
+        # Determine the effective VALUE type of the symbolic answer (number, spans, or date)
+        current_effective_sym_value_type = None
+        if sym_status == 'success':
+            if sym_op_type in ['number', 'count', 'difference', 'extreme_value_numeric',
+                               'temporal_difference'] and sym_number_for_comp is not None:
+                current_effective_sym_value_type = 'number'
+            elif sym_op_type in ['spans', 'entity_span'] and sym_spans_for_comp:
+                current_effective_sym_value_type = 'spans'
+            elif sym_op_type == 'extreme_value':  # This can be number or span
+                if sym_number_for_comp is not None:
+                    current_effective_sym_value_type = 'number'
+                elif sym_spans_for_comp:
+                    current_effective_sym_value_type = 'spans'
+            elif sym_op_type == 'date' and any(
+                    v for v in sym_date_for_comp.values() if v):  # Check if date dict has values
+                current_effective_sym_value_type = 'date'
+
+        self.logger.debug(
+            f"[DROP QID:{qid}] Fusion Sym Input: status={sym_status}, op_type={sym_op_type}, value_type={current_effective_sym_value_type}, conf={sym_conf:.2f}, "
+            f"num='{sym_number_for_comp}', spans={sym_spans_for_comp}, date={sym_date_for_comp}")
+
+        # --- Process Neural Result ---
         neu_conf = 0.0
-        # This will be the primary answer type ('number', 'spans', 'date') derived from neural
-        effective_neu_type = None
+        # effective_neu_value_type is the VALUE type of the neural answer (number, spans, or date)
+        effective_neu_value_type: Optional[str] = None
         neu_parsed_successfully = False
-        neural_rationale = "Neural result"  # Default
+        neural_rationale = "Neural result processing initiated."
 
-        if isinstance(neural_output_obj, dict):
-            # NeuralRetriever likely already returned a parsed DROP object
+        # This dict will hold native types for comparison after parsing neural output
+        neu_values_for_comparison = {'number': None, 'spans': [], 'date': {'day': '', 'month': '', 'year': ''}}
+
+        if isinstance(neural_output_obj, dict) and neural_output_obj.get('status') == 'success':
             self.logger.debug(
                 f"[DROP QID:{qid}] Neural output is an already parsed dictionary: {str(neural_output_obj)[:150]}")
-            if neural_output_obj.get('status') == 'success':
-                neu_conf = neural_output_obj.get('confidence', 0.0)
-                # The 'type' from NeuralRetriever's parsed object indicates the answer type (e.g. number, spans, date)
-                effective_neu_type = neural_output_obj.get('type')
-                neural_rationale = neural_output_obj.get('rationale', 'Neural parsed result')
+            neu_conf = neural_output_obj.get('confidence', 0.0)
+            # The 'type' from NeuralRetriever's parsed object indicates the answer VALUE type
+            effective_neu_value_type = neural_output_obj.get('type')  # This is 'number', 'spans', 'date'
+            neural_rationale = neural_output_obj.get('rationale', 'Neural parsed result')
 
-                if effective_neu_type == 'number' and neural_output_obj.get('number'):
-                    neu_answer_values_for_comparison['number'] = neural_output_obj['number']
+            if effective_neu_value_type == 'number':
+                neu_values_for_comparison['number'] = self._normalize_drop_number_for_comparison(
+                    neural_output_obj.get('number'))
+                if neu_values_for_comparison['number'] is not None: neu_parsed_successfully = True
+            elif effective_neu_value_type == 'spans':
+                neu_values_for_comparison['spans'] = neural_output_obj.get('spans', [])
+                if neu_values_for_comparison[
+                    'spans'] is not None: neu_parsed_successfully = True  # Allow empty list as success
+            elif effective_neu_value_type == 'date':
+                raw_date = neural_output_obj.get('date', {})
+                if isinstance(raw_date, dict) and any(v for v in raw_date.values() if v):
+                    neu_values_for_comparison['date'] = raw_date
                     neu_parsed_successfully = True
-                elif effective_neu_type == 'spans' and neural_output_obj.get('spans') is not None:
-                    neu_answer_values_for_comparison['spans'] = neural_output_obj['spans']
-                    neu_parsed_successfully = True
-                elif effective_neu_type == 'date' and neural_output_obj.get('date') and any(
-                        neural_output_obj['date'].values()):
-                    neu_answer_values_for_comparison['date'] = neural_output_obj['date']
-                    neu_parsed_successfully = True
-                else:
-                    self.logger.warning(
-                        f"[DROP QID:{qid}] Neural dictionary (type '{effective_neu_type}') missing or had empty value.")
-                    effective_neu_type = None  # Reset type if value is not suitable for comparison
-                    neu_parsed_successfully = False  # Mark as not successfully parsed for fusion logic
-            else:
+            else:  # Unknown or unhandled type from neural
                 self.logger.warning(
-                    f"[DROP QID:{qid}] Neural output dictionary indicates error: {neural_output_obj.get('rationale')}")
-                neural_rationale = neural_output_obj.get('rationale', 'Neural processing indicated an error')
-
+                    f"[DROP QID:{qid}] Neural dictionary (type '{effective_neu_value_type}') missing value or type unhandled.")
+                effective_neu_value_type = None
+                neu_parsed_successfully = False
 
         elif isinstance(neural_output_obj, str):
-            # NeuralRetriever returned a raw string, parse it using HybridIntegrator's parser
             self.logger.debug(
                 f"[DROP QID:{qid}] Neural output is a string, attempting to parse: {neural_output_obj[:100]}")
-            # _parse_neural_for_drop expects a raw string and returns a dict {'type': ..., 'value': ..., 'confidence': ...}
             parsed_from_string = self._parse_neural_for_drop(neural_output_obj, query,
-                                                             sym_type)  # sym_type can be a hint
+                                                             sym_op_type)  # sym_op_type as hint
             if parsed_from_string:
                 neu_conf = parsed_from_string.get('confidence', 0.0)
-                effective_neu_type = parsed_from_string.get('type')  # This is 'number', 'spans', 'date'
-                parsed_value = parsed_from_string.get(
-                    'value')  # This is the core value (the number, list of spans, or date dict)
+                effective_neu_value_type = parsed_from_string.get('type')
+                parsed_value_content = parsed_from_string.get('value')
                 neural_rationale = "Neural LLM output parsed by HybridIntegrator"
 
-                # Populate neu_answer_values_for_comparison from the parsed string value
-                if effective_neu_type == 'number' and parsed_value is not None:
-                    norm_num_str = str(
-                        self._normalize_drop_number_for_comparison(str(parsed_value)))  # Normalize and stringify
-                    if norm_num_str and norm_num_str != "None":  # Check if normalization was successful
-                        neu_answer_values_for_comparison['number'] = norm_num_str
+                if effective_neu_value_type == 'number':
+                    neu_values_for_comparison['number'] = self._normalize_drop_number_for_comparison(
+                        parsed_value_content)
+                    if neu_values_for_comparison['number'] is not None: neu_parsed_successfully = True
+                elif effective_neu_value_type == 'spans' and isinstance(parsed_value_content, list):
+                    neu_values_for_comparison['spans'] = parsed_value_content
+                    neu_parsed_successfully = True
+                elif effective_neu_value_type == 'date' and isinstance(parsed_value_content, dict):
+                    if any(v for v in parsed_value_content.values() if v):
+                        neu_values_for_comparison['date'] = parsed_value_content
                         neu_parsed_successfully = True
-                elif effective_neu_type == 'spans' and isinstance(parsed_value, list):
-                    neu_answer_values_for_comparison['spans'] = parsed_value
-                    neu_parsed_successfully = True
-                elif effective_neu_type == 'date' and isinstance(parsed_value, dict) and all(
-                        k in parsed_value for k in ['day', 'month', 'year']):
-                    neu_answer_values_for_comparison['date'] = parsed_value
-                    neu_parsed_successfully = True
                 else:
                     self.logger.warning(
-                        f"[DROP QID:{qid}] Parsing string output for type '{effective_neu_type}' yielded unexpected value: {parsed_value}")
-                    effective_neu_type = None  # Reset if value not usable
+                        f"[DROP QID:{qid}] Parsing neural string for type '{effective_neu_value_type}' yielded unusable value: {parsed_value_content}")
+                    effective_neu_value_type = None
                     neu_parsed_successfully = False
-            else:  # Parsing the string failed
+            else:
                 neural_rationale = "Failed to parse raw neural string output"
-        else:
+                self.logger.warning(f"[DROP QID:{qid}] {neural_rationale}")
+        else:  # Neither dict nor string, or error dict
             self.logger.error(
                 f"[DROP QID:{qid}] Unexpected type or error status for neural_output_obj: {type(neural_output_obj)}, content: {str(neural_output_obj)[:100]}")
-            neural_rationale = f"Unexpected neural output type: {type(neural_output_obj)}"
+            neural_rationale = f"Unexpected neural output: {str(neural_output_obj)[:100]}"
 
         self.logger.debug(
-            f"[DROP QID:{qid}] Fusion Input - Symbolic: status={sym_status}, type={sym_type}, conf={sym_conf:.2f}, number='{sym_number_val}', spans={sym_spans_val}, date={sym_date_val}")
-        self.logger.debug(
-            f"[DROP QID:{qid}] Fusion Input - Neural (after internal prep): effective_type={effective_neu_type}, conf={neu_conf:.2f}, values_for_comp={neu_answer_values_for_comparison}, parsed_successfully={neu_parsed_successfully}")
+            f"[DROP QID:{qid}] Fusion Neu Input: parsed_success={neu_parsed_successfully}, value_type={effective_neu_value_type}, conf={neu_conf:.2f}, "
+            f"values_for_comp={neu_values_for_comparison}")
 
-        if sym_status != 'success':
-            self.logger.debug(
-                f"[DROP QID:{qid}] Symbolic result was not successful: Status={sym_status}, Rationale={sym_rationale}")
-
-        # Initialize components for the final selected answer
-        final_answer_content = self._empty_drop()  # Holds the number/spans/date dict
+        # Initialize for final decision
+        final_chosen_value_content: Any = None  # This will be the actual number, list of spans, or date dict
+        final_chosen_op_type = sym_op_type  # Default to symbolic op type, might be overridden
         final_confidence = 0.1
-        final_rationale = 'No confident answer found by fusion'
-        final_status = 'error'  # Default to error
-        final_op_type = 'unknown'  # This will be the operational type like 'count', 'spans'
-        final_source_type = 'none'  # Will be 'symbolic', 'neural', 'agreed', or 'none'
+        final_rationale = 'No confident answer derived from fusion'
+        final_status = 'error'
+        final_source_type = 'none'
 
         # --- Decision Logic ---
+        is_valid_sym_op_type = sym_op_type is not None and sym_op_type != 'error'  # More explicit check
 
-        # 1. High-Confidence, Successful Symbolic Result is definitive
-        is_valid_sym_op_type = sym_type in ['number', 'spans', 'date', 'count', 'difference', 'extreme_value',
-                                            'extreme_value_numeric', 'temporal_difference', 'entity_span']
-        if sym_status == 'success' and sym_conf >= 0.85 and is_valid_sym_op_type:
+        # 1. Strong, Successful, Valid Symbolic Result
+        if sym_status == 'success' and sym_conf >= 0.85 and is_valid_sym_op_type and current_effective_sym_value_type is not None:
             debug['fusion_strategy_drop'] = 'prioritized_strong_symbolic'
-            final_answer_content = {'number': sym_number_val, 'spans': sym_spans_val, 'date': sym_date_val}
+            if current_effective_sym_value_type == 'number':
+                final_chosen_value_content = sym_number_for_comp
+            elif current_effective_sym_value_type == 'spans':
+                final_chosen_value_content = sym_spans_for_comp
+            elif current_effective_sym_value_type == 'date':
+                final_chosen_value_content = sym_date_for_comp
             final_confidence = sym_conf
             final_rationale = sym_rationale
-            final_status = 'success'
-            final_op_type = sym_type
+            final_chosen_op_type = sym_op_type  # Use the symbolic operational type
             final_source_type = 'symbolic'
+            final_status = 'success'
 
-        # 2. Both Symbolic and Neural Succeeded (and symbolic wasn't strong enough for immediate return)
-        elif sym_status == 'success' and is_valid_sym_op_type and \
-                neu_parsed_successfully and neu_conf > 0.6 and effective_neu_type is not None:
+        # 2. Both Symbolic and Neural Succeeded and Parsed Correctly
+        elif sym_status == 'success' and is_valid_sym_op_type and current_effective_sym_value_type is not None and \
+                neu_parsed_successfully and neu_conf > 0.55 and effective_neu_value_type is not None:  # Lowered neu_conf threshold slightly
 
-            sym_values_for_comparison = {'number': sym_number_val, 'spans': sym_spans_val, 'date': sym_date_val}
+            # Package symbolic values for _are_drop_values_equivalent
+            sym_values_dict_for_comp = {'number': sym_number_for_comp, 'spans': sym_spans_for_comp,
+                                        'date': sym_date_for_comp}
 
-            # Determine the effective value type of the symbolic answer (number, spans, or date)
-            current_effective_sym_type = None
-            if sym_type in ['number', 'count', 'difference', 'extreme_value_numeric',
-                            'temporal_difference'] and sym_number_val:
-                current_effective_sym_type = 'number'
-            elif sym_type in ['spans', 'entity_span'] and sym_spans_val:  # Check if sym_spans_val is not empty
-                current_effective_sym_type = 'spans'
-            elif sym_type == 'extreme_value':  # This can be number or span
-                if sym_number_val:
-                    current_effective_sym_type = 'number'
-                elif sym_spans_val:
-                    current_effective_sym_type = 'spans'  # Check if sym_spans_val is not empty
-            elif sym_type == 'date' and any(sym_date_val.values()):
-                current_effective_sym_type = 'date'
-
-            if current_effective_sym_type == effective_neu_type:  # e.g., both are 'number'
-                debug['fusion_strategy_drop'] = 'sym_neu_types_match'
-                if self._are_drop_values_equivalent(sym_values_for_comparison, neu_answer_values_for_comparison,
-                                                    current_effective_sym_type, qid):
+            if current_effective_sym_value_type == effective_neu_value_type:
+                debug['fusion_strategy_drop'] = 'sym_neu_value_types_match'
+                # Directly use the native-typed comparison values
+                if self._are_drop_values_equivalent(sym_values_dict_for_comp, neu_values_for_comparison,
+                                                    current_effective_sym_value_type, qid):
                     debug['fusion_strategy_drop'] += '_values_agree'
-                    final_answer_content = neu_answer_values_for_comparison  # Prefer neural if values agree, as it might have better phrasing/source
-                    final_confidence = max(sym_conf, neu_conf)  # Or an average, or boosted
-                    final_rationale = f"Symbolic and Neural agreed. Neural: {neural_rationale}"
-                    final_op_type = effective_neu_type  # Same type
+                    # Prefer neural if values agree (might have better naturalness if it was a generative step)
+                    # but for DROP, symbolic might be more precise if from rules. Let's check confidence.
+                    if neu_conf >= sym_conf:
+                        if effective_neu_value_type == 'number':
+                            final_chosen_value_content = neu_values_for_comparison['number']
+                        elif effective_neu_value_type == 'spans':
+                            final_chosen_value_content = neu_values_for_comparison['spans']
+                        elif effective_neu_value_type == 'date':
+                            final_chosen_value_content = neu_values_for_comparison['date']
+                        final_confidence = neu_conf
+                        final_rationale = f"Symbolic and Neural agreed. Neural Conf: {neu_conf:.2f}. {neural_rationale}"
+                    else:
+                        if current_effective_sym_value_type == 'number':
+                            final_chosen_value_content = sym_number_for_comp
+                        elif current_effective_sym_value_type == 'spans':
+                            final_chosen_value_content = sym_spans_for_comp
+                        elif current_effective_sym_value_type == 'date':
+                            final_chosen_value_content = sym_date_for_comp
+                        final_confidence = sym_conf
+                        final_rationale = f"Symbolic and Neural agreed. Symbolic Conf: {sym_conf:.2f}. {sym_rationale}"
+                    final_chosen_op_type = sym_op_type  # Types matched, use symbolic op type
                     final_source_type = 'agreed'
-                else:  # Types match, values differ
+                else:  # Types match, values disagree
                     debug['fusion_strategy_drop'] += '_values_disagree'
-                    # For numerical types, check closeness
-                    if current_effective_sym_type == 'number':
-                        sym_numeric = self._normalize_drop_number_for_comparison(sym_number_val)
-                        neu_numeric = self._normalize_drop_number_for_comparison(
-                            neu_answer_values_for_comparison['number'])
-                        are_close = False
-                        if sym_numeric is not None and neu_numeric is not None:
-                            larger_val = max(abs(sym_numeric), abs(neu_numeric))
-                            closeness_threshold = larger_val * 0.1 if larger_val > 0 else 0.05  # small absolute for zero
-                            are_close = abs(sym_numeric - neu_numeric) <= closeness_threshold
+                    # Prefer higher confidence, or symbolic if close.
+                    # For numbers, also consider closeness if types are number.
+                    is_close_numeric_disagreement = False
+                    if current_effective_sym_value_type == 'number':
+                        sym_n = sym_number_for_comp
+                        neu_n = neu_values_for_comparison['number']
+                        if sym_n is not None and neu_n is not None:
+                            larger_val = max(abs(sym_n), abs(neu_n))
+                            # More lenient closeness for larger numbers, stricter for smaller
+                            closeness_threshold = (larger_val * 0.05) if larger_val > 10 else (
+                                0.5 if larger_val > 0 else 0.05)
+                            if abs(sym_n - neu_n) <= closeness_threshold:
+                                is_close_numeric_disagreement = True
+                                debug['fusion_strategy_drop'] += '_numeric_close'
 
-                        if are_close or (sym_conf >= neu_conf - 0.1):  # Favor symbolic if close or more confident
-                            final_answer_content = sym_values_for_comparison
-                            final_confidence = sym_conf
-                            final_rationale = sym_rationale
-                            final_op_type = sym_type
-                            final_source_type = 'symbolic'
-                        else:  # Neural significantly more confident or values not close
-                            final_answer_content = neu_answer_values_for_comparison
-                            final_confidence = neu_conf
-                            final_rationale = f"Neural preferred (disagreement). Neural: {neural_rationale}"
-                            final_op_type = effective_neu_type
-                            final_source_type = 'neural'
-                    else:  # Non-numerical (spans, date) disagreement, pick higher confidence
-                        if sym_conf >= neu_conf:
-                            final_answer_content = sym_values_for_comparison
-                            final_confidence = sym_conf
-                            final_rationale = sym_rationale
-                            final_op_type = sym_type
-                            final_source_type = 'symbolic'
-                        else:
-                            final_answer_content = neu_answer_values_for_comparison
-                            final_confidence = neu_conf
-                            final_rationale = f"Neural preferred (disagreement). Neural: {neural_rationale}"
-                            final_op_type = effective_neu_type
-                            final_source_type = 'neural'
+                    if is_close_numeric_disagreement or sym_conf >= neu_conf - 0.1:  # Favor symbolic if close or more/similarly confident
+                        if current_effective_sym_value_type == 'number':
+                            final_chosen_value_content = sym_number_for_comp
+                        elif current_effective_sym_value_type == 'spans':
+                            final_chosen_value_content = sym_spans_for_comp
+                        elif current_effective_sym_value_type == 'date':
+                            final_chosen_value_content = sym_date_for_comp
+                        final_confidence = sym_conf
+                        final_rationale = f"Symbolic preferred on disagreement (Conf: {sym_conf:.2f}). {sym_rationale}"
+                        final_chosen_op_type = sym_op_type
+                        final_source_type = 'symbolic'
+                    else:  # Neural significantly more confident or values not close enough
+                        if effective_neu_value_type == 'number':
+                            final_chosen_value_content = neu_values_for_comparison['number']
+                        elif effective_neu_value_type == 'spans':
+                            final_chosen_value_content = neu_values_for_comparison['spans']
+                        elif effective_neu_value_type == 'date':
+                            final_chosen_value_content = neu_values_for_comparison['date']
+                        final_confidence = neu_conf
+                        final_rationale = f"Neural preferred on disagreement (Conf: {neu_conf:.2f}). {neural_rationale}"
+                        # If types matched, the op type is the same.
+                        # For clarity, if neural is chosen, its "type" field (which is value type) aligns with op_type.
+                        final_chosen_op_type = sym_op_type
+                        final_source_type = 'neural'
                 final_status = 'success'
-            else:  # Effective types of symbolic and neural mismatch
-                debug['fusion_strategy_drop'] = 'types_mismatch'
-                # Prioritize based on confidence, or if one is clearly erroneous
-                if sym_conf >= neu_conf and current_effective_sym_type is not None:
-                    final_answer_content = sym_values_for_comparison
+            else:  # Effective value types of symbolic and neural mismatch
+                debug['fusion_strategy_drop'] = 'value_types_mismatch'
+                if sym_conf >= neu_conf:
+                    if current_effective_sym_value_type == 'number':
+                        final_chosen_value_content = sym_number_for_comp
+                    elif current_effective_sym_value_type == 'spans':
+                        final_chosen_value_content = sym_spans_for_comp
+                    elif current_effective_sym_value_type == 'date':
+                        final_chosen_value_content = sym_date_for_comp
                     final_confidence = sym_conf
-                    final_rationale = sym_rationale
-                    final_op_type = sym_type
+                    final_rationale = f"Symbolic chosen due to type mismatch & higher/equal confidence. {sym_rationale}"
+                    final_chosen_op_type = sym_op_type
                     final_source_type = 'symbolic'
                     final_status = 'success'
-                elif neu_parsed_successfully and effective_neu_type is not None:  # Neural is more confident or symbolic type was unclear
-                    final_answer_content = neu_answer_values_for_comparison
+                else:  # Neural more confident despite type mismatch with symbolic
+                    if effective_neu_value_type == 'number':
+                        final_chosen_value_content = neu_values_for_comparison['number']
+                    elif effective_neu_value_type == 'spans':
+                        final_chosen_value_content = neu_values_for_comparison['spans']
+                    elif effective_neu_value_type == 'date':
+                        final_chosen_value_content = neu_values_for_comparison['date']
                     final_confidence = neu_conf
-                    final_rationale = f"Neural chosen due to type mismatch or higher confidence. Neural: {neural_rationale}"
-                    final_op_type = effective_neu_type
+                    final_rationale = f"Neural chosen due to type mismatch & higher confidence. {neural_rationale}"
+                    # What should the op_type be? If neural is chosen, its value type implies the op type.
+                    final_chosen_op_type = effective_neu_value_type  # e.g. if neural produced 'number', op_type is 'number'
                     final_source_type = 'neural'
                     final_status = 'success'
-                else:  # Both seem problematic
-                    debug['fusion_strategy_drop'] = 'types_mismatch_both_unclear'
-                    # Handled by failure case below
 
         # 3. Only Neural Result is Strong and Parsed Successfully
-        elif neu_parsed_successfully and neu_conf > 0.6 and effective_neu_type is not None:
+        elif neu_parsed_successfully and neu_conf > 0.6 and effective_neu_value_type is not None:
             debug['fusion_strategy_drop'] = 'parsed_neural_dominant'
-            final_answer_content = neu_answer_values_for_comparison
+            if effective_neu_value_type == 'number':
+                final_chosen_value_content = neu_values_for_comparison['number']
+            elif effective_neu_value_type == 'spans':
+                final_chosen_value_content = neu_values_for_comparison['spans']
+            elif effective_neu_value_type == 'date':
+                final_chosen_value_content = neu_values_for_comparison['date']
             final_confidence = neu_conf
-            final_rationale = f"Neural dominant result. Rationale: {neural_rationale}"
+            final_rationale = f"Neural dominant result. {neural_rationale}"
             final_status = 'success'
-            final_op_type = effective_neu_type
+            final_chosen_op_type = effective_neu_value_type  # Neural value type dictates op type
             final_source_type = 'neural'
 
         # 4. Symbolic Succeeded (but lower conf), Neural Failed/Low Conf/Not Parsed
-        elif sym_status == 'success' and sym_conf > 0.35 and is_valid_sym_op_type:
+        elif sym_status == 'success' and sym_conf > 0.35 and is_valid_sym_op_type and current_effective_sym_value_type is not None:
             debug['fusion_strategy_drop'] = 'weak_symbolic_fallback_no_good_neural'
-            final_answer_content = {'number': sym_number_val, 'spans': sym_spans_val, 'date': sym_date_val}
+            if current_effective_sym_value_type == 'number':
+                final_chosen_value_content = sym_number_for_comp
+            elif current_effective_sym_value_type == 'spans':
+                final_chosen_value_content = sym_spans_for_comp
+            elif current_effective_sym_value_type == 'date':
+                final_chosen_value_content = sym_date_for_comp
             final_confidence = sym_conf
             final_rationale = sym_rationale
             final_status = 'success'
-            final_op_type = sym_type
+            final_chosen_op_type = sym_op_type
             final_source_type = 'symbolic'
 
         # 5. Neural Parsed (but lower conf), Symbolic Failed/Invalid
-        elif neu_parsed_successfully and neu_conf > 0.35 and effective_neu_type is not None:
+        elif neu_parsed_successfully and neu_conf > 0.35 and effective_neu_value_type is not None:
             debug['fusion_strategy_drop'] = 'weak_parsed_neural_fallback_no_good_symbolic'
-            final_answer_content = neu_answer_values_for_comparison
+            if effective_neu_value_type == 'number':
+                final_chosen_value_content = neu_values_for_comparison['number']
+            elif effective_neu_value_type == 'spans':
+                final_chosen_value_content = neu_values_for_comparison['spans']
+            elif effective_neu_value_type == 'date':
+                final_chosen_value_content = neu_values_for_comparison['date']
             final_confidence = neu_conf
-            final_rationale = f"Weak neural fallback. Rationale: {neural_rationale}"
+            final_rationale = f"Weak neural fallback. {neural_rationale}"
             final_status = 'success'
-            final_op_type = effective_neu_type
+            final_chosen_op_type = effective_neu_value_type
             final_source_type = 'neural'
 
-        # 6. Failure Case (if none of the above conditions were met to set status to 'success')
+        # 6. Failure Case
         else:
             debug['fusion_strategy_drop'] = 'failure_no_confident_source'
-            final_rationale = f"Fusion failed: No valid symbolic (Status: {sym_status}, Conf: {sym_conf:.2f}, Type: {sym_type}) or neural (Parsed: {neu_parsed_successfully}, Conf: {neu_conf:.2f}, Type: {effective_neu_type}) result found."
+            final_rationale = f"Fusion failed: No valid symbolic (Status: {sym_status}, SymOpType: {sym_op_type}, SymValueType: {current_effective_sym_value_type}, SymConf: {sym_conf:.2f}) or neural (Parsed: {neu_parsed_successfully}, NeuValueType: {effective_neu_value_type}, NeuConf: {neu_conf:.2f}) result found."
             self.logger.warning(f"[DROP QID:{qid}] {final_rationale}")
-            # final_answer_content remains _empty_drop()
-            final_confidence = 0.1
+            # final_chosen_value_content remains None
+            final_confidence = 0.1  # Low confidence for error
             final_status = 'error'
-            final_op_type = 'error'
+            final_chosen_op_type = sym_op_type if is_valid_sym_op_type else (
+                effective_neu_value_type if effective_neu_value_type else 'error')
             final_source_type = 'none'
 
-        # Construct the final answer object to be returned by HybridIntegrator
-        final_return_obj = {
-            'number': final_answer_content.get('number', ''),
-            'spans': final_answer_content.get('spans', []),
-            'date': final_answer_content.get('date', {'day': '', 'month': '', 'year': ''}),
-            'status': final_status,
-            'confidence': round(final_confidence, 3),
-            'rationale': final_rationale,
-            'type': final_op_type  # This is the operation type (e.g. 'count', 'spans')
-        }
+        # Construct the final answer object using _create_drop_answer_obj
+        # This ensures schema consistency and native types in the output object.
+        # final_chosen_op_type here is the determined type of the *operation* or answer content.
+        final_return_obj = self._create_drop_answer_obj(final_chosen_op_type, final_chosen_value_content)
+
+        # Update with overall status, confidence, and rationale from fusion decision
+        final_return_obj['status'] = final_status
+        final_return_obj['confidence'] = round(final_confidence, 3)
+        final_return_obj['rationale'] = final_rationale
+        # Ensure the 'type' in the final object reflects the chosen operational/value type
+        final_return_obj['type'] = final_chosen_op_type if final_status == 'success' else 'error'
+
+        # Add component timings if available (passed from _handle_drop_path or process_query)
+        final_return_obj['symbolic_time'] = self.component_times.get('symbolic', 0.0)
+        final_return_obj['neural_time'] = self.component_times.get('neural', 0.0)
+        final_return_obj['fusion_time'] = self.component_times.get('fusion',
+                                                                   0.0)  # This will be updated after this method returns
 
         self._update_fusion_metrics(final_confidence, query_complexity, debug)
         self.logger.info(
-            f"[DROP QID:{qid}] Fusion Decision: Strategy='{debug['fusion_strategy_drop']}', Source='{final_source_type}', Type='{final_op_type}', Confidence={final_confidence:.2f}, Status={final_status}")
+            f"[DROP QID:{qid}] Fusion Decision: Strategy='{debug['fusion_strategy_drop']}', Source='{final_source_type}', "
+            f"ChosenOpType='{final_return_obj['type']}', Confidence={final_return_obj['confidence']:.2f}, Status={final_return_obj['status']}")
+        self.logger.debug(f"[DROP QID:{qid}] Final Fused Object: {final_return_obj}")
+
         return final_return_obj, final_confidence, debug
 
     def _create_drop_answer_obj(self, answer_type: Optional[str], value: Any) -> Dict[str, Any]:
         """
         Create a DROP answer object with validation.
-        Handles 'extreme_value', 'count', and 'difference' types appropriately.
-        Ensures all required fields are included for evaluation.
-        Updated to deduplicate spans.
+        Ensures 'number' field contains native int/float if applicable.
+        Spans are cleaned. Date fields are strings.
         """
+        # Initialize with native types or appropriate empty structures
         obj = {
-            'number': '',
+            'number': None,  # Initialize as None, will be int/float or empty string
             'spans': [],
             'date': {'day': '', 'month': '', 'year': ''},
-            'status': 'success',
-            'confidence': 0.5,
+            'status': 'success',  # Default to success, can be overridden
+            'confidence': 0.5,  # Default confidence
             'rationale': 'Created DROP answer object',
-            'type': answer_type or 'unknown'
+            'type': answer_type or 'unknown'  # The operational type or 'number'/'spans'/'date'
         }
         try:
-            if answer_type in ["number", "count", "difference"]:
-                num_val = self._normalize_drop_number_for_comparison(value)
-                if num_val is not None:
-                    # Convert to int if the value is a whole number
-                    if num_val.is_integer():
-                        num_val = int(num_val)
-                    obj["number"] = str(num_val)
-                    obj["rationale"] = f"Parsed number value: {obj['number']}"
-                    self.logger.debug(f"Created DROP answer: number={obj['number']}")
-                else:
-                    obj["status"] = "error"
-                    obj["rationale"] = f"Invalid number value: {value}"
-                    self.logger.warning(f"Invalid number value for DROP obj: {value}")
+            final_numeric_value: Optional[Union[int, float]] = None
 
-            elif answer_type == "extreme_value":
-                if isinstance(value, (int, float, str)) and str(value).replace('.', '').isdigit():
-                    num_val = self._normalize_drop_number_for_comparison(value)
-                    if num_val is not None:
-                        if num_val.is_integer():
-                            num_val = int(num_val)
-                        obj["number"] = str(num_val)
-                        obj["rationale"] = f"Parsed extreme_value as number: {num_val}"
-                        self.logger.debug(f"Created DROP answer (extreme_value as number): number={obj['number']}")
+            if answer_type in ["number", "count", "difference", "extreme_value_numeric", "temporal_difference"] or \
+                    (answer_type == "extreme_value" and isinstance(value, (
+                    int, float))):  # If extreme_value's value is a number
+
+                # Value should already be a native number from reasoner/neural parser
+                # Or it could be a string representation if coming from some raw source
+                normalized_num = self._normalize_drop_number_for_comparison(value)
+
+                if normalized_num is not None:
+                    if normalized_num.is_integer():
+                        final_numeric_value = int(normalized_num)
                     else:
-                        obj["status"] = "error"
-                        obj["rationale"] = f"Invalid extreme_value number: {value}"
-                elif isinstance(value, list):
-                    spans_in = value if isinstance(value, list) else ([value] if value is not None else [])
-                    # Deduplicate spans while (case-insensitive)
-                    seen = set()
-                    obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip() and str(v).strip().lower() not in seen and not seen.add(str(v).strip().lower())]
-                    obj["rationale"] = f"Parsed extreme_value as spans: {obj['spans']}"
-                    self.logger.debug(f"Created DROP answer (extreme_value as spans): spans={obj['spans']}")
+                        final_numeric_value = float(normalized_num)
+                    obj["number"] = final_numeric_value  # Store as native type
+                    obj["rationale"] = f"Parsed number value: {obj['number']}"
+                    self.logger.debug(f"Created DROP answer: type={answer_type}, number={obj['number']}")
                 else:
                     obj["status"] = "error"
-                    obj["rationale"] = f"Invalid extreme_value value: {value}"
-                    self.logger.warning(f"Invalid extreme_value value: {value}")
+                    obj["rationale"] = f"Invalid or unnormalizable number value: {value}"
+                    obj["number"] = ""  # Explicitly empty string for failed number
+                    self.logger.warning(f"Invalid number value for DROP obj: {value} for type {answer_type}")
+
+            elif answer_type == "extreme_value" and isinstance(value, list):  # extreme_value resulting in spans
+                spans_in = value
+                seen = set()
+                # Spans should remain strings
+                obj["spans"] = [str(v).strip() for v in spans_in if
+                                str(v).strip() and str(v).strip().lower() not in seen and not seen.add(
+                                    str(v).strip().lower())]
+                obj["rationale"] = f"Parsed extreme_value as spans: {obj['spans']}"
+                self.logger.debug(f"Created DROP answer (extreme_value as spans): spans={obj['spans']}")
 
             elif answer_type in ["spans", "entity_span"]:
-                spans_in = value if isinstance(value, list) else ([value] if value is not None else [])
-                # Deduplicate spans (case-insensitive)
+                spans_in = value if isinstance(value, list) else ([str(value)] if value is not None else [])
                 seen = set()
-                obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip() and str(v).strip().lower() not in seen and not seen.add(str(v).strip().lower())]
+                obj["spans"] = [str(v).strip() for v in spans_in if
+                                str(v).strip() and str(v).strip().lower() not in seen and not seen.add(
+                                    str(v).strip().lower())]
                 obj["rationale"] = f"Parsed spans: {obj['spans']}"
                 self.logger.debug(f"Created DROP answer: type={answer_type}, spans={obj['spans']}")
 
             elif answer_type == "date":
                 if isinstance(value, dict) and all(k in value for k in ['day', 'month', 'year']):
                     try:
-                        d = int(value.get('day', '')) if value.get('day', '') else 0
-                        m = int(value.get('month', '')) if value.get('month', '') else 0
-                        y = int(value.get('year', '')) if value.get('year', '') else 0
-                        if (1 <= d <= 31 or d == 0) and (1 <= m <= 12 or m == 0) and (1000 <= y <= 3000 or y == 0):
-                            obj["date"] = {k: str(v).strip() for k, v in value.items() if k in ['day', 'month', 'year']}
+                        d_str = str(value.get('day', '')).strip()
+                        m_str = str(value.get('month', '')).strip()
+                        y_str = str(value.get('year', '')).strip()
+
+                        d = int(d_str) if d_str else 0
+                        m = int(m_str) if m_str else 0
+                        y = int(y_str) if y_str else 0
+
+                        # Basic validation for date components (0 is allowed for unknown day/month)
+                        if (0 <= d <= 31) and (0 <= m <= 12) and ((1000 <= y <= 3000) or (
+                                y == 0 and not (d_str or m_str))):  # Year 0 only if day/month also unknown
+                            obj["date"] = {'day': d_str, 'month': m_str, 'year': y_str}
                             obj["rationale"] = f"Parsed date: {obj['date']}"
                             self.logger.debug(f"Created DROP answer: date={obj['date']}")
                         else:
-                            raise ValueError("Invalid date components")
-                    except (ValueError, TypeError):
+                            raise ValueError(f"Invalid date components: D:{d}, M:{m}, Y:{y}")
+                    except (ValueError, TypeError) as e:
                         obj["status"] = "error"
-                        obj["rationale"] = f"Invalid date component values: {value}"
-                        self.logger.warning(f"Invalid date component values: {value}")
+                        obj["rationale"] = f"Invalid date component values: {value}. Error: {e}"
+                        self.logger.warning(f"Invalid date component values: {value} for type {answer_type}")
                 else:
                     obj["status"] = "error"
                     obj["rationale"] = f"Invalid date dictionary value: {value}"
-                    self.logger.warning(f"Invalid date dictionary value: {value}")
+                    self.logger.warning(f"Invalid date dictionary value: {value} for type {answer_type}")
 
-            elif answer_type == "error":
+            elif answer_type == "error":  # If explicitly an error type
                 obj["status"] = "error"
-                obj["rationale"] = str(value).strip() if value else "Unknown error"
+                obj["rationale"] = str(value).strip() if value else "Unknown error from upstream"
                 self.logger.debug(f"Created DROP error answer: {obj['rationale']}")
 
-            else:
+            else:  # Unknown or unhandled answer type
                 obj["status"] = "error"
-                obj["rationale"] = f"Unsupported or invalid answer type: {answer_type}"
+                obj["rationale"] = f"Unsupported or invalid answer type for creator: {answer_type}, value: {value}"
                 self.logger.warning(obj["rationale"])
+
+            # Ensure number is an empty string if None, for consistent schema output by UnifiedResponseAggregator if it stringifies
+            if obj.get("number") is None:
+                obj["number"] = ""
 
             return obj
 
         except Exception as e:
-            self.logger.error(f"Error creating DROP answer object (Type: {answer_type}, Value: {value}): {str(e)}")
-            error_obj = {
-                'number': '',
-                'spans': [],
-                'date': {'day': '', 'month': '', 'year': ''},
-                'status': 'error',
-                'confidence': 0.1,
+            self.logger.error(f"Error creating DROP answer object (Type: {answer_type}, Value: {value}): {str(e)}",
+                              exc_info=True)
+            # Return a fully formed error object
+            return {
+                'number': "", 'spans': [], 'date': {'day': '', 'month': '', 'year': ''},
+                'status': 'error', 'confidence': 0.1,
                 'rationale': f"Internal error creating answer object: {str(e)}",
-                'type': answer_type or 'error'
+                'type': answer_type or 'error_creation'
             }
-            return error_obj
 
     def _are_drop_values_equivalent(self,
                                     obj1: Dict[str, Any],
@@ -1074,14 +1129,14 @@ class HybridIntegrator:
                                               value_str: Optional[Any]
                                               ) -> Optional[float]:
         """Normalizes numbers (string, int, float) to float for comparison, handles None and errors."""
-        if value_str is None:
+        if value_str is None or (isinstance(value_str, str) and not value_str.strip()):  # Handle empty strings too
             return None
         try:
             if isinstance(value_str, (int, float)):
-                result = float(value_str)
+                result = float(value_str)  # Ensure it's float for consistent comparison
             else:
                 s = str(value_str).replace(",", "").strip().lower()
-                if not s:
+                if not s:  # Check again after stripping/replacing
                     return None
 
                 words = {
@@ -1091,15 +1146,14 @@ class HybridIntegrator:
                 }
                 if s in words:
                     result = words[s]
-                elif re.fullmatch(r'-?\d+(\.\d+)?', s):
+                elif re.fullmatch(r'-?\d+(\.\d+)?', s):  # Regex to match float/int strings
                     result = float(s)
                 else:
-                    self.logger.debug(f"Could not normalize '{value_str}' to a number.")
+                    self.logger.debug(f"Could not normalize '{value_str}' (cleaned: '{s}') to a number.")
                     return None
 
-            # Convert to int if the number is a whole number
-            if result.is_integer():
-                result = float(int(result))
+            # No need to convert to int here if the goal is a consistent float for comparison.
+            # The final casting to int if it's a whole number can happen when constructing the output object.
             return result
 
         except (ValueError, TypeError) as e:

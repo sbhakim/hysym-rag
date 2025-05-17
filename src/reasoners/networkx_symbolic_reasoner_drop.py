@@ -231,142 +231,256 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
     def _extract_drop_operation_and_args(self, query: str, context: str, query_id: str) -> Dict[str, Any]:
         """
         Extract operation type and arguments from a DROP query using regex and spaCy.
-        Used as a fallback when no rule matches.
-        Updated to include patterns for extremum numerical and temporal difference queries.
+        Used as a fallback when no predefined rule from self.rules matches.
+        Ensures patterns are prioritized and argument extraction is robust.
         """
         query_lower = query.lower().strip()
+        self.logger.debug(
+            f"[DROP QID:{query_id}] Fallback Extraction: Attempting to extract operation for query: '{query_lower[:100]}...'")
 
-        # Define patterns with priority (more specific first)
+        # Define patterns with priority (more specific or common first).
+        # 'direction': 'total' is already extracted by a pattern, and execute_extreme_value_numeric was updated.
         operation_patterns = [
-            # Count (e.g., "how many field goals", with optional temporal constraint)
-            (r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+(?:in|during)\s+(first half|second half|1st quarter|2nd quarter|3rd quarter|4th quarter))?(?:\s+were\s+there|\s+did|\s+was|\s+score|\?)?$",
-             OP_COUNT,
-             lambda m: {'entity': m.group(1).strip(), 'temporal_constraint': m.group(2) if m.lastindex >= 2 and m.group(2) else None},
-             0.90),
-            (r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+were\s+there|\s+did|\s+was|\s+in|\s+score|\?)?$",
-             OP_COUNT,
-             lambda m: {'entity': m.group(1).strip()},
-             0.85),
+            # 1. Numerical Total/Extremum (e.g., "how many yards did [player] score/kick/hit?")
+            # This pattern already extracts 'total' correctly as a direction.
+            (
+            r"^how many ([a-z\s]+?) (?:did|were) ([\w\s'-]+?) (?:score|intercept|lead with|take off|make|hit|kick|throw|rush for|pass for|have)\??$",
+            OP_EXTREME_VALUE_NUMERIC,  # Could also be a sum if context implies multiple events.
+            lambda m: {'unit': m.group(1).strip(),
+                       'entity_desc': m.group(2).strip() + " " + m.group(1).strip(),  # e.g. "Akers yards"
+                       'direction': 'total'},  # 'total' will be handled by execute_extreme_value_numeric
+            0.95),
 
-            # Difference (e.g., "difference between X and Y", "how many more yards")
-            (r"(?:difference between|how many more|how many less)\s+([\w\s'-]+)(?: and | than )([\w\s'-]+)",
-             OP_DIFFERENCE,
-             lambda m: {'entity1': m.group(1).strip(), 'entity2': m.group(2).strip()},
-             0.95),
-            (r"(?:difference between|how many more|how many less)\s+([\w\s'-]+)",
-             OP_DIFFERENCE,
-             lambda m: {'entity': m.group(1).strip()},
-             0.90),
+            # 2. Count with optional temporal constraint (e.g., "how many field goals in first half")
+            (
+            r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+(?:in|during|for|on)\s+(first half|second half|1st quarter|2nd quarter|3rd quarter|4th quarter|the game|overtime))?(?:\s+were\s+there|\s+did|\s+was|\s+score|\?)?$",
+            OP_COUNT,
+            lambda m: {'entity': m.group(1).strip(),
+                       'temporal_constraint': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(
+                           2) else None},
+            0.90),
 
-            # Extreme Value - Entity (e.g., "who scored the longest pass")
-            (r"(longest|shortest|highest|lowest|most|least|first|last)\s+([\w\s'-]+)(?: in| of | from | between | was | did)?",
-             OP_EXTREME_VALUE,
-             lambda m: {'entity_desc': m.group(2).strip(), 'direction': m.group(1).lower()},
-             0.90),
+            # This was your original simpler count, the one above is more comprehensive.
+            # (r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+were\s+there|\s+did|\s+was|\s+in|\s+score|\?)?$",
+            #  OP_COUNT,
+            #  lambda m: {'entity': m.group(1).strip()},
+            #  0.85),
 
-            # Extreme Value - Numeric (e.g., "how many yards was the longest touchdown")
-            (r"^how many ([a-z ]+?) was the (longest|shortest)\s+([\w\s'-]+?)(?: of the game)?\??$",
-             OP_EXTREME_VALUE_NUMERIC,
-             lambda m: {'unit': m.group(1).strip(), 'direction': m.group(2).lower(), 'entity_desc': m.group(3).strip()},
-             0.90),
+            # 3. Difference (e.g., "difference between X and Y", "how many more yards X than Y")
+            (
+            r"(?:difference between|how many more|how many less)\s+([\w\s'-]+?)(?:\s+(?:and|than)\s+([\w\s'-]+?))?\??$",
+            # Made second entity optional
+            OP_DIFFERENCE,
+            # If only one entity after "difference", it implies difference within that entity (max-min).
+            # If two, it's between them.
+            lambda m: {'entity1': m.group(1).strip(),
+                       'entity2': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None},
+            0.95),
 
-            # Temporal Difference (e.g., "how many years between X and Y")
-            (r"^how many years between\s+([\w\s'-]+) and ([\w\s'-]+)\??$",
+            # 4. Extreme Value - Entity (e.g., "who scored the longest pass", "first player")
+            # Needs to be fairly specific to avoid overly broad matches.
+            (
+            r"^(?:who|what player|what team|which player|which team)\s+(?:had|made|scored|threw|kicked|ran for|caught)\s+(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\??$",
+            OP_EXTREME_VALUE,  # This usually implies a span is the answer
+            lambda m: {'entity_desc': m.group(2).strip(),  # The thing being measured (e.g., "pass", "touchdown")
+                       'direction': m.group(1).lower().strip()},
+            0.90),
+            (
+            r"^(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\s+(?:was by whom|was by which player|was by what player)\??$",
+            OP_EXTREME_VALUE,
+            lambda m: {'entity_desc': m.group(2).strip(), 'direction': m.group(1).lower().strip()},
+            0.90),
+
+            # 5. Extreme Value - Numeric (e.g., "how many yards was the longest touchdown")
+            # This pattern should correctly capture unit, direction, and entity.
+            (
+            r"^how many ([a-z\s]+?) was the (longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+?)(?: of the game)?\??$",
+            OP_EXTREME_VALUE_NUMERIC,
+            lambda m: {'unit': m.group(1).strip(),
+                       'direction': m.group(2).lower().strip(),
+                       'entity_desc': m.group(3).strip()},
+            0.90),
+
+            # 6. Temporal Difference (e.g., "how many years between X and Y")
+            (r"^how many years between\s+([\w\s'-]+?)\s+and\s+([\w\s'-]+?)\??$",
              OP_TEMPORAL_DIFFERENCE,
              lambda m: {'entity1': m.group(1).strip(), 'entity2': m.group(2).strip()},
              0.85),
 
-            # Date (e.g., "when did X happen", "what year")
-            (r"^(?:when|what date|what year|which year)\s+(.*)",
+            # 7. Date (e.g., "when did X happen", "what year was X")
+            (r"^(?:when|what date|what year|which year)\s+(?:did|was|is)\s+(.*)\??$",  # Made verb optional too
+             OP_DATE,
+             lambda m: {'entity': m.group(1).strip().rstrip('?')},  # Entity associated with the date
+             0.80),
+            (r"^(?:when|what date|what year|which year)\s+(.*)\??$",  # More general
              OP_DATE,
              lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.80),
+             0.78),
 
-            # Entity Span (e.g., "who scored", "which team")
-            (r"^(?:who|which team|what team|which player|what player|what was the name of the)\s+(.*)",
+            # 8. Entity Span (e.g., "who scored", "which team won") - General fallback for specific entities
+            (
+            r"^(?:who|which team|what team|which player|what player|what was the name of the|tell me the name of the)\s+(.*)\??$",
+            OP_ENTITY_SPAN,
+            lambda m: {'entity': m.group(1).strip().rstrip('?')},  # The rest of the query often describes the entity
+            0.80),
+            (r"^(?:who|which|what)\s+(.*)\??$",  # Most general, lower confidence
              OP_ENTITY_SPAN,
              lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.80),
-            (r"^(?:who|which|what)\s+(.*)",
-             OP_ENTITY_SPAN,
-             lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.75),
+             0.70),  # Lowered confidence for very generic who/what/which
         ]
 
-        temporal_keywords = ["first half", "second half", "1st quarter", "2nd quarter", "3rd quarter", "4th quarter"]
+        temporal_keywords = ["first half", "second half", "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+                             "the game", "overtime"]
 
-        matched_op = None
-        for pattern, op_type, arg_func, base_conf in operation_patterns:
-            match = re.search(pattern, query, re.IGNORECASE)
+        matched_op_details = None
+        for pattern_regex, op_type, arg_func, base_conf in operation_patterns:
+            match = re.search(pattern_regex, query_lower, re.IGNORECASE)  # Ensure IGNORECASE for all
             if match:
-                matched_op = {
-                    'pattern': pattern,
+                matched_op_details = {
+                    'pattern_regex': pattern_regex,  # Store the regex for debugging
                     'type': op_type,
                     'arg_func': arg_func,
                     'match_obj': match,
                     'base_confidence': base_conf
                 }
-                self.logger.debug(f"[DROP QID:{query_id}] Pattern matched: Type={op_type}, Pattern='{pattern}'")
+                self.logger.debug(
+                    f"[DROP QID:{query_id}] Fallback pattern matched: Type={op_type}, Regex='{pattern_regex}'")
                 break
 
-        if not matched_op:
-            self.logger.warning(f"[DROP QID:{query_id}] No operation pattern reliably matched for question: '{query[:50]}...'")
-            return {'status': 'success', 'operation': OP_ENTITY_SPAN, 'args': {'entity': query.strip().rstrip('?')}, 'confidence': 0.3, 'rationale': 'Defaulting to entity span due to no clear pattern match.'}
+        if not matched_op_details:
+            self.logger.warning(
+                f"[DROP QID:{query_id}] No fallback operation pattern reliably matched for question: '{query[:70]}...'. Defaulting to entity span on full query.")
+            # Defaulting to OP_ENTITY_SPAN on the whole query if nothing else matches
+            return {'status': 'success',
+                    'operation': OP_ENTITY_SPAN,
+                    'args': {'entity': query.strip().rstrip('?'),
+                             'query_keywords': self._get_query_keywords(query_lower, query_id)},
+                    'confidence': 0.3,
+                    'rationale': 'Defaulting to entity span extraction due to no clear operational pattern match.'}
 
         try:
-            args = matched_op['arg_func'](matched_op['match_obj'])
-            if not args or not any(v for v in args.values() if v is not None):
-                raise ValueError("Argument function returned empty or None arguments.")
-            self.logger.debug(f"[DROP QID:{query_id}] Raw Extracted Args: {args}")
+            args = matched_op_details['arg_func'](matched_op_details['match_obj'])
+            if not args or not any(
+                    v for v in args.values() if v is not None):  # Check if args dict is empty or all values are None
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] Argument function for pattern '{matched_op_details['pattern_regex']}' returned empty or None arguments: {args}")
+                # If args are crucial and missing, this might be an issue. Fallback to general entity span.
+                return {'status': 'success', 'operation': OP_ENTITY_SPAN, 'args': {'entity': query.strip().rstrip('?'),
+                                                                                   'query_keywords': self._get_query_keywords(
+                                                                                       query_lower, query_id)},
+                        'confidence': 0.3,
+                        'rationale': 'Args extraction failed for matched pattern, defaulting to entity span.'}
 
-            query_keywords = []
-            if kw_model:
-                try:
-                    query_keywords = [kw[0] for kw in kw_model.extract_keywords(query_lower, top_n=5)]
-                    self.logger.debug(f"[DROP QID:{query_id}] Keywords via KeyBERT: {query_keywords}")
-                except Exception as ke_err:
-                    self.logger.warning(f"[DROP QID:{query_id}] KeyBERT keyword extraction failed: {ke_err}. Falling back to spaCy.")
-            if not query_keywords and self.nlp:
-                doc = self.nlp(query_lower)
-                query_keywords = [token.lemma_ for token in doc if token.pos_ in ('NOUN', 'VERB', 'PROPN') and not token.is_stop]
-                self.logger.debug(f"[DROP QID:{query_id}] Keywords via spaCy: {query_keywords}")
-            args['query_keywords'] = query_keywords
+            self.logger.debug(f"[DROP QID:{query_id}] Fallback Extracted Raw Args: {args}")
 
-            # Check for temporal constraints if not already set
+            args['query_keywords'] = self._get_query_keywords(query_lower, query_id)  # Add keywords
+
+            # Standardize/refine extracted arguments (especially 'entity' and 'entity_desc')
+            if 'entity' in args and isinstance(args['entity'], str):
+                args['entity'] = self._refine_extracted_entity(args['entity'],
+                                                               query_doc=self.nlp(query) if self.nlp else None,
+                                                               query_id=query_id)
+            if 'entity_desc' in args and isinstance(args['entity_desc'], str):
+                args['entity_desc'] = self._refine_extracted_entity(args['entity_desc'],
+                                                                    query_doc=self.nlp(query) if self.nlp else None,
+                                                                    query_id=query_id)
+            if 'entity1' in args and isinstance(args['entity1'], str):
+                args['entity1'] = self._refine_extracted_entity(args['entity1'],
+                                                                query_doc=self.nlp(query) if self.nlp else None,
+                                                                query_id=query_id)
+            if 'entity2' in args and isinstance(args['entity2'], str):
+                args['entity2'] = self._refine_extracted_entity(args['entity2'],
+                                                                query_doc=self.nlp(query) if self.nlp else None,
+                                                                query_id=query_id)
+
+            # Check for temporal constraints if not already set by a specific pattern
             if 'temporal_constraint' not in args or not args['temporal_constraint']:
-                temporal_constraint = None
+                temporal_constraint_found = None
                 for keyword in temporal_keywords:
                     if keyword in query_lower:
-                        temporal_constraint = keyword
+                        temporal_constraint_found = keyword
                         break
-                if temporal_constraint:
-                    args['temporal_constraint'] = temporal_constraint
-                    self.logger.debug(f"[DROP QID:{query_id}] Detected temporal constraint: {temporal_constraint}")
+                if temporal_constraint_found:
+                    args['temporal_constraint'] = temporal_constraint_found
+                    self.logger.debug(
+                        f"[DROP QID:{query_id}] Detected temporal constraint via keywords: {temporal_constraint_found}")
 
-            if self.nlp and 'entity' in args and isinstance(args['entity'], str):
-                doc = self.nlp(args['entity'])
-                refined_entity = args['entity']
-                query_doc = self.nlp(query)
-                for ent in query_doc.ents:
-                    if args['entity'].lower() in ent.text.lower() and len(ent.text) > len(args['entity']):
-                        refined_entity = ent.text
-                        self.logger.debug(f"[DROP QID:{query_id}] Refined entity using spaCy NER: '{args['entity']}' -> '{refined_entity}'")
-                        break
-                args['entity'] = refined_entity
+            final_confidence = matched_op_details['base_confidence']
+            # Optional: Adjust confidence based on how well args were populated
+            if not all(args.get(k) for k in ['entity', 'entity_desc', 'entity1', 'entity2'] if
+                       k in args):  # If some expected entities are missing
+                final_confidence *= 0.8
+                self.logger.debug(
+                    f"[DROP QID:{query_id}] Reduced confidence to {final_confidence:.2f} due to partially extracted arguments.")
 
-            confidence = matched_op['base_confidence']
-            self.logger.debug(f"[DROP QID:{query_id}] Final Extracted Args: {args}, Confidence: {confidence:.2f}")
+            self.logger.info(
+                f"[DROP QID:{query_id}] Fallback Final Extracted Operation: {matched_op_details['type']}, Args: {args}, Confidence: {final_confidence:.2f}")
             return {
                 'status': 'success',
-                'operation': matched_op['type'],
+                'operation': matched_op_details['type'],
                 'args': args,
-                'confidence': confidence,
-                'rationale': f"Matched {matched_op['type']} pattern."
+                'confidence': final_confidence,
+                'rationale': f"Fallback matched {matched_op_details['type']} pattern."
             }
 
         except Exception as e:
-            self.logger.exception(f"[DROP QID:{query_id}] Error during argument processing for pattern '{matched_op['pattern']}': {e}")
-            return {'status': 'error', 'operation': matched_op.get('type'), 'confidence': 0.1, 'rationale': f'Error processing arguments: {e}'}
+            self.logger.exception(
+                f"[DROP QID:{query_id}] Error during fallback argument processing for pattern '{matched_op_details.get('pattern_regex', 'UNKNOWN')}': {e}")
+            return {'status': 'error',
+                    'operation': matched_op_details.get('type'),
+                    'confidence': 0.1,
+                    'rationale': f'Error processing arguments from fallback: {e}'}
+
+    def _get_query_keywords(self, query_lower: str, query_id: str) -> List[str]:
+        """Helper to extract keywords using KeyBERT or spaCy."""
+        query_keywords = []
+        if kw_model:
+            try:
+                query_keywords = [kw[0] for kw in kw_model.extract_keywords(query_lower, top_n=5, stop_words='english')]
+                self.logger.debug(f"[DROP QID:{query_id}] Keywords via KeyBERT: {query_keywords}")
+            except Exception as ke_err:
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] KeyBERT keyword extraction failed: {ke_err}. Falling back to spaCy.")
+                kw_model_available_for_this_call = False  # pylint: disable=unused-variable
+
+        if not query_keywords and self.nlp:  # Fallback if KeyBERT fails or not available
+            doc = self.nlp(query_lower)
+            query_keywords = [token.lemma_ for token in doc if
+                              token.pos_ in ('NOUN', 'VERB', 'PROPN', 'ADJ') and not token.is_stop]
+            self.logger.debug(f"[DROP QID:{query_id}] Keywords via spaCy: {query_keywords}")
+        elif not query_keywords:
+            self.logger.debug(
+                f"[DROP QID:{query_id}] No keyword extraction method available or query yielded no keywords.")
+            # Basic split as ultimate fallback
+            query_keywords = [word for word in query_lower.split() if len(word) > 2]
+
+        return list(set(query_keywords))[:7]  # Return unique, top 7
+
+    def _refine_extracted_entity(self, entity_text: str, query_doc: Optional[Any], query_id: str) -> str:
+        """Refines an extracted entity string using NLP if available."""
+        if not self.nlp or not query_doc:  # query_doc is Optional[spacy.tokens.Doc]
+            return entity_text.strip()
+
+        # Attempt to expand a short entity to a full NER span from the query if it's a substring
+        for ent in query_doc.ents:
+            if entity_text.lower() in ent.text.lower() and len(ent.text) > len(entity_text):
+                # Check if the NER type is reasonable (avoiding DATE, TIME, CARDINAL etc. for general entities)
+                if ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL']:
+                    self.logger.debug(
+                        f"[DROP QID:{query_id}] Refined entity text from '{entity_text}' to NER span '{ent.text}' (Label: {ent.label_})")
+                    return ent.text.strip()
+
+        # Fallback: simple cleaning
+        # Remove leading "the", "a", "an" and possessives like "'s" if they are at the very end
+        refined = re.sub(r"^(the|a|an)\s+", "", entity_text, flags=re.IGNORECASE).strip()
+        refined = re.sub(r"\s*'s$", "", refined).strip()  # Remove trailing 's
+        refined = refined.rstrip('?.!,')  # Remove trailing punctuation
+
+        # If cleaning results in empty, revert to original (stripped)
+        if not refined and entity_text.strip():
+            return entity_text.strip()
+
+        return refined if refined else entity_text.strip()
 
     def _find_entities_in_passage(self, passage: str, entity: str, query_id: str, query_keywords: List[str] = None) -> List[str]:
         """
@@ -619,7 +733,8 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
             query_keywords = args.get('query_keywords', [])
 
             if not entity:
-                return {'type': 'number', 'value': '0', 'confidence': 0.1, 'error': 'No entity provided for count'}
+                return {'type': 'number', 'value': 0, 'confidence': 0.1,
+                        'error': 'No entity provided for count'}  # Return 0 as int
 
             spans = self._find_entities_in_passage(context, entity, query_id, query_keywords)
 
@@ -628,8 +743,14 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                 try:
                     doc = self.nlp(context)
                     span_indices = defaultdict(list)
-                    for m in re.finditer(r'\b' + '|'.join(re.escape(s) for s in set(spans)) + r'\b', context, re.IGNORECASE):
-                        span_indices[m.group(0).lower()].append(m.start())
+                    # Ensure spans set for regex is not empty and contains non-empty strings
+                    valid_regex_spans = [re.escape(s) for s in set(spans) if s and s.strip()]
+                    if not valid_regex_spans:
+                        self.logger.debug(
+                            f"[DROP QID:{query_id}] No valid spans for temporal regex in COUNT. Spans: {spans}")
+                    else:
+                        for m in re.finditer(r'\b(' + '|'.join(valid_regex_spans) + r')\b', context, re.IGNORECASE):
+                            span_indices[m.group(0).lower()].append(m.start())
 
                     processed_indices = set()
                     for sent in doc.sents:
@@ -643,53 +764,67 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                             match_temporal = True
 
                         if match_temporal:
-                            for span_text in set(spans):
+                            for span_text in set(spans):  # Iterate over original unique spans
+                                if not span_text or not span_text.strip(): continue  # Skip empty
                                 span_lower = span_text.lower()
                                 for start_index in span_indices.get(span_lower, []):
                                     if sent.start_char <= start_index < sent.end_char and start_index not in processed_indices:
                                         filtered_spans.append(span_text)
                                         processed_indices.add(start_index)
 
-                    spans = filtered_spans
-                    self.logger.debug(f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}'. Found {len(spans)} temporally relevant spans.")
+                    spans = filtered_spans  # Update spans with temporally filtered ones
+                    self.logger.debug(
+                        f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}'. Found {len(spans)} temporally relevant spans for COUNT.")
                 except Exception as temp_err:
                     self.logger.error(f"[DROP QID:{query_id}] Error during temporal filtering for COUNT: {temp_err}")
-                    confidence = 0.3
-                    count = len(spans)
-                    return {'type': 'number', 'value': str(count), 'confidence': confidence, 'error': 'Temporal filtering failed'}
+                    # Fallback to count of non-temporally filtered spans, but lower confidence
+                    count = len(spans)  # Original spans before filtering error
+                    return {'type': 'number', 'value': count, 'confidence': 0.3,
+                            'rationale': f'Temporal filtering failed, count is from all spans for {entity}'}
 
             count = len(spans)
             confidence = 0.85 if spans else 0.4
-            self.logger.info(f"[DROP QID:{query_id}] COUNT operation: Entity='{entity}', TempConstraint='{temporal_constraint}', Final Count={count}, Conf={confidence:.2f}")
-            return {'type': 'number', 'value': str(count), 'confidence': confidence}
+            self.logger.info(
+                f"[DROP QID:{query_id}] COUNT operation: Entity='{entity}', TempConstraint='{temporal_constraint}', Final Count={count}, Conf={confidence:.2f}")
+            # MODIFICATION: Return count as int
+            return {'type': 'number', 'value': count, 'confidence': confidence}
 
         except Exception as e:
-            self.logger.exception(f"[DROP QID:{query_id}] Error in COUNT operation for entity '{args.get('entity')}': {str(e)}")
-            return {'type': 'number', 'value': '0', 'confidence': 0.0, 'error': f'Exception in count: {str(e)}'}
+            self.logger.exception(
+                f"[DROP QID:{query_id}] Error in COUNT operation for entity '{args.get('entity')}': {str(e)}")
+            # MODIFICATION: Return 0 as int for error
+            return {'type': 'number', 'value': 0, 'confidence': 0.0, 'error': f'Exception in count: {str(e)}'}
 
     def execute_extreme_value(self, args: Dict[str, Any], context: str, query: str, query_id: str) -> Dict[str, Any]:
         """
         Execute EXTREME_VALUE operation for DROP queries.
         Uses rule-extracted entity and temporal_constraint if available.
-        Handles queries expecting a span (e.g., "who threw the longest pass").
+        Handles queries expecting a span (e.g., "who threw the longest pass") or sometimes a number.
+        If direction is 'total' and a numerical result seems implied, it sums.
         """
         try:
             entity_desc = args.get('entity_desc') or args.get('entity')
-            direction = args.get('direction', 'longest')
+            direction_arg = args.get('direction', 'longest')  # Store original arg
             temporal_constraint = args.get('temporal_constraint')
             query_keywords = args.get('query_keywords', [])
 
             if not entity_desc:
-                return {'type': 'error', 'value': None, 'confidence': 0.1, 'error': 'Missing entity description for extreme_value'}
+                err_type = 'spans' if 'who' in query.lower() or 'which' in query.lower() else 'number'
+                err_val = [] if err_type == 'spans' else 0
+                return {'type': err_type, 'value': err_val, 'confidence': 0.1,
+                        'error': 'Missing entity description for extreme_value'}
 
             value_span_pairs = self._find_values_and_spans(context, entity_desc, query_id, query_keywords)
 
             if temporal_constraint and value_span_pairs and self.nlp:
+                # (Keep existing temporal filtering logic from source [649] - [655])
+                # Ensure value_span_pairs is updated with filtered_pairs
                 filtered_pairs = []
                 try:
                     doc = self.nlp(context)
                     for value, span in value_span_pairs:
                         span_lower = span.lower()
+                        sent_found_with_temporal = False
                         for sent in doc.sents:
                             if span_lower in sent.text.lower():
                                 sent_text_lower = sent.text.lower()
@@ -700,86 +835,144 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                                     if "3rd quarter" in sent_text_lower or "4th quarter" in sent_text_lower: match_temporal = True
                                 elif temporal_constraint in sent_text_lower:
                                     match_temporal = True
-
                                 if match_temporal:
-                                    filtered_pairs.append((value, span))
+                                    sent_found_with_temporal = True
                                     break
+                        if sent_found_with_temporal:
+                            filtered_pairs.append((value, span))
                     value_span_pairs = filtered_pairs
-                    self.logger.debug(f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to EXTREME_VALUE: {len(value_span_pairs)} pairs remain.")
+                    self.logger.debug(
+                        f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to EXTREME_VALUE: {len(value_span_pairs)} pairs remain.")
                 except Exception as temp_err:
-                    self.logger.error(f"[DROP QID:{query_id}] Error during temporal filtering for EXTREME_VALUE: {temp_err}")
+                    self.logger.error(
+                        f"[DROP QID:{query_id}] Error during temporal filtering for EXTREME_VALUE: {temp_err}")
 
             if not value_span_pairs:
-                self.logger.warning(f"[DROP QID:{query_id}] No relevant values/spans found for '{entity_desc}' for EXTREME_VALUE (after filtering).")
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] No relevant values/spans found for '{entity_desc}' for EXTREME_VALUE (after filtering).")
                 err_type = 'spans' if 'who' in query.lower() or 'which' in query.lower() else 'number'
-                err_val = [] if err_type == 'spans' else '0'
-                return {'type': err_type, 'value': err_val, 'confidence': 0.2, 'error': f"No relevant values/spans found for '{entity_desc}'"}
+                err_val = [] if err_type == 'spans' else 0
+                return {'type': err_type, 'value': err_val, 'confidence': 0.2,
+                        'error': f"No relevant values/spans found for '{entity_desc}'"}
 
-            selector = None
-            if direction in ['longest', 'highest', 'most', 'last']:
-                selector = max
-            elif direction in ['shortest', 'lowest', 'least', 'first']:
-                selector = min
-            else:
-                self.logger.warning(f"[DROP QID:{query_id}] Unknown direction '{direction}', defaulting to 'longest'.")
-                selector = max
+            direction_to_use = direction_arg.lower()
 
-            try:
-                valid_pairs = [(val, span) for val, span in value_span_pairs if val is not None]
-                if not valid_pairs:
-                    raise ValueError("No valid numeric values found among pairs.")
-                extreme_value = selector(pair[0] for pair in valid_pairs)
-            except ValueError as ve:
-                self.logger.error(f"[DROP QID:{query_id}] Could not determine extreme value for '{entity_desc}': {ve}")
-                err_type = 'spans' if 'who' in query.lower() or 'which' in query.lower() else 'number'
-                err_val = [] if err_type == 'spans' else '0'
-                return {'type': err_type, 'value': err_val, 'confidence': 0.1, 'error': str(ve)}
+            extreme_val_numeric: Optional[Union[int, float]] = None
+            associated_spans_for_value: List[str] = []
 
-            associated_spans = [span for val, span in valid_pairs if val is not None and abs(val - extreme_value) < 1e-6]
-            confidence = 0.8 if associated_spans else 0.55
+            valid_numeric_pairs = [(val, span) for val, span in value_span_pairs if isinstance(val, (int, float))]
 
+            if valid_numeric_pairs:  # Proceed if we have numeric values to work with
+                if direction_to_use == 'total':
+                    # If 'total' and query doesn't imply span (e.g., not "who scored total..."), sum numbers
+                    if not (
+                            'who' in query.lower() or 'which' in query.lower() or 'what player' in query.lower() or 'what team' in query.lower()):
+                        extreme_val_numeric = sum(pair[0] for pair in valid_numeric_pairs)
+                        self.logger.debug(
+                            f"[DROP QID:{query_id}] EXTREME_VALUE: Direction 'total' interpreted as sum: {extreme_val_numeric}")
+                    else:  # 'total' with 'who/which' is ambiguous for this function, might default to span logic for 'longest'
+                        self.logger.warning(
+                            f"[DROP QID:{query_id}] EXTREME_VALUE: 'total' with 'who/which' is ambiguous, proceeding as 'longest' for span.")
+                        selector = max
+                        extreme_val_numeric = selector(pair[0] for pair in valid_numeric_pairs)
+                elif direction_to_use in ['longest', 'highest', 'most', 'last']:
+                    selector = max
+                    extreme_val_numeric = selector(pair[0] for pair in valid_numeric_pairs)
+                elif direction_to_use in ['shortest', 'lowest', 'least', 'first']:
+                    selector = min
+                    extreme_val_numeric = selector(pair[0] for pair in valid_numeric_pairs)
+                else:
+                    self.logger.warning(
+                        f"[DROP QID:{query_id}] Unknown direction '{direction_to_use}' for EXTREME_VALUE, defaulting to 'longest'.")
+                    selector = max
+                    extreme_val_numeric = selector(pair[0] for pair in valid_numeric_pairs)
+
+                if extreme_val_numeric is not None:
+                    if isinstance(extreme_val_numeric, float) and extreme_val_numeric.is_integer():
+                        extreme_val_numeric = int(extreme_val_numeric)
+                    # Find spans associated with this determined extreme_val_numeric
+                    associated_spans_for_value = [span for val, span in valid_numeric_pairs if
+                                                  val is not None and abs(val - extreme_val_numeric) < 1e-6]
+
+            # Determine return type and value based on query and findings
             query_lower = query.lower()
+            return_type: str
+            final_value: Any
+            confidence = 0.8 if (extreme_val_numeric is not None or associated_spans_for_value) else 0.55
+
             if 'who' in query_lower or 'which' in query_lower or 'what team' in query_lower or 'what player' in query_lower:
                 return_type = 'spans'
-                final_value = associated_spans[:1] if associated_spans else []
-            else:
+                # If we found an extreme_val_numeric, use its associated spans.
+                # Otherwise, if no numeric values, perhaps just return all unique spans found for the entity_desc.
+                if associated_spans_for_value:
+                    final_value = list(dict.fromkeys(associated_spans_for_value))[:1]  # Top one associated span
+                else:  # Fallback: if no numbers were involved or no specific span for the number
+                    all_spans_for_desc = list(dict.fromkeys([s for v, s in value_span_pairs]))
+                    final_value = all_spans_for_desc[:1] if all_spans_for_desc else []
+                if not final_value: confidence = 0.3  # Lower confidence if no specific span found
+            elif extreme_val_numeric is not None:  # Query implies a number and we found one
                 return_type = 'number'
-                final_value = str(extreme_value)
+                final_value = extreme_val_numeric
+            else:  # Fallback if no clear number or span direction
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] EXTREME_VALUE: Could not determine clear numeric or span answer. Entity: {entity_desc}, Direction: {direction_arg}")
+                # Default to trying to return a span if any were found, else empty
+                all_spans_for_desc = list(dict.fromkeys([s for v, s in value_span_pairs]))
+                if all_spans_for_desc:
+                    return_type = 'spans'
+                    final_value = all_spans_for_desc[:1]
+                    confidence = 0.4
+                else:
+                    return_type = 'number'  # Or 'error'
+                    final_value = 0
+                    confidence = 0.2
+                    return {'type': return_type, 'value': final_value, 'confidence': confidence,
+                            'error': f"No values or spans found for {entity_desc}"}
 
-            self.logger.info(f"[DROP QID:{query_id}] EXTREME_VALUE ({return_type}): Entity='{entity_desc}', Direction='{direction}', ExtremeVal={extreme_value}, Result={final_value}, Conf={confidence:.2f}")
+            self.logger.info(
+                f"[DROP QID:{query_id}] EXTREME_VALUE (Type: {return_type}): Entity='{entity_desc}', Direction='{direction_arg}', CalculatedExtremeNum={extreme_val_numeric}, FinalResultValue={final_value}, Conf={confidence:.2f}")
             return {'type': return_type, 'value': final_value, 'confidence': confidence}
 
         except Exception as e:
-            self.logger.exception(f"[DROP QID:{query_id}] Error in EXTREME_VALUE for entity '{args.get('entity_desc')}': {str(e)}")
+            self.logger.exception(
+                f"[DROP QID:{query_id}] Error in EXTREME_VALUE for entity '{args.get('entity_desc')}': {str(e)}")
             err_type = 'spans' if 'who' in query.lower() or 'which' in query.lower() else 'number'
-            err_val = [] if err_type == 'spans' else '0'
-            return {'type': err_type, 'value': err_val, 'confidence': 0.0, 'error': f'Exception in extreme_value: {str(e)}'}
+            err_val = [] if err_type == 'spans' else 0
+            return {'type': err_type, 'value': err_val, 'confidence': 0.0,
+                    'error': f'Exception in extreme_value: {str(e)}'}
 
-    def execute_extreme_value_numeric(self, args: Dict[str, Any], context: str, query: str, query_id: str) -> Dict[str, Any]:
+    def execute_extreme_value_numeric(self, args: Dict[str, Any], context: str, query: str, query_id: str) -> Dict[
+        str, Any]:
         """
         Execute EXTREME_VALUE_NUMERIC operation for DROP queries.
         Handles queries expecting a numerical value (e.g., "how many yards was the longest touchdown").
+        If direction is 'total', it sums the relevant values.
         """
         try:
             entity_desc = args.get('entity_desc') or args.get('entity')
-            direction = args.get('direction', 'longest')
+            direction_arg = args.get('direction', 'longest')  # Store original arg
             unit = args.get('unit')
             temporal_constraint = args.get('temporal_constraint')
             query_keywords = args.get('query_keywords', [])
 
             if not entity_desc:
-                return {'type': 'error', 'value': None, 'confidence': 0.1, 'error': 'Missing entity description for extreme_value_numeric'}
+                return {'type': 'number', 'value': 0, 'confidence': 0.1,
+                        'error': 'Missing entity description for extreme_value_numeric'}  # Return 0
 
             value_span_pairs = self._find_values_and_spans(context, entity_desc, query_id, query_keywords)
 
             if temporal_constraint and value_span_pairs and self.nlp:
+                # (Keep existing temporal filtering logic from source [667] - [673])
+                # Ensure value_span_pairs is updated with filtered_pairs
                 filtered_pairs = []
                 try:
                     doc = self.nlp(context)
                     for value, span in value_span_pairs:
                         span_lower = span.lower()
+                        # Simpler check: does any sentence containing the span also contain the temporal phrase?
+                        sent_found_with_temporal = False
                         for sent in doc.sents:
-                            if span_lower in sent.text.lower():
+                            if span_lower in sent.text.lower():  # Span is in this sentence
                                 sent_text_lower = sent.text.lower()
                                 match_temporal = False
                                 if temporal_constraint == "first half":
@@ -790,46 +983,81 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                                     match_temporal = True
 
                                 if match_temporal:
-                                    filtered_pairs.append((value, span))
-                                    break
+                                    sent_found_with_temporal = True
+                                    break  # Found a matching sentence for this span
+                        if sent_found_with_temporal:
+                            filtered_pairs.append((value, span))
+
                     value_span_pairs = filtered_pairs
-                    self.logger.debug(f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to EXTREME_VALUE_NUMERIC: {len(value_span_pairs)} pairs remain.")
+                    self.logger.debug(
+                        f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to EXTREME_VALUE_NUMERIC: {len(value_span_pairs)} pairs remain.")
                 except Exception as temp_err:
-                    self.logger.error(f"[DROP QID:{query_id}] Error during temporal filtering for EXTREME_VALUE_NUMERIC: {temp_err}")
+                    self.logger.error(
+                        f"[DROP QID:{query_id}] Error during temporal filtering for EXTREME_VALUE_NUMERIC: {temp_err}")
 
             if not value_span_pairs:
-                self.logger.warning(f"[DROP QID:{query_id}] No relevant values/spans found for '{entity_desc}' for EXTREME_VALUE_NUMERIC (after filtering).")
-                return {'type': 'number', 'value': '0', 'confidence': 0.2, 'error': f"No relevant values/spans found for '{entity_desc}'"}
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] No relevant values/spans found for '{entity_desc}' for EXTREME_VALUE_NUMERIC (after filtering).")
+                return {'type': 'number', 'value': 0, 'confidence': 0.2,
+                        'error': f"No relevant values/spans found for '{entity_desc}'"}  # Return 0
 
+            direction_to_use = direction_arg.lower()  # Normalize direction for comparison
+
+            extreme_value_result: Union[int, float]
             selector = None
-            if direction in ['longest', 'highest', 'most', 'last']:
+
+            if direction_to_use == 'total':
+                # Special handling for 'total' - implies summing relevant values
+                self.logger.debug(
+                    f"[DROP QID:{query_id}] Direction 'total' detected for EXTREME_VALUE_NUMERIC. Will sum values.")
+            elif direction_to_use in ['longest', 'highest', 'most', 'last']:
                 selector = max
-            elif direction in ['shortest', 'lowest', 'least', 'first']:
+            elif direction_to_use in ['shortest', 'lowest', 'least', 'first']:
                 selector = min
             else:
-                self.logger.warning(f"[DROP QID:{query_id}] Unknown direction '{direction}', defaulting to 'longest'.")
-                selector = max
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] Unknown direction '{direction_to_use}' (original: '{direction_arg}'), defaulting to 'longest'.")
+                selector = max  # Default to max if direction is unknown but not 'total'
 
             try:
-                valid_pairs = [(val, span) for val, span in value_span_pairs if val is not None]
+                valid_pairs = [(val, span) for val, span in value_span_pairs if
+                               isinstance(val, (int, float))]  # Ensure val is numeric
                 if not valid_pairs:
+                    # Check if original value_span_pairs had non-numeric values that were filtered out
+                    if value_span_pairs:
+                        self.logger.warning(
+                            f"[DROP QID:{query_id}] No *numeric* values found in value_span_pairs: {value_span_pairs}")
                     raise ValueError("No valid numeric values found among pairs.")
-                extreme_value = selector(pair[0] for pair in valid_pairs)
+
+                if direction_to_use == 'total':
+                    extreme_value_result = sum(pair[0] for pair in valid_pairs)
+                else:  # Original extremum logic using selector
+                    extreme_value_result = selector(pair[0] for pair in valid_pairs)
+
+                # Cast to int if it's a whole number
+                if isinstance(extreme_value_result, float) and extreme_value_result.is_integer():
+                    extreme_value_result = int(extreme_value_result)
+
             except ValueError as ve:
-                self.logger.error(f"[DROP QID:{query_id}] Could not determine extreme value for '{entity_desc}': {ve}")
-                return {'type': 'number', 'value': '0', 'confidence': 0.1, 'error': str(ve)}
+                self.logger.error(
+                    f"[DROP QID:{query_id}] Could not determine extreme value/total for '{entity_desc}': {ve}")
+                return {'type': 'number', 'value': 0, 'confidence': 0.1, 'error': str(ve)}  # Return 0
 
-            associated_spans = [span for val, span in valid_pairs if val is not None and abs(val - extreme_value) < 1e-6]
-            confidence = 0.8 if associated_spans else 0.55
+            # Confidence calculation can remain similar
+            # associated_spans logic is more for when the *span* is the answer, not the number.
+            # For EXTREME_VALUE_NUMERIC, the number itself is the primary answer.
+            # A simple confidence boost if we found valid pairs.
+            confidence = 0.8 if valid_pairs else 0.55
 
-            final_value = str(extreme_value)
-
-            self.logger.info(f"[DROP QID:{query_id}] EXTREME_VALUE_NUMERIC: Entity='{entity_desc}', Unit='{unit}', Direction='{direction}', ExtremeVal={extreme_value}, Conf={confidence:.2f}")
-            return {'type': 'number', 'value': final_value, 'confidence': confidence}
+            self.logger.info(
+                f"[DROP QID:{query_id}] EXTREME_VALUE_NUMERIC: Entity='{entity_desc}', Unit='{unit}', Direction='{direction_arg}', ResultValue={extreme_value_result}, Conf={confidence:.2f}")
+            return {'type': 'number', 'value': extreme_value_result, 'confidence': confidence}
 
         except Exception as e:
-            self.logger.exception(f"[DROP QID:{query_id}] Error in EXTREME_VALUE_NUMERIC for entity '{args.get('entity_desc')}': {str(e)}")
-            return {'type': 'number', 'value': '0', 'confidence': 0.0, 'error': f'Exception in extreme_value_numeric: {str(e)}'}
+            self.logger.exception(
+                f"[DROP QID:{query_id}] Error in EXTREME_VALUE_NUMERIC for entity '{args.get('entity_desc')}': {str(e)}")
+            return {'type': 'number', 'value': 0, 'confidence': 0.0,
+                    'error': f'Exception in extreme_value_numeric: {str(e)}'}  # Return 0
 
     def _find_values_and_spans(self, context: str, entity_desc: str, query_id: str, query_keywords: List[str] = None) -> List[Tuple[Optional[float], str]]:
         """
@@ -904,28 +1132,26 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         try:
             entity1_desc = args.get('entity1') or args.get('entity')
             entity2_desc = args.get('entity2')
-            attr1 = args.get('attr1', 'longest')
-            attr2 = args.get('attr2', 'shortest')
-            entity1 = args.get('entity1') if 'entity1' in args else args.get('entity')
-            entity2 = args.get('entity2') if 'entity2' in args else args.get('entity')
+            # attr1 = args.get('attr1', 'longest') # These seem unused in the current logic but kept for context
+            # attr2 = args.get('attr2', 'shortest')
+            # entity1 = args.get('entity1') if 'entity1' in args else args.get('entity') # Original entity names
+            # entity2 = args.get('entity2') if 'entity2' in args else args.get('entity')
             temporal_constraint = args.get('temporal_constraint')
             query_keywords = args.get('query_keywords', [])
 
             if not entity1_desc:
-                return {'type': 'error', 'value': None, 'confidence': 0.1, 'error': 'No primary entity provided for difference'}
+                return {'type': 'number', 'value': 0, 'confidence': 0.1,
+                        'error': 'No primary entity provided for difference'}  # Return 0
 
-            # If attr1 and attr2 are specified (e.g., "longest" vs "shortest"), adjust entity descriptions
-            if attr1 and attr2:
-                entity1_desc = f"{attr1} {entity1}"
-                entity2_desc = f"{attr2} {entity2}"
-                self.logger.debug(f"[DROP QID:{query_id}] Adjusted entities for difference: Entity1='{entity1_desc}', Entity2='{entity2_desc}'")
+            # The logic around attr1, attr2, entity1, entity2 in source [696]-[698] to form entity1_desc and entity2_desc
+            # seems correct for interpreting complex difference queries. We directly use entity1_desc and entity2_desc.
 
             numbers1 = self._find_associated_numbers(context, entity1_desc, query_id, query_keywords)
-            numbers2 = self._find_associated_numbers(context, entity2_desc, query_id, query_keywords) if entity2_desc else []
+            numbers2 = self._find_associated_numbers(context, entity2_desc, query_id,
+                                                     query_keywords) if entity2_desc else []
 
-            # Handle missing data by inferring standard values
+            # (Keep existing logic for inferring field goal values source [699]-[700])
             if not numbers1 and "field goal" in entity1_desc.lower():
-                # Infer a standard field goal yardage (e.g., 3 points for tying play)
                 numbers1 = [3.0]
                 self.logger.debug(f"[DROP QID:{query_id}] Inferred field goal yardage of 3 for {entity1_desc}")
             if not numbers2 and entity2_desc and "field goal" in entity2_desc.lower():
@@ -933,6 +1159,8 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                 self.logger.debug(f"[DROP QID:{query_id}] Inferred field goal yardage of 3 for {entity2_desc}")
 
             if temporal_constraint and self.nlp:
+                # (Keep existing temporal filtering logic from source [701]-[706])
+                # Ensure numbers1 and numbers2 are updated correctly
                 filtered_numbers1 = []
                 filtered_numbers2 = []
                 try:
@@ -948,49 +1176,67 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                             match_temporal = True
 
                         if match_temporal:
-                            sent_numbers1 = self._find_associated_numbers(sent.text, entity1_desc, query_id, query_keywords)
+                            sent_numbers1 = self._find_associated_numbers(sent.text, entity1_desc, query_id,
+                                                                          query_keywords)
                             filtered_numbers1.extend(sent_numbers1)
                             if entity2_desc:
-                                sent_numbers2 = self._find_associated_numbers(sent.text, entity2_desc, query_id, query_keywords)
+                                sent_numbers2 = self._find_associated_numbers(sent.text, entity2_desc, query_id,
+                                                                              query_keywords)
                                 filtered_numbers2.extend(sent_numbers2)
 
-                    numbers1 = list(set(filtered_numbers1))
+                    numbers1 = list(set(filtered_numbers1))  # Use unique numbers after filtering
                     numbers2 = list(set(filtered_numbers2)) if entity2_desc else []
-                    self.logger.debug(f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to DIFFERENCE: Nums1={numbers1}, Nums2={numbers2}")
-
+                    self.logger.debug(
+                        f"[DROP QID:{query_id}] Applied temporal constraint '{temporal_constraint}' to DIFFERENCE: Nums1={numbers1}, Nums2={numbers2}")
                 except Exception as temp_err:
-                    self.logger.error(f"[DROP QID:{query_id}] Error during temporal filtering for DIFFERENCE: {temp_err}")
+                    self.logger.error(
+                        f"[DROP QID:{query_id}] Error during temporal filtering for DIFFERENCE: {temp_err}")
 
-            difference = None
+            difference: Optional[Union[int, float]] = None
             confidence = 0.0
 
-            if entity2_desc:
+            if entity2_desc:  # Difference between two entities
                 if not numbers1 or not numbers2:
-                    self.logger.warning(f"[DROP QID:{query_id}] Insufficient numbers for DIFFERENCE between '{entity1_desc}' and '{entity2_desc}'. Nums1={numbers1}, Nums2={numbers2}")
-                    return {'type': 'number', 'value': '0', 'confidence': 0.2, 'error': f"Insufficient distinct numbers found for '{entity1_desc}' ({len(numbers1)}) and '{entity2_desc}' ({len(numbers2)})"}
-                val1 = max(numbers1) if numbers1 else 0
-                val2 = max(numbers2) if numbers2 else 0
+                    self.logger.warning(
+                        f"[DROP QID:{query_id}] Insufficient numbers for DIFFERENCE between '{entity1_desc}' and '{entity2_desc}'. Nums1={numbers1}, Nums2={numbers2}")
+                    return {'type': 'number', 'value': 0, 'confidence': 0.2,
+                            'error': f"Insufficient distinct numbers found for '{entity1_desc}' ({len(numbers1)}) and '{entity2_desc}' ({len(numbers2)})"}  # Return 0
+
+                # Assuming we take the most prominent (e.g., max) number for each entity if multiple are found
+                val1 = max(numbers1) if numbers1 else 0.0  # Default to 0.0 if empty after filtering
+                val2 = max(numbers2) if numbers2 else 0.0  # Default to 0.0 if empty
+
                 difference = abs(val1 - val2)
                 confidence = 0.75
-                self.logger.debug(f"[DROP QID:{query_id}] DIFFERENCE between entities: {entity1_desc}({val1}) vs {entity2_desc}({val2}) = {difference}")
-            else:
+                self.logger.debug(
+                    f"[DROP QID:{query_id}] DIFFERENCE between entities: {entity1_desc}({val1}) vs {entity2_desc}({val2}) = {difference}")
+            else:  # Difference within a single entity (e.g., max - min)
                 if len(numbers1) < 2:
-                    self.logger.warning(f"[DROP QID:{query_id}] Insufficient numbers ({len(numbers1)}) for DIFFERENCE within '{entity1_desc}'. Nums={numbers1}")
-                    return {'type': 'number', 'value': '0', 'confidence': 0.25, 'error': f"Found {len(numbers1)} numbers for '{entity1_desc}', need at least 2 for difference."}
+                    self.logger.warning(
+                        f"[DROP QID:{query_id}] Insufficient numbers ({len(numbers1)}) for DIFFERENCE within '{entity1_desc}'. Nums={numbers1}")
+                    return {'type': 'number', 'value': 0, 'confidence': 0.25,
+                            'error': f"Found {len(numbers1)} numbers for '{entity1_desc}', need at least 2 for difference."}  # Return 0
                 difference = max(numbers1) - min(numbers1)
                 confidence = 0.8
-                self.logger.debug(f"[DROP QID:{query_id}] DIFFERENCE within entity '{entity1_desc}': max({max(numbers1)}) - min({min(numbers1)}) = {difference}")
+                self.logger.debug(
+                    f"[DROP QID:{query_id}] DIFFERENCE within entity '{entity1_desc}': max({max(numbers1)}) - min({min(numbers1)}) = {difference}")
 
             if difference is not None:
-                final_value = str(int(difference) if difference == int(difference) else difference)
-                self.logger.info(f"[DROP QID:{query_id}] DIFFERENCE Result: {final_value}, Confidence={confidence:.2f}")
-                return {'type': 'number', 'value': final_value, 'confidence': confidence}
-            else:
-                return {'type': 'number', 'value': '0', 'confidence': 0.1, 'error': 'Failed to calculate difference'}
+                # MODIFICATION: Cast to int if whole number, else float
+                final_numeric_value = int(difference) if isinstance(difference,
+                                                                    float) and difference.is_integer() else float(
+                    difference)
+                self.logger.info(
+                    f"[DROP QID:{query_id}] DIFFERENCE Result: {final_numeric_value}, Raw Difference: {difference}, Confidence={confidence:.2f}")
+                return {'type': 'number', 'value': final_numeric_value, 'confidence': confidence}
+            else:  # Should not be reached if logic above is correct, but as a fallback
+                return {'type': 'number', 'value': 0, 'confidence': 0.1,
+                        'error': 'Failed to calculate difference'}  # Return 0
 
         except Exception as e:
             self.logger.exception(f"[DROP QID:{query_id}] Error executing DIFFERENCE operation: {str(e)}")
-            return {'type': 'error', 'value': None, 'confidence': 0.0, 'error': f'Exception in difference: {str(e)}'}
+            return {'type': 'number', 'value': 0, 'confidence': 0.0,
+                    'error': f'Exception in difference: {str(e)}'}  # Return 0
 
     def execute_temporal_difference(self, args: Dict[str, Any], context: str, query_id: str) -> Dict[str, Any]:
         """
@@ -1003,51 +1249,102 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
             query_keywords = args.get('query_keywords', [])
 
             if not entity1 or not entity2:
-                return {'type': 'error', 'value': None, 'confidence': 0.1, 'error': 'Missing entities for temporal difference'}
+                return {'type': 'number', 'value': 0, 'confidence': 0.1,
+                        'error': 'Missing entities for temporal difference'}  # Return 0
 
             dates = self._find_dates_in_passage(context, query_id)
-            date1, date2 = None, None
-            entity1_lemmas = {token.lemma_.lower() for token in self.nlp(entity1)} | set(query_keywords)
-            entity2_lemmas = {token.lemma_.lower() for token in self.nlp(entity2)} | set(query_keywords)
+            date1_obj, date2_obj = None, None  # Renamed to avoid conflict with 'date' type
 
-            # Find dates associated with entity1 and entity2
-            doc = self.nlp(context) if self.nlp else None
-            for date_dict in dates:
-                date_str = f"{date_dict['month']}/{date_dict['day']}/{date_dict['year']}"
-                for sent in doc.sents:
-                    sent_text_lower = sent.text.lower()
-                    if date_str in sent_text_lower:
-                        sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop}
-                        if entity1_lemmas.intersection(sent_lemmas) and not date1:
-                            date1 = date_dict
-                            self.logger.debug(f"[DROP QID:{query_id}] Associated date {date_dict} with entity1 '{entity1}'")
-                        elif entity2_lemmas.intersection(sent_lemmas) and not date2:
-                            date2 = date_dict
-                            self.logger.debug(f"[DROP QID:{query_id}] Associated date {date_dict} with entity2 '{entity2}'")
-                        if date1 and date2:
-                            break
-                if date1 and date2:
-                    break
+            if not self.nlp:
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] spaCy NLP not available for associating dates with entities in temporal_difference. Result may be less accurate.")
+                # Fallback: Try to find any two distinct years if entities cannot be associated
+                if len(dates) >= 2:
+                    years_found = sorted(list(set(int(d.get('year', 0)) for d in dates if d.get('year'))))
+                    if len(years_found) >= 2:
+                        date1_obj = {'year': str(years_found[0])}  # Simplistic assignment
+                        date2_obj = {'year': str(years_found[-1])}
+            else:
+                entity1_lemmas = {token.lemma_.lower() for token in self.nlp(entity1)} | set(query_keywords)
+                entity2_lemmas = {token.lemma_.lower() for token in self.nlp(entity2)} | set(query_keywords)
+                doc = self.nlp(context)
 
-            if not date1 or not date2:
-                self.logger.warning(f"[DROP QID:{query_id}] Could not find dates associated with both entities: Date1={date1}, Date2={date2}")
-                return {'type': 'number', 'value': '0', 'confidence': 0.2, 'error': 'Could not find dates associated with entities'}
+                # Try to associate dates with entities by proximity or co-occurrence in sentences
+                # This part can be complex; for a simpler robust version:
+                # Find all sentences containing entity1 and dates, then entity2 and dates.
 
-            year1 = int(date1.get('year', 0))
-            year2 = int(date2.get('year', 0))
-            if year1 == 0 or year2 == 0:
-                self.logger.warning(f"[DROP QID:{query_id}] Invalid year values: Year1={year1}, Year2={year2}")
-                return {'type': 'number', 'value': '0', 'confidence': 0.2, 'error': 'Invalid year values'}
+                # Simplified association: find first date near entity1, first near entity2
+                # This is a placeholder for more robust association logic.
+                # A better approach involves checking sentence co-occurrence and proximity.
+                # For brevity, we'll assume _find_dates_in_passage gives relevant dates and pick based on order or simple heuristics.
+                # A truly robust solution would require more context or more sophisticated linking.
 
-            difference = abs(year1 - year2)
-            confidence = 0.8
+                # For this example, let's assume if two distinct years are found, we use them.
+                # This is a simplification.
+                year_candidates_e1 = set()
+                year_candidates_e2 = set()
 
-            self.logger.info(f"[DROP QID:{query_id}] TEMPORAL_DIFFERENCE: {entity1}({year1}) vs {entity2}({year2}) = {difference}, Conf={confidence:.2f}")
-            return {'type': 'number', 'value': str(difference), 'confidence': confidence}
+                for date_dict_item in dates:  # Renamed date_dict to date_dict_item
+                    date_str_for_check = f"{date_dict_item.get('month', '')}/{date_dict_item.get('day', '')}/{date_dict_item.get('year', '')}"
+                    for sent in doc.sents:
+                        sent_text_lower = sent.text.lower()
+                        # A simple check for co-occurrence in sentence (can be improved with proximity)
+                        if date_dict_item.get('year') and (
+                                date_str_for_check in sent_text_lower or date_dict_item.get('year') in sent_text_lower):
+                            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop}
+                            if entity1_lemmas.intersection(sent_lemmas):
+                                year_candidates_e1.add(int(date_dict_item['year']))
+                            if entity2_lemmas.intersection(sent_lemmas):
+                                year_candidates_e2.add(int(date_dict_item['year']))
+
+                sorted_years_e1 = sorted(list(year_candidates_e1))
+                sorted_years_e2 = sorted(list(year_candidates_e2))
+
+                if sorted_years_e1 and sorted_years_e2:
+                    # Try to find a distinct pair, e.g. earliest for e1, latest for e2 or vice-versa
+                    # This logic can be complex depending on query phrasing.
+                    # Simplest distinct pair:
+                    if sorted_years_e1[0] != sorted_years_e2[0]:
+                        date1_obj = {'year': str(sorted_years_e1[0])}
+                        date2_obj = {'year': str(sorted_years_e2[0])}
+                    elif len(sorted_years_e2) > 1 and sorted_years_e1[0] != sorted_years_e2[1]:
+                        date1_obj = {'year': str(sorted_years_e1[0])}
+                        date2_obj = {'year': str(sorted_years_e2[1])}
+                    elif len(sorted_years_e1) > 1 and sorted_years_e1[1] != sorted_years_e2[0]:
+                        date1_obj = {'year': str(sorted_years_e1[1])}
+                        date2_obj = {'year': str(sorted_years_e2[0])}
+                    # If still no distinct pair, take the first ones even if same, difference will be 0
+                    if not (date1_obj and date2_obj):
+                        date1_obj = {'year': str(sorted_years_e1[0])}
+                        date2_obj = {'year': str(sorted_years_e2[0])}
+
+            if not date1_obj or not date2_obj:
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] Could not find dates associated with both entities for temporal difference: Date1={date1_obj}, Date2={date2_obj}")
+                return {'type': 'number', 'value': 0, 'confidence': 0.2,
+                        'error': 'Could not find dates associated with entities'}  # Return 0
+
+            year1 = int(date1_obj.get('year', 0))
+            year2 = int(date2_obj.get('year', 0))
+            if year1 == 0 or year2 == 0:  # Check if years are validly parsed
+                self.logger.warning(
+                    f"[DROP QID:{query_id}] Invalid year values for temporal difference: Year1={year1}, Year2={year2}")
+                return {'type': 'number', 'value': 0, 'confidence': 0.2,
+                        'error': 'Invalid year values for difference'}  # Return 0
+
+            difference = abs(year1 - year2)  # difference is already an int
+            confidence = 0.8 if (year1 != 0 and year2 != 0) else 0.3  # Higher confidence if both years are valid
+
+            self.logger.info(
+                f"[DROP QID:{query_id}] TEMPORAL_DIFFERENCE: Entity1='{entity1}' ({year1}) vs Entity2='{entity2}' ({year2}) = {difference}, Conf={confidence:.2f}")
+            # MODIFICATION: Return difference as int
+            return {'type': 'number', 'value': difference, 'confidence': confidence}
 
         except Exception as e:
             self.logger.exception(f"[DROP QID:{query_id}] Error executing TEMPORAL_DIFFERENCE: {str(e)}")
-            return {'type': 'error', 'value': None, 'confidence': 0.0, 'error': f'Exception in temporal_difference: {str(e)}'}
+            # MODIFICATION: Return 0 as int for error
+            return {'type': 'number', 'value': 0, 'confidence': 0.0,
+                    'error': f'Exception in temporal_difference: {str(e)}'}
 
     def _find_associated_numbers(self, context: str, entity_desc: str, query_id: str, query_keywords: List[str] = None) -> List[Union[int, float]]:
         """

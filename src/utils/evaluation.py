@@ -4,13 +4,14 @@ import numpy as np
 import re
 from typing import Dict, List, Optional, Tuple, Union, Set, Any
 import logging
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, OrderedDict
 from sentence_transformers import SentenceTransformer, util
 import torch
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 from scipy import stats
 import string  # For punctuation removal in DROP tokenization
+
 
 class Evaluation:
     """
@@ -69,13 +70,18 @@ class Evaluation:
         self.performance_stats = {
             'total_queries': 0,
             'successful_queries': 0,
+            'skipped_queries': 0,
             'average_time': 0.0,
             'path_performance': defaultdict(list)
         }
 
         # Initialize ROUGE scorer and BLEU smoothing (used only for HotpotQA)
-        self.rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-        self.bleu_smoothing = SmoothingFunction().method1
+        if self.dataset_type != 'drop':
+            self.rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+            self.bleu_smoothing = SmoothingFunction().method1
+        else:
+            self.rouge_scorer = None
+            self.bleu_smoothing = None
 
         # Reasoning metrics (primarily for multi-hop text QA)
         self.reasoning_metrics = {
@@ -91,8 +97,9 @@ class Evaluation:
         # Statistical data for significance tests
         self.statistical_data = defaultdict(list)
 
-        # Cache for semantic similarity to optimize performance
-        self.similarity_cache = {}
+        # Cache for semantic similarity to optimize performance with size limit
+        self.similarity_cache = OrderedDict()
+        self.max_cache_size = 10000
 
     def evaluate(self,
                  predictions: Dict[str, Any],
@@ -109,6 +116,7 @@ class Evaluation:
 
         for query_id, pred_value in predictions.items():
             if query_id not in ground_truths:
+                self.performance_stats['skipped_queries'] += 1
                 self.logger.warning(f"[QID:{query_id}] No ground truth for query")
                 continue
 
@@ -122,7 +130,7 @@ class Evaluation:
                     current_query_metrics.update(drop_eval)
                     # Semantic similarity for spans if applicable
                     if drop_eval['answer_type_drop'] == 'spans' and self.use_semantic_scoring and self.embedder:
-                        pred_spans = pred_value.get('spans', [])
+                        pred_spans = pred_value.get('spans', []) if isinstance(pred_value, dict) else []
                         gt_spans = gt_value.get('spans', [])
                         pred_str = ' '.join(str(s).strip() for s in pred_spans) if pred_spans else ''
                         gt_str = ' '.join(str(s).strip() for s in gt_spans) if gt_spans else ''
@@ -162,7 +170,7 @@ class Evaluation:
                     # F1 (text-based)
                     sem_sim_for_f1 = current_query_metrics.get('semantic_similarity', 0.0)
                     current_query_metrics['f1_text'] = (2.0 * em * sem_sim_for_f1) / (em + sem_sim_for_f1 + 1e-9) if (
-                        em + sem_sim_for_f1) > 0 else 0.0
+                                                                                                                             em + sem_sim_for_f1) > 0 else 0.0
 
                     # Reasoning analysis
                     if reasoning_chain and reasoning_chain.get(query_id):
@@ -209,7 +217,8 @@ class Evaluation:
         metric_values = defaultdict(list)
         for q_metrics in all_query_metrics:
             for key, value in q_metrics.items():
-                if key in ['exact_match', 'f1', 'semantic_similarity', 'rougeL', 'bleu'] and isinstance(value, (int, float)):
+                if key in ['exact_match', 'f1', 'semantic_similarity', 'rougeL', 'bleu'] and isinstance(value,
+                                                                                                        (int, float)):
                     metric_values[key].append(value)
                     self.logger.debug(f"[QID:{q_metrics['query_id']}] Recorded {key}: {value:.2f}")
 
@@ -239,207 +248,312 @@ class Evaluation:
         self.logger.debug(f"Normalized text: '{text[:50]}...'")
         return text.strip()
 
-    def _compute_f1_spans(self, pred_spans: List[str], gold_spans: List[str], query_id: str) -> float:
+    def _compute_f1_spans(self, pred_spans_raw: List[str], gold_spans_raw: List[str], query_id: str) -> float:
         """
         Compute F1 for DROP spans with semantic similarity for partial matches.
-        Updated to deduplicate spans before comparison.
+        Uses normalized span text for robust comparison.
         """
         try:
-            # Normalize and deduplicate spans while preserving order
-            seen = set()
-            pred_set = set()
-            pred_list = []
-            for s in pred_spans:
-                if not str(s).strip():
-                    continue
-                norm_s = self._normalize_drop_answer_str(str(s), query_id)
-                if norm_s not in seen:
-                    seen.add(norm_s)
-                    pred_set.add(norm_s)
-                    pred_list.append(norm_s)
+            # Normalize and deduplicate spans while preserving order for semantic scoring if needed (not for exact set for F1)
+            # For F1 based on token overlap, the set of normalized stringsInherited
+            pred_set_normalized = {self._normalize_drop_answer_str(str(s), query_id) for s in pred_spans_raw if
+                                   str(s).strip()}
+            gt_set_normalized = {self._normalize_drop_answer_str(str(s), query_id) for s in gold_spans_raw if
+                                 str(s).strip()}
 
-            seen = set()
-            gt_set = set()
-            gt_list = []
-            for s in gold_spans:
-                if not str(s).strip():
-                    continue
-                norm_s = self._normalize_drop_answer_str(str(s), query_id)
-                if norm_s not in seen:
-                    seen.add(norm_s)
-                    gt_set.add(norm_s)
-                    gt_list.append(norm_s)
+            self.logger.debug(
+                f"[QID:{query_id}] F1 Spans: Pred normalized set: {pred_set_normalized}, Gold normalized set: {gt_set_normalized}")
 
-            self.logger.debug(f"[QID:{query_id}] Pred spans (deduplicated): {pred_set}, Gold spans (deduplicated): {gt_set}")
-
-            if not pred_set and not gt_set:
-                self.logger.debug(f"[QID:{query_id}] Both pred and gold spans empty: F1=1.0")
+            if not pred_set_normalized and not gt_set_normalized:  # Both empty
+                self.logger.debug(f"[QID:{query_id}] Both pred and gold spans empty after normalization: F1=1.0")
                 return 1.0
-            if not pred_set or not gt_set:
-                self.logger.debug(f"[QID:{query_id}] One set empty: F1=0.0")
+            if not pred_set_normalized or not gt_set_normalized:  # One is empty, the other is not
+                self.logger.debug(f"[QID:{query_id}] One span set empty after normalization, other not: F1=0.0")
                 return 0.0
 
-            # Exact match component
-            exact_matches = len(pred_set.intersection(gt_set))
-            exact_precision = exact_matches / len(pred_set) if pred_set else 0.0
-            exact_recall = exact_matches / len(gt_set) if gt_set else 0.0
+            # --- Exact Match Component for F1 (Official DROP F1 is token-based, but this is span-set F1) ---
+            # This method as written calculates F1 based on exact matches of *normalized spans*.
+            # The official DROP F1 is more complex (token-level overlap).
+            # The current implementation calculates a span-level F1.
 
-            # Semantic similarity component
-            semantic_score = 0.0
-            if self.embedder and self.use_semantic_scoring:
-                for pred_span in pred_list:
-                    max_sim = 0.0
-                    for gt_span in gt_list:
-                        sim = self._calculate_semantic_similarity(pred_span, gt_span, query_id)
-                        max_sim = max(max_sim, sim)
-                    semantic_score += max_sim / len(pred_list) if pred_list else 0.0
-                self.logger.debug(f"[QID:{query_id}] Semantic similarity score for spans: {semantic_score:.2f}")
-            else:
-                semantic_score = exact_precision  # Fallback to exact precision
+            common_spans = pred_set_normalized.intersection(gt_set_normalized)
+            num_common = len(common_spans)
 
-            # Combine exact and semantic scores
-            precision = 0.7 * exact_precision + 0.3 * semantic_score
-            recall = exact_recall  # Recall based on exact matches
+            precision = num_common / len(pred_set_normalized) if pred_set_normalized else 0.0
+            recall = num_common / len(gt_set_normalized) if gt_set_normalized else 0.0
+
             if precision + recall == 0:
-                self.logger.debug(f"[QID:{query_id}] Precision+Recall=0: F1=0.0")
-                return 0.0
+                f1 = 0.0
+            else:
+                f1 = 2 * (precision * recall) / (precision + recall)
 
-            f1 = 2 * (precision * recall) / (precision + recall)
-            self.logger.debug(f"[QID:{query_id}] F1 for spans: {f1:.2f} (Precision: {precision:.2f}, Recall: {recall:.2f})")
-            return f1
+            self.logger.debug(
+                f"[QID:{query_id}] Span-level F1: {f1:.3f} (Precision: {precision:.3f}, Recall: {recall:.3f}, Common: {num_common})")
+
+            # --- Semantic Similarity Component (Optional, if you want to augment F1) ---
+            # The prompt for this method in Evaluation.py [source 1804] mentions "semantic similarity for partial matches".
+            # This part makes it a custom F1, not the standard token-based DROP F1.
+            semantic_score_precision = 0.0
+            if self.embedder and self.use_semantic_scoring and pred_set_normalized and gt_set_normalized:
+                # For precision: for each pred_span, find max similarity to any gt_span
+                # This is a simplified semantic precision. True partial match F1 is more involved.
+                # Convert sets to lists for iteration if semantic scoring needs original case or order.
+                pred_list_for_sem = [s for s in pred_spans_raw if
+                                     self._normalize_drop_answer_str(s, query_id) in pred_set_normalized]
+                gt_list_for_sem = [s for s in gold_spans_raw if
+                                   self._normalize_drop_answer_str(s, query_id) in gt_set_normalized]
+
+                total_sim_for_precision = 0.0
+                for pred_span in pred_list_for_sem:
+                    max_sim_to_gt = 0.0
+                    for gt_span in gt_list_for_sem:
+                        sim = self._calculate_semantic_similarity(pred_span, gt_span,
+                                                                  query_id)  # Uses original case for embedding
+                        if sim > max_sim_to_gt:
+                            max_sim_to_gt = sim
+                    total_sim_for_precision += max_sim_to_gt
+                semantic_score_precision = total_sim_for_precision / len(
+                    pred_list_for_sem) if pred_list_for_sem else 0.0
+                self.logger.debug(
+                    f"[QID:{query_id}] Avg Max Semantic Sim for Precision (Pred to GT): {semantic_score_precision:.3f}")
+
+                # Hybrid F1 (example: weighted average of exact precision and semantic precision)
+                hybrid_precision = 0.7 * precision + 0.3 * semantic_score_precision
+                if hybrid_precision + recall == 0:
+                    f1_hybrid = 0.0
+                else:
+                    f1_hybrid = 2 * (hybrid_precision * recall) / (hybrid_precision + recall)
+                self.logger.debug(
+                    f"[QID:{query_id}] Hybrid Span F1 (with semantic precision): {f1_hybrid:.3f} (Hybrid Precision: {hybrid_precision:.3f})")
+                return f1_hybrid  # Return this hybrid F1 if desired
+
+            return f1  # Return the exact span-set F1
 
         except Exception as e:
-            self.logger.error(f"[QID:{query_id}] Error computing F1 for spans: {str(e)}")
+            self.logger.error(f"[QID:{query_id}] Error computing F1 for spans: {str(e)}", exc_info=True)
             return 0.0
 
-    # --- DROP Specific Evaluation Methods ---
     def _evaluate_drop_answer(self,
-                             pred: Any,
-                             gt: Dict[str, Any],
-                             qid: str
-                             ) -> Dict[str, float]:
+                              pred: Any,  # Prediction from the system
+                              gt: Dict[str, Any],  # Ground truth
+                              qid: str
+                              ) -> Dict[str, Any]:  # Changed return to Any from float for metrics dict
         """
         Evaluate a single DROP answer, comparing number, spans, or date fields.
-        Enhanced to handle structured answers and edge cases robustly.
-        Updated to normalize predictions and remove ROUGE-L/BLEU for DROP.
+        Prediction 'pred' is expected to be a dictionary for valid DROP answers.
         """
+        # Initialize metrics for this query
+        query_eval_metrics = {'exact_match': 0.0, 'f1': 0.0, 'answer_type_drop': 'invalid_pred_format'}
+
         try:
-            # Handle invalid or error predictions
-            if not isinstance(pred, dict) or pred.get('error'):
-                self.logger.debug(f"[QID:{qid}] Invalid prediction: {pred}")
-                return {'exact_match': 0.0, 'f1': 0.0, 'answer_type_drop': 'invalid'}
+            # --- Validate Prediction Format ---
+            if not isinstance(pred, dict):
+                self.logger.warning(
+                    f"[QID:{qid}] Invalid prediction format for DROP: Expected dict, got {type(pred)}. Value: '{str(pred)[:100]}'")
+                # If pred is a string indicating error from upstream, capture that
+                if isinstance(pred, str) and pred.lower().startswith("error:"):
+                    query_eval_metrics['rationale'] = f"Upstream error: {pred}"
+                return query_eval_metrics  # Return default 0 scores
 
+            # Ensure basic DROP keys exist in pred, even if empty, for consistent processing
+            # This should ideally be guaranteed by the output of HybridIntegrator/_create_drop_answer_obj
+            pred.setdefault('number', "")
+            pred.setdefault('spans', [])
+            pred.setdefault('date', {'day': '', 'month': '', 'year': ''})
+            pred.setdefault('status', 'unknown')  # Status from the prediction object itself
+
+            # --- Validate Ground Truth Format ---
             if not isinstance(gt, dict):
-                self.logger.debug(f"[QID:{qid}] Invalid ground truth format: {gt}")
-                return {'exact_match': 0.0, 'f1': 0.0, 'answer_type_drop': 'invalid'}
+                self.logger.error(
+                    f"[QID:{qid}] Invalid ground truth format for DROP: Expected dict, got {type(gt)}. Value: '{str(gt)[:100]}'")
+                query_eval_metrics['answer_type_drop'] = 'invalid_gt_format'
+                return query_eval_metrics
 
-            # Normalize prediction format to match expected DROP structure
-            normalized_pred = {
-                'number': pred.get('number', ''),
-                'spans': pred.get('spans', []),
-                'date': pred.get('date', {'day': '', 'month': '', 'year': ''}),
-                'status': pred.get('status', 'success'),
-                'confidence': pred.get('confidence', 0.0),
-                'rationale': pred.get('rationale', ''),
-                'type': pred.get('type', '')
-            }
+            # --- Determine Ground Truth Answer Type ---
+            gt_type: Optional[str] = None
+            if gt.get('number') is not None and str(gt.get('number')).strip() != "":  # Check if number has a value
+                gt_type = 'number'
+            elif gt.get('spans') is not None and (isinstance(gt.get('spans'), list) and any(
+                    str(s).strip() for s in gt.get('spans'))):  # Check if spans list is not empty and has content
+                gt_type = 'spans'
+            elif gt.get('date') and isinstance(gt.get('date'), dict) and any(
+                    str(v).strip() for v in gt['date'].values()):  # Check if any date field has a value
+                gt_type = 'date'
 
-            # Determine answer type based on ground truth
-            if gt.get('number'):
-                answer_type = 'number'
-            elif gt.get('spans'):
-                answer_type = 'spans'
-            elif gt.get('date') and any(gt['date'].values()):
-                answer_type = 'date'
-            else:
-                self.logger.debug(f"[QID:{qid}] Invalid ground truth format: {gt}")
-                return {'exact_match': 0.0, 'f1': 0.0, 'answer_type_drop': 'invalid'}
+            if gt_type is None:
+                self.logger.warning(
+                    f"[QID:{qid}] Could not determine a valid answer type from ground truth: {gt}. Possibly an empty GT.")
+                # If GT expects nothing, and prediction also provides nothing, it's an EM.
+                is_pred_empty_semantically = (not pred.get('number') and \
+                                              not any(s for s in pred.get('spans', []) if s) and \
+                                              not any(v for v in pred.get('date', {}).values() if v))
+                if is_pred_empty_semantically:
+                    query_eval_metrics.update({'exact_match': 1.0, 'f1': 1.0, 'answer_type_drop': 'empty_match'})
+                else:  # GT is empty, but prediction is not
+                    query_eval_metrics['answer_type_drop'] = 'gt_empty_pred_not'
+                return query_eval_metrics
 
-            # Exact Match and F1
-            if answer_type == 'number':
-                em = float(self._are_drop_values_equivalent(normalized_pred, gt, 'number', qid))
-                f1 = em  # F1 same as EM for numbers
-            elif answer_type == 'spans':
-                em = float(self._are_drop_values_equivalent(normalized_pred, gt, 'spans', qid))
-                f1 = self._compute_f1_spans(normalized_pred.get('spans', []), gt.get('spans', []), qid)
-            elif answer_type == 'date':
-                em = float(self._are_drop_values_equivalent(normalized_pred, gt, 'date', qid))
-                f1 = em  # F1 same as EM for dates
-            else:
-                self.logger.debug(f"[QID:{qid}] Unsupported answer type: {answer_type}")
+            query_eval_metrics['answer_type_drop'] = gt_type  # Store determined GT type
+
+            # --- Perform Evaluation based on GT Type ---
+            # pred['number'] should be native int/float by now due to upstream fixes.
+            # pred['spans'] should be List[str].
+            # pred['date'] should be Dict[str,str].
+
+            if gt_type == 'number':
+                em = float(self._are_drop_values_equivalent(pred, gt, 'number', qid))
+                f1 = em  # F1 is same as EM for numbers in DROP
+            elif gt_type == 'spans':
+                em = float(
+                    self._are_drop_values_equivalent(pred, gt, 'spans', qid))  # Exact set match of normalized spans
+                # For F1 of spans, use the more sophisticated _compute_f1_spans
+                # which might incorporate semantic similarity or just be exact span-set F1
+                f1 = self._compute_f1_spans(pred.get('spans', []), gt.get('spans', []), qid)
+            elif gt_type == 'date':
+                em = float(self._are_drop_values_equivalent(pred, gt, 'date', qid))
+                f1 = em  # F1 is same as EM for dates
+            else:  # Should not be reached if gt_type is determined above
+                self.logger.error(
+                    f"[QID:{qid}] Internal error: Unhandled gt_type '{gt_type}' in _evaluate_drop_answer.")
                 em, f1 = 0.0, 0.0
-                answer_type = 'unknown'
+                query_eval_metrics['answer_type_drop'] = 'internal_error_unknown_gt_type'
 
-            self.logger.debug(f"[QID:{qid}] DROP evaluation: Pred={normalized_pred}, GT={gt}, EM={em:.2f}, F1={f1:.2f}, Type={answer_type}")
-            return {'exact_match': em, 'f1': f1, 'answer_type_drop': answer_type}
+            query_eval_metrics['exact_match'] = em
+            query_eval_metrics['f1'] = f1
+
+            self.logger.debug(
+                f"[QID:{qid}] DROP evaluation: Pred='{str(pred)[:100]}...', GT='{str(gt)[:100]}...', "
+                f"EM={em:.3f}, F1={f1:.3f}, AnswerType(GT)='{gt_type}'"
+            )
+            return query_eval_metrics
 
         except Exception as e:
-            self.logger.error(f"[QID:{qid}] Error evaluating DROP answer: {str(e)}")
-            return {'exact_match': 0.0, 'f1': 0.0, 'answer_type_drop': 'error'}
+            self.logger.error(f"[QID:{qid}] Critical error evaluating DROP answer: {str(e)}. Pred: '{str(pred)[:100]}'",
+                              exc_info=True)
+            # Return default 0 scores with error type
+            query_eval_metrics['answer_type_drop'] = 'evaluation_exception'
+            return query_eval_metrics
 
-    def _are_drop_values_equivalent(self, obj1: Dict[str, Any], obj2: Dict[str, Any], value_type: str, qid: str) -> bool:
+    def _are_drop_values_equivalent(self, obj1: Dict[str, Any], obj2: Dict[str, Any], value_type: str,
+                                    qid: str) -> bool:
         """
         Compare DROP answer values for equivalence.
-        Consistent with hybrid_integrator.py for number, spans, and date comparison.
+        obj1 is prediction, obj2 is ground truth.
         """
         try:
             if value_type == "number":
-                n1 = self._normalize_drop_number_for_comparison(obj1.get("number"), qid)
-                n2 = self._normalize_drop_number_for_comparison(obj2.get("number"), qid)
-                if n1 is None or n2 is None:
-                    self.logger.debug(f"[QID:{qid}] Number comparison failed: One or both values are None (Pred: {obj1.get('number')}, GT: {obj2.get('number')})")
+                # Values from the prediction (obj1) and ground truth (obj2) dicts
+                val1_raw = obj1.get("number")
+                val2_raw = obj2.get("number")
+
+                n1 = self._normalize_drop_number_for_comparison(val1_raw, qid)
+                n2 = self._normalize_drop_number_for_comparison(val2_raw, qid)
+
+                if n1 is None and n2 is None:
+                    # If both normalize to None, consider them equivalent only if their raw forms were also similar
+                    # (e.g. both empty string, or both explicitly "N/A" if that was a convention)
+                    # For now, if both fail normalization, they aren't equivalent valid numbers for scoring.
+                    # But if raw were both '', it is an EM if GT is also '' expecting nothing.
+                    # This logic is tricky: if GT expects "no number" and pred gives "no number" = True.
+                    # If GT expects a number, and pred gives "no number" = False.
+                    # The current logic in _evaluate_drop_answer implies that if gt_type is 'number', a number is expected.
+                    raw1_is_empty_like = (val1_raw == '' or val1_raw is None)
+                    raw2_is_empty_like = (val2_raw == '' or val2_raw is None)
+                    if raw1_is_empty_like and raw2_is_empty_like:
+                        self.logger.debug(
+                            f"[QID:{qid}] Number comparison: Both raw values indicate empty. Result: True")
+                        return True
+                    self.logger.debug(
+                        f"[QID:{qid}] Number comparison: Both normalized to None, but raw values differ or not both empty. Pred raw: '{val1_raw}', GT raw: '{val2_raw}'. Result: False")
                     return False
-                result = abs(n1 - n2) < 1e-6
-                self.logger.debug(f"[QID:{qid}] Number comparison: {n1} == {n2} -> {result}")
+                if n1 is None or n2 is None:  # Only one normalized successfully
+                    self.logger.debug(
+                        f"[QID:{qid}] Number comparison: One normalized to None. Pred norm: {n1}, GT norm: {n2}. Pred raw: '{val1_raw}', GT raw: '{val2_raw}'. Result: False")
+                    return False
+
+                # Both n1 and n2 are valid floats here
+                result = abs(n1 - n2) < 1e-6  # Compare floats
+                self.logger.debug(
+                    f"[QID:{qid}] Number comparison: {n1} (from '{val1_raw}') == {n2} (from '{val2_raw}') -> {result}")
                 return result
+
             elif value_type == "spans":
-                pred_spans = [self._normalize_drop_answer_str(str(s), qid) for s in obj1.get("spans", []) if str(s).strip()]
-                gt_spans = [self._normalize_drop_answer_str(str(s), qid) for s in obj2.get("spans", []) if str(s).strip()]
-                result = set(pred_spans) == set(gt_spans)
-                self.logger.debug(f"[QID:{qid}] Span comparison: {pred_spans} == {gt_spans} -> {result}")
+                # Spans are lists of strings. Normalize each string for comparison.
+                pred_spans_raw = obj1.get("spans", [])
+                gt_spans_raw = obj2.get("spans", [])
+
+                # Use the _normalize_drop_answer_str for each span string
+                pred_spans_normalized = {self._normalize_drop_answer_str(str(s), qid) for s in pred_spans_raw if
+                                         str(s).strip()}
+                gt_spans_normalized = {self._normalize_drop_answer_str(str(s), qid) for s in gt_spans_raw if
+                                       str(s).strip()}
+
+                result = pred_spans_normalized == gt_spans_normalized
+                self.logger.debug(
+                    f"[QID:{qid}] Span comparison: Normalized Pred {pred_spans_normalized} == Normalized GT {gt_spans_normalized} -> {result}")
                 return result
+
             elif value_type == "date":
                 pred_date = obj1.get("date", {})
                 gt_date = obj2.get("date", {})
-                result = all(str(pred_date.get(k, '')).strip() == str(gt_date.get(k, '')).strip() for k in ['day', 'month', 'year'])
-                self.logger.debug(f"[QID:{qid}] Date comparison: {pred_date} == {gt_date} -> {result}")
+
+                # Ensure comparison on stripped string versions of day, month, year
+                result = all(
+                    str(pred_date.get(k, '')).strip() == str(gt_date.get(k, '')).strip()
+                    for k in ['day', 'month', 'year']
+                )
+                self.logger.debug(f"[QID:{qid}] Date comparison: Pred {pred_date} == GT {gt_date} -> {result}")
                 return result
-            self.logger.debug(f"[QID:{qid}] Unsupported value type for comparison: {value_type}")
+
+            self.logger.debug(f"[QID:{qid}] Unsupported value type for DROP comparison: {value_type}")
             return False
         except Exception as e:
-            self.logger.debug(f"[QID:{qid}] Error comparing DROP values: {str(e)}")
+            self.logger.error(f"[QID:{qid}] Error comparing DROP values (type '{value_type}'): {str(e)}", exc_info=True)
             return False
 
     def _normalize_drop_number_for_comparison(self, value_str: Optional[Any], qid: str) -> Optional[float]:
         """
-        Normalize number strings for comparison.
+        Normalize number strings/values for comparison, returning float or None.
         Consistent with hybrid_integrator.py.
-        Updated to convert whole numbers to integers for consistent comparison.
         """
         if value_str is None:
-            self.logger.debug(f"[QID:{qid}] Number value is None, cannot normalize")
             return None
         try:
+            if isinstance(value_str, (int, float)):  # If already a number
+                return float(value_str)
+
             s = str(value_str).replace(",", "").strip().lower()
+            if not s:  # If empty after cleaning
+                self.logger.debug(f"[QID:{qid}] Number value '{value_str}' became empty after cleaning.")
+                return None
+
             words = {
                 "zero": 0.0, "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
                 "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0,
                 "ten": 10.0
             }
-            result = words.get(s, float(s))
-            # Convert to integer if the number is a whole number for consistency
-            if result.is_integer():
-                result = float(int(result))
+            if s in words:
+                result = words[s]
+            elif re.fullmatch(r'-?\d+(\.\d+)?', s):  # Regex to match float/int strings
+                result = float(s)
+            else:
+                self.logger.debug(
+                    f"[QID:{qid}] Could not normalize '{value_str}' (cleaned: '{s}') to a recognized number format or word.")
+                return None
+
+            # No need to convert to int if is_integer, as comparison will be float vs float.
+            # The main goal is a canonical float representation for comparison.
+            # Example: "4" -> 4.0, "4.0" -> 4.0.
             self.logger.debug(f"[QID:{qid}] Normalized number: '{value_str}' -> {result}")
             return result
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             self.logger.debug(f"[QID:{qid}] Error normalizing number '{value_str}': {str(e)}")
             return None
 
     def _normalize_drop_answer_str(self, text: str, qid: str) -> str:
         """
         Normalize DROP answer strings for span comparison.
-        Preserve essential content while removing irrelevant punctuation.
+        Preserves hyphens to maintain meaningful compound words (e.g., 'well-known').
         """
         text = str(text).lower()
         # Remove specific punctuation but preserve meaningful characters like hyphens
@@ -451,8 +565,7 @@ class Evaluation:
 
     def _tokenize_drop(self, text: str, qid: str) -> List[str]:
         """
-        Tokenize for DROP F1 calculation.
-        Used only for HotpotQA BLEU computation.
+        Tokenize for DROP F1 twarzy. Used only for HotpotQA BLEU computation.
         """
         tokens = self._normalize_drop_answer_str(text, qid).split()
         self.logger.debug(f"[QID:{qid}] Tokenized text: {tokens}")
@@ -476,7 +589,6 @@ class Evaluation:
             self.logger.error(f"[QID:{qid}] Error stringifying DROP answer: {str(e)}")
             return ''
 
-    # --- HotpotQA / Text-based QA Methods ---
     def _calculate_semantic_similarity(self, prediction: str, ground_truth: str, qid: str) -> float:
         """
         Calculate semantic similarity using sentence embeddings.
@@ -500,6 +612,8 @@ class Evaluation:
             similarity = util.cos_sim(pred_emb, truth_emb).item()
             similarity = max(0.0, min(1.0, similarity))
             self.similarity_cache[cache_key] = similarity
+            if len(self.similarity_cache) >= self.max_cache_size:
+                self.similarity_cache.popitem(last=False)
             self.logger.debug(f"[QID:{qid}] Semantic similarity: {similarity:.2f}")
             return similarity
         except Exception as e:
@@ -508,8 +622,7 @@ class Evaluation:
 
     def _calculate_rouge_l(self, prediction: str, ground_truth: str, qid: str) -> float:
         """
-        Calculate ROUGE-L score.
-        Used only for HotpotQA evaluation.
+        Calculate ROUGE-L score. Used only for HotpotQA evaluation.
         """
         try:
             prediction_str = str(prediction)
@@ -527,8 +640,7 @@ class Evaluation:
 
     def _calculate_bleu(self, prediction: str, ground_truth: str, qid: str) -> float:
         """
-        Calculate BLEU score.
-        Used only for HotpotQA evaluation.
+        Calculate BLEU score. Used only for HotpotQA evaluation.
         """
         try:
             prediction_str = str(prediction)
@@ -574,14 +686,18 @@ class Evaluation:
             return 0.0
 
     def evaluate_reasoning_quality(self,
-                                  prediction: str,
-                                  reasoning_path: List[Dict],
-                                  supporting_facts: Optional[List[Tuple[str, int]]] = None,
-                                  qid: str = "unknown"
-                                  ) -> Dict[str, float]:
+                                   prediction: str,
+                                   reasoning_path: List[Dict],
+                                   supporting_facts: Optional[List[Tuple[str, int]]] = None,
+                                   qid: str = "unknown"
+                                   ) -> Dict[str, float]:
         """
         Evaluate multi-hop reasoning quality (HotpotQA).
         """
+        if self.dataset_type == 'drop':
+            self.logger.debug(f"[QID:{qid}] Reasoning quality evaluation not applicable for DROP dataset")
+            return {'step_accuracy': 0.0, 'fact_coverage': 0.0, 'path_coherence': 0.0, 'inference_depth': 0.0}
+
         metrics = {}
         if not self.use_semantic_scoring or not self.embedder:
             self.logger.debug(f"[QID:{qid}] Semantic scoring disabled for reasoning quality")
@@ -612,10 +728,10 @@ class Evaluation:
         return metrics
 
     def _evaluate_step_accuracy(self,
-                               reasoning_path: List[Dict],
-                               supporting_facts: Optional[List[Tuple[str, int]]],
-                               qid: str
-                               ) -> float:
+                                reasoning_path: List[Dict],
+                                supporting_facts: Optional[List[Tuple[str, int]]],
+                                qid: str
+                                ) -> float:
         """
         Evaluate accuracy of each step vs. supporting facts (HotpotQA).
         """
@@ -645,10 +761,10 @@ class Evaluation:
         return avg_score
 
     def _calculate_fact_coverage(self,
-                                reasoning_path: List[Dict],
-                                supporting_facts: Optional[List[Tuple[str, int]]],
-                                qid: str
-                                ) -> float:
+                                 reasoning_path: List[Dict],
+                                 supporting_facts: Optional[List[Tuple[str, int]]],
+                                 qid: str
+                                 ) -> float:
         """
         Calculate fact coverage for HotpotQA reasoning paths.
         """
@@ -680,6 +796,7 @@ class Evaluation:
         self.logger.debug(f"[QID:{qid}] Fact coverage: {coverage:.2f} ({covered}/{total_valid_facts})")
         return coverage
 
+
     def _evaluate_path_coherence(self, reasoning_path: List[Dict], qid: str) -> float:
         """
         Evaluate semantic coherence among consecutive steps (HotpotQA).
@@ -698,18 +815,19 @@ class Evaluation:
                 continue
             sim = self._calculate_semantic_similarity(step_text_1, step_text_2, qid)
             sims.append(sim)
-            self.logger.debug(f"[QID:{qid}] Coherence between steps {i} and {i+1}: {sim:.2f}")
+            self.logger.debug(f"[QID:{qid}] Coherence between steps {i} and {i + 1}: {sim:.2f}")
 
         avg_coherence = float(np.mean(sims)) if sims else 0.0
         self.logger.debug(f"[QID:{qid}] Average path coherence: {avg_coherence:.2f}")
         return avg_coherence
 
+
     def calculate_ablation_metrics(self,
-                                  component: str,
-                                  base_performance: Dict[str, float],
-                                  ablated_performance: Dict[str, float],
-                                  qid: str = "unknown"
-                                  ) -> Dict[str, float]:
+                                   component: str,
+                                   base_performance: Dict[str, float],
+                                   ablated_performance: Dict[str, float],
+                                   qid: str = "unknown"
+                                   ) -> Dict[str, float]:
         """
         Compare baseline vs. ablated performance for a given component.
         """
@@ -730,6 +848,7 @@ class Evaluation:
         self.ablation_results[component].append(impact_metrics)
         return impact_metrics
 
+
     def record_metric(self, metric_name: str, value: float, qid: str = "unknown"):
         """
         Store a single metric value for significance testing.
@@ -739,6 +858,7 @@ class Evaluation:
             self.logger.debug(f"[QID:{qid}] Recorded metric {metric_name}: {value}")
         else:
             self.logger.warning(f"[QID:{qid}] Non-numerical value '{value}' for metric '{metric_name}'. Skipping.")
+
 
     def calculate_statistical_significance(self, qid: str = "unknown") -> Dict[str, Dict[str, float]]:
         """

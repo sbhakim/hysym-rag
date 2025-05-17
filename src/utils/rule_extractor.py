@@ -11,6 +11,9 @@ from transformers import pipeline
 from spacy.tokens import Token
 import torch
 from sentence_transformers import SentenceTransformer, util
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
 
 from src.utils.dimension_manager import DimensionalityManager
 
@@ -334,7 +337,6 @@ class RuleExtractor:
             for qa_pair in passage_content['qa_pairs']:
                 if not isinstance(qa_pair, dict):
                     logger.debug(f"Skipping QA pair in passage {passage_id}: Expected dict, got {type(qa_pair)}")
-                    continue
                 if 'answer' not in qa_pair:
                     logger.debug(f"Skipping QA pair in passage {passage_id}: Missing 'answer' key")
                     continue
@@ -470,10 +472,126 @@ class RuleExtractor:
         logger.info(f"Processed {processed_questions} questions. Found {triples_found} semantic triples. Generated {len(drop_rules)} rules before filtering. Retained {len(filtered_rules)} rules after filtering (min_support={min_support})")
         return filtered_rules
 
+    def _train_rule_classifier(self, drop_json_path: str, subset_size: int = 100) -> List[Dict[str, Any]]:
+        """
+        Train a rule classifier for DROP dataset using a labeled subset to improve rule specificity.
+        Generates rules based on question patterns and answer types.
+        """
+        logger.info(f"Training rule classifier with subset_size={subset_size} from {drop_json_path}")
+        rules = []
+        try:
+            # Load DROP dataset
+            with open(drop_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                logger.error(f"Expected DROP dataset to be a dictionary, got type {type(data)}")
+                return []
+
+            # Collect training data
+            questions = []
+            labels = []
+            valid_pairs = 0
+            for passage_id, passage_content in data.items():
+                if valid_pairs >= subset_size:
+                    break
+                if not isinstance(passage_content, dict) or 'qa_pairs' not in passage_content:
+                    continue
+                for qa_pair in passage_content['qa_pairs']:
+                    if valid_pairs >= subset_size:
+                        break
+                    if not isinstance(qa_pair, dict) or 'question' not in qa_pair or 'answer' not in qa_pair:
+                        continue
+                    question = qa_pair['question'].lower()
+                    answer = qa_pair['answer']
+                    if not isinstance(answer, dict):
+                        continue
+
+                    # Determine operation type based on triggers and answer
+                    operation = None
+                    for op, triggers in self.drop_triggers.items():
+                        if any(trigger in question for trigger in triggers):
+                            if (op == 'count' and answer.get('number')) or \
+                               (op == 'extreme_value' and (answer.get('number') or answer.get('spans'))) or \
+                               (op == 'difference' and answer.get('number')) or \
+                               (op == 'entity_span' and answer.get('spans')) or \
+                               (op == 'date' and answer.get('date')):
+                                operation = op
+                                break
+                    if not operation:
+                        continue
+
+                    questions.append(question)
+                    labels.append(operation)
+                    valid_pairs += 1
+
+            if not questions:
+                logger.warning("No valid QA pairs found for training rule classifier")
+                return []
+
+            # Train classifier
+            classifier = Pipeline([
+                ('tfidf', TfidfVectorizer(max_features=1000, stop_words='english')),
+                ('clf', LogisticRegression(multi_class='multinomial', max_iter=1000))
+            ])
+            classifier.fit(questions, labels)
+            logger.info(f"Trained rule classifier on {len(questions)} QA pairs")
+
+            # Generate rules based on classifier predictions
+            operation_types = ['count', 'extreme_value', 'difference', 'entity_span', 'date']
+            for question in questions[:subset_size]:
+                doc = nlp(question)
+                predicted_op = classifier.predict([question])[0]
+                if predicted_op not in operation_types:
+                    continue
+
+                # Extract entity or temporal constraint
+                entity = None
+                temporal = None
+                for nc in doc.noun_chunks:
+                    if nc.text in self.temporal_phrases:
+                        temporal = nc.text
+                    elif nc.root.dep_ in ('dobj', 'nsubj', 'attr'):
+                        entity = nc.text
+
+                if not entity:
+                    entity = 'entity'  # Generic placeholder
+
+                # Generate pattern based on operation
+                if predicted_op == 'count':
+                    pattern = rf"\bhow many\s+{re.escape(entity)}s?\b"
+                elif predicted_op == 'extreme_value':
+                    pattern = rf"\b(first|last|longest|shortest)\s+{re.escape(entity)}s?\b"
+                elif predicted_op == 'difference':
+                    pattern = rf"\b(difference between|how many more|how many less)\s+{re.escape(entity)}s?\b"
+                elif predicted_op == 'entity_span':
+                    pattern = rf"\b(who|which team|what player)\s+{re.escape(entity)}s?\b"
+                elif predicted_op == 'date':
+                    pattern = rf"\b(when|what date|which year)\s+{re.escape(entity)}s?\b"
+                else:
+                    continue
+
+                rule = {
+                    'type': predicted_op,
+                    'pattern': pattern,
+                    'entity': entity,
+                    'temporal_constraint': temporal,
+                    'support': 1,
+                    'confidence': classifier.predict_proba([question])[0][operation_types.index(predicted_op)]
+                }
+                rules.append(rule)
+                logger.debug(f"Generated rule from classifier: Type={predicted_op}, Pattern='{pattern}', Entity='{entity}', Temporal='{temporal}', Confidence={rule['confidence']}")
+
+            logger.info(f"Generated {len(rules)} rules from rule classifier")
+            return rules
+
+        except Exception as e:
+            logger.error(f"Error training rule classifier: {str(e)}")
+            return []
+
     def extract_rules_from_drop(self, drop_json_path: str, questions: List[str], passages: List[str],
                                 min_support: int = 1) -> List[Dict[str, Any]]:
         """
-        Extract rules for DROP dataset using multiple sophisticated strategies.
+        Extract rules for DROP dataset using multiple sophisticated strategies, including a trained rule classifier.
         Args:
             drop_json_path: Path to DROP JSON file containing passages and QA pairs.
             questions: List of DROP questions.
@@ -516,6 +634,16 @@ class RuleExtractor:
                 by_key[key] = p
         rules.extend(semantic_rules)
         logger.info(f"Semantic rules extracted: {len(semantic_rules)} rules")
+
+        # Machine learning-based rules
+        classifier_rules = self._train_rule_classifier(drop_json_path, subset_size=100)
+        for p in classifier_rules:
+            key = (p['type'], p['pattern'])
+            counts[key] += p['support']
+            if key not in by_key:
+                by_key[key] = p
+        rules.extend(classifier_rules)
+        logger.info(f"Classifier-based rules extracted: {len(classifier_rules)} rules")
 
         # Deduplicate and filter rules by (type, pattern)
         final_rules = []

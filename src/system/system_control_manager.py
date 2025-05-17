@@ -16,7 +16,7 @@ try:
     # It's now defined in src.system.response_aggregator.py and imported via src.system.__init__.py
     from .system_logic_helpers import _determine_reasoning_path_logic, _optimize_thresholds_logic
 except ImportError:
-    # Fallback if run directly or structure differs
+    # Fallback if run directly or structure differsfv
     import sys
     import os
 
@@ -93,123 +93,194 @@ class SystemControlManager:
             f"Processing query_id: {query_id}, Query: '{query[:50]}...', Dataset: {dataset_type or 'unknown'}")
         self.performance_metrics['total_queries'] += 1
         attempts = 0
+        # Ensure max_retries is non-negative; self.error_retry_limit is already max(val, 0) in __init__
         max_retries = self.error_retry_limit
-        reasoning_path_taken = 'unknown'
+        reasoning_path_taken = 'unknown_initial'  # More specific initial value
 
         initial_resources = self.resource_manager.check_resources()
         overall_start_time = time.time()
+        # Store the full result object from the last successful or failed attempt within the loop
+        last_attempt_result_obj: Optional[Any] = None
 
         while attempts <= max_retries:
             attempt_start_time = time.time()
-            try:
-                self._optimize_resources()
+            current_attempt_final_result_obj: Optional[Any] = None  # Result of this specific attempt
+            current_attempt_reasoning_path: str = 'unknown_this_attempt'
 
-                final_result_obj, reasoning_path_taken = self._timed_process_query(
+            try:
+                self._optimize_resources()  # Ensure this is lightweight or conditional
+
+                # _timed_process_query returns (raw_result_from_integrator_or_path, path_string)
+                current_attempt_final_result_obj, current_attempt_reasoning_path = self._timed_process_query(
                     query, context, forced_path, query_complexity,
                     supporting_facts, query_id, dataset_type
                 )
+                reasoning_path_taken = current_attempt_reasoning_path  # Update path taken for this successful/failed attempt
+                last_attempt_result_obj = current_attempt_final_result_obj  # Store this attempt's result
+
                 processing_time_seconds = time.time() - attempt_start_time
 
                 is_error_result = False
-                if isinstance(final_result_obj, dict) and \
-                        (final_result_obj.get("type") == "error_object" or final_result_obj.get("status") == "error"):
+                # Check if the raw result object indicates an error
+                if isinstance(current_attempt_final_result_obj, dict) and \
+                        (current_attempt_final_result_obj.get("type") == "error_object" or \
+                         current_attempt_final_result_obj.get("status") == "error" or \
+                         current_attempt_final_result_obj.get("error") is not None):  # Added check for 'error' key
                     is_error_result = True
+                    error_message = current_attempt_final_result_obj.get('error',
+                                                                         current_attempt_final_result_obj.get(
+                                                                             'rationale',
+                                                                             'Unknown internal error'))
                     self.logger.error(
-                        f"QID {query_id} Path {reasoning_path_taken} resulted in error object: {final_result_obj.get('error', 'Unknown internal error')}")
-                elif isinstance(final_result_obj, str) and final_result_obj.startswith("Error:"):
+                        f"QID {query_id} Path {reasoning_path_taken} resulted in error object: {error_message}")
+                elif isinstance(current_attempt_final_result_obj, str) and current_attempt_final_result_obj.startswith(
+                        "Error:"):
                     is_error_result = True
+                    error_message = current_attempt_final_result_obj
                     self.logger.error(
-                        f"QID {query_id} Path {reasoning_path_taken} resulted in error string: {final_result_obj}")
+                        f"QID {query_id} Path {reasoning_path_taken} resulted in error string: {error_message}")
 
                 if is_error_result:
-                    raise ValueError(f"Internal error returned from path {reasoning_path_taken}: {final_result_obj}")
+                    # Pass the specific error message/object from this attempt
+                    raise ValueError(f"Internal error returned from path {reasoning_path_taken}: {error_message}")
 
-                # --- Success Case ---
+                # --- Success Case for this attempt ---
                 final_utilized_resources = self.resource_manager.check_resources()
                 resource_delta = {k: final_utilized_resources.get(k, 0.0) - initial_resources.get(k, 0.0)
                                   for k in final_utilized_resources if k != 'timestamp'}
 
-                # Only increment successful_queries once per query_id if it ultimately succeeds
-                # This is handled by checking if the query isn't already counted as successful from a previous attempt if that logic existed.
-                # For now, this simple increment means a query that fails then succeeds on retry is one successful query.
-                if attempts == 0:  # If successful on the first try or if this is the final successful attempt
-                    if not any(h['query_id'] == query_id and h.get('final_status') == 'success' for h in
-                               self.path_history):  # Prevent double counting on retry success.
-                        self.performance_metrics['successful_queries'] += 1
+                # Increment successful_queries only once per query_id if it ultimately succeeds.
+                # This is handled by checking if the query_id is already marked as successful in path_history.
+                # A simpler approach: if a query succeeds on any attempt, it's one successful query.
+                # The current logic in get_performance_metrics counts based on self.performance_metrics['successful_queries']
+                # which we will increment here.
+                if not any(h['query_id'] == query_id and h.get('final_status') == 'success' for h in self.path_history):
+                    self.performance_metrics['successful_queries'] += 1
+                    # Log this success to path_history to prevent recount on retry success (if that logic is added)
+                    # This might need adjustment if retries can improve an already 'successful' but poor answer.
+                    # For now, first success counts.
+                    if hasattr(self, 'path_history'):  # Ensure path_history exists
+                        self.path_history.append({'query_id': query_id, 'final_status': 'success', 'attempt': attempts})
 
                 self.performance_metrics['path_usage'][reasoning_path_taken] += 1
                 self._update_reasoning_path_stats(reasoning_path_taken, success=True,
                                                   time_taken=processing_time_seconds)
 
-                prediction_for_metrics = str(final_result_obj)
-                if dataset_type == 'drop' and isinstance(final_result_obj, dict):
-                    num = final_result_obj.get('number')
-                    spans = final_result_obj.get('spans')
-                    date = final_result_obj.get('date')
-                    error = final_result_obj.get('error')
-                    if num:
-                        prediction_for_metrics = f"DROP_Num: {num}"
-                    elif spans:
-                        prediction_for_metrics = f"DROP_Spans: {str(spans)[:50]}"
-                    elif date and any(v for v in date.values()):
-                        prediction_for_metrics = f"DROP_Date: {date.get('month', '')}/{date.get('day', '')}/{date.get('year', '')}"
-                    elif error:
-                        prediction_for_metrics = f"DROP_Error: {error}"
-                    else:
-                        prediction_for_metrics = "DROP_Empty"
-
+                # --- MODIFICATION: Pass the RAW result object to MetricsCollector ---
+                # current_attempt_final_result_obj is the raw output (dict for DROP, str for Text QA)
+                # from the hybrid_integrator or reasoner. This is what _calculate_performance_metrics expects for DROP.
                 if hasattr(self, 'metrics_collector') and self.metrics_collector:
                     self.metrics_collector.collect_query_metrics(
-                        query=query, prediction=prediction_for_metrics, ground_truth=None,
-                        reasoning_path=reasoning_path_taken, processing_time=processing_time_seconds,
-                        resource_usage=resource_delta, complexity_score=query_complexity,
-                        query_id=query_id
+                        query=query,
+                        prediction=current_attempt_final_result_obj,  # Pass the raw object
+                        ground_truth=None,  # Ground truth is evaluated in main.py after this call
+                        reasoning_path=reasoning_path_taken,
+                        processing_time=processing_time_seconds,  # Time for this successful attempt
+                        resource_usage=resource_delta,
+                        complexity_score=query_complexity,
+                        query_id=query_id,
+                        confidence=current_attempt_final_result_obj.get('confidence') if isinstance(
+                            current_attempt_final_result_obj, dict) else None,
+                        operation_type=current_attempt_final_result_obj.get('type') if isinstance(
+                            current_attempt_final_result_obj, dict) else None
                     )
 
                 component_timings = {}
-                if isinstance(final_result_obj, dict):  # Extract component timings if HybridIntegrator provided them
-                    component_timings['symbolic_time'] = final_result_obj.get('symbolic_time', 0.0)
-                    component_timings['neural_time'] = final_result_obj.get('neural_time', 0.0)
-                    component_timings['fusion_time'] = final_result_obj.get('fusion_time', 0.0)
+                if isinstance(current_attempt_final_result_obj, dict):
+                    component_timings['symbolic_time'] = current_attempt_final_result_obj.get('symbolic_time', 0.0)
+                    component_timings['neural_time'] = current_attempt_final_result_obj.get('neural_time', 0.0)
+                    component_timings['fusion_time'] = current_attempt_final_result_obj.get('fusion_time', 0.0)
 
+                # The aggregator.format_response will create the final dict for the caller (main.py)
                 formatted_response = self.aggregator.format_response({
-                    'query_id': query_id, 'result': final_result_obj,
-                    'processing_time': processing_time_seconds, 'resource_usage': resource_delta,
-                    'reasoning_path': reasoning_path_taken, 'retries': attempts,
-                    'status': 'success', 'dataset_type': dataset_type,
+                    'query_id': query_id,
+                    'result': current_attempt_final_result_obj,  # Pass the raw result to aggregator
+                    'processing_time': processing_time_seconds,
+                    'resource_usage': resource_delta,
+                    'reasoning_path': reasoning_path_taken,
+                    'retries': attempts,
+                    'status': 'success',
+                    'dataset_type': dataset_type,
                     **component_timings
                 })
-                # Log final success for this query_id to path_history
-                # self._log_path_history_final_status(query_id, 'success')
                 return formatted_response, reasoning_path_taken
 
             except Exception as e:
+                # This block handles errors from _timed_process_query or the ValueError raised above
+                attempt_processing_time = time.time() - attempt_start_time
                 self.logger.exception(
-                    f"Error processing query_id {query_id} (attempt {attempts + 1}/{max_retries + 1}): {str(e)}")
-                # Increment error_count for each failed attempt, not just final failure
-                self.performance_metrics['error_count'] += 1
-                attempts += 1
+                    f"Error processing query_id {query_id} (attempt {attempts + 1}/{max_retries + 1}) with path '{reasoning_path_taken}': {str(e)}")
+                self.performance_metrics['error_count'] += 1  # Count each failed attempt
 
+                # --- MODIFICATION: Log failed attempt to MetricsCollector ---
+                # last_attempt_result_obj should hold the error object from the failed path if one was returned,
+                # or we construct one.
+                error_payload_for_collector: Any
+                if isinstance(last_attempt_result_obj, dict) and (
+                        last_attempt_result_obj.get('error') or last_attempt_result_obj.get('status') == 'error'):
+                    error_payload_for_collector = last_attempt_result_obj
+                else:  # Construct a generic error object if last_attempt_result_obj is not a structured error
+                    error_message_str = str(e)
+                    if dataset_type == 'drop':
+                        error_payload_for_collector = {
+                            'number': '', 'spans': [], 'date': {'day': '', 'month': '', 'year': ''},
+                            'status': 'error', 'confidence': 0.0,
+                            'rationale': f"Attempt {attempts + 1} failed on path {reasoning_path_taken}: {error_message_str}",
+                            'type': 'error_attempt_failure', 'error': error_message_str
+                        }
+                    else:  # Text QA
+                        error_payload_for_collector = f"Error on attempt {attempts + 1} (path {reasoning_path_taken}): {error_message_str}"
+
+                current_resources_on_fail = self.resource_manager.check_resources()
+                resource_delta_on_fail = {
+                    k: current_resources_on_fail.get(k, 0.0) - initial_resources.get(k, 0.0)
+                    for k in current_resources_on_fail if k != 'timestamp'
+                }
+
+                if hasattr(self, 'metrics_collector') and self.metrics_collector:
+                    self.metrics_collector.collect_query_metrics(
+                        query=query,
+                        prediction=error_payload_for_collector,  # Pass the error object/string
+                        ground_truth=None,
+                        reasoning_path=reasoning_path_taken if reasoning_path_taken != 'unknown_initial' else "path_unknown_during_error",
+                        processing_time=attempt_processing_time,
+                        resource_usage=resource_delta_on_fail,
+                        complexity_score=query_complexity,
+                        query_id=query_id,
+                        confidence=error_payload_for_collector.get('confidence', 0.0) if isinstance(
+                            error_payload_for_collector, dict) else 0.0,
+                        operation_type=error_payload_for_collector.get('type', 'error_attempt_failure') if isinstance(
+                            error_payload_for_collector, dict) else 'error_attempt_failure'
+                    )
+                # --- END MODIFICATION ---
+
+                attempts += 1
                 # Update stats for the failed path attempt
-                # reasoning_path_taken might still be 'unknown' or the path that failed
                 self._update_reasoning_path_stats(
-                    reasoning_path_taken if reasoning_path_taken != 'unknown' else "attempt_failed_path_unknown",
+                    reasoning_path_taken if reasoning_path_taken != 'unknown_initial' else "attempt_failed_path_unknown",
                     success=False,
-                    time_taken=(time.time() - attempt_start_time))
+                    time_taken=attempt_processing_time
+                )
 
                 if attempts > max_retries:
-                    # self._log_path_history_final_status(query_id, 'failed')
+                    # Pass the reason for the final failure (the last exception encountered)
                     return self._handle_final_failure(
-                        overall_start_time, str(e), query_id, dataset_type
+                        overall_start_time, str(e), query_id, dataset_type,
+                        reasoning_path_taken if reasoning_path_taken != 'unknown_initial' else "path_unknown_at_final_failure"
                     )
-                self.logger.info(f"Retrying query_id {query_id} ({attempts}/{max_retries})...")
-                time.sleep(0.5 * attempts)  # Basic backoff
-                continue
+                self.logger.info(f"Retrying query_id {query_id} (attempt {attempts}/{max_retries})...")
+                # Basic backoff, consider more sophisticated strategies if needed
+                time.sleep(min(0.5 * attempts, 2.0))  # Sleep up to 2 seconds
+                # Reset initial_resources for the next attempt to measure its delta correctly
+                initial_resources = self.resource_manager.check_resources()
+                continue  # To the next iteration of the while loop
 
-        # Fallback if loop finishes unexpectedly (should be caught by max_retries logic)
+        # Fallback if loop finishes unexpectedly (should ideally be caught by max_retries logic)
         self.logger.error(f"Exited retry loop unexpectedly for QID {query_id}. This should not happen.")
-        # self._log_path_history_final_status(query_id, 'failed_unexpected_exit')
-        return self._handle_final_failure(overall_start_time, "Exited retry loop unexpectedly", query_id, dataset_type)
+        return self._handle_final_failure(
+            overall_start_time, "Exited retry loop unexpectedly", query_id, dataset_type,
+            reasoning_path_taken if reasoning_path_taken != 'unknown_initial' else "path_unknown_at_loop_exit"
+        )
 
     def _timed_process_query(
             self, query: str, context: str, forced_path: Optional[str],
@@ -569,11 +640,19 @@ class SystemControlManager:
         return stats_summary
 
     def _handle_final_failure(self, overall_start_time: float, reason_str: str, query_id: str,
-                              dataset_type: Optional[str]) -> Tuple[Dict[str, Any], str]:
+                              dataset_type: Optional[str], last_reasoning_path: str = 'fallback_error') -> Tuple[
+        Dict[str, Any], str]:
         """Logs final failure, updates stats, and returns a structured error response tuple."""
-        self.logger.error(f"Final failure processing QID {query_id} after retries or fatal error: {reason_str}")
+        self.logger.error(
+            f"Final failure processing QID {query_id} on path '{last_reasoning_path}' after retries or fatal error: {reason_str}")
         processing_time = time.time() - overall_start_time
-        error_path_name = 'fallback_error'
+
+        # Use last_reasoning_path if specific, otherwise fallback_error
+        final_error_path_name = last_reasoning_path if last_reasoning_path not in ['unknown_initial',
+                                                                                   'unknown_this_attempt',
+                                                                                   'path_unknown_during_error',
+                                                                                   'path_unknown_at_final_failure',
+                                                                                   'path_unknown_at_loop_exit'] else 'fallback_error'
 
         error_result_payload: Union[str, Dict]
         if dataset_type == 'drop':
@@ -582,13 +661,17 @@ class SystemControlManager:
         else:
             error_result_payload = f"Error: {reason_str}"
 
-        self._update_reasoning_path_stats(error_path_name, success=False, time_taken=processing_time)
+        # Update stats for this final failure path
+        self._update_reasoning_path_stats(final_error_path_name, success=False, time_taken=processing_time)
 
-        # The aggregator is an instance variable
         formatted_error_response = self.aggregator.format_response({
-            'query_id': query_id, 'result': error_result_payload,
-            'error': reason_str, 'status': 'failed',  # Ensure status is failed
-            'reasoning_path': error_path_name, 'processing_time': processing_time,
-            'retries': self.error_retry_limit  # Max retries attempted
+            'query_id': query_id,
+            'result': error_result_payload,  # This is the core error content
+            'error': reason_str,  # Explicit error message
+            'status': 'failed',
+            'reasoning_path': final_error_path_name,
+            'processing_time': processing_time,
+            'retries': self.error_retry_limit,  # Max retries attempted
+            'dataset_type': dataset_type
         })
-        return formatted_error_response, error_path_name
+        return formatted_error_response, final_error_path_name
