@@ -4,7 +4,7 @@ import json
 import re
 import numpy as np
 import spacy
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from collections import defaultdict, Counter
 import logging
 from transformers import pipeline

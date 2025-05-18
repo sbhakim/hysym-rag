@@ -228,110 +228,98 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
             self.logger.exception(f"[DROP QID:{query_id}] Unhandled exception processing DROP query: {str(e)}")
             return {**DEFAULT_DROP_ANSWER, 'status': 'error', 'confidence': 0.0, 'rationale': f"Unhandled Exception: {str(e)}"}
 
-
     def _extract_drop_operation_and_args(self, query: str, context: str, query_id: str) -> Dict[str, Any]:
         """
         Extract operation type and arguments from a DROP query using regex and spaCy.
         Used as a fallback when no predefined rule from self.rules matches.
-        Ensures patterns are prioritized and argument extraction is robust.
-        Refined to better distinguish specific event queries from total calculations.
+        MODIFIED: Lowered base_confidence for fallback patterns significantly.
         """
         query_lower = query.lower().strip()
         self.logger.debug(
             f"[DROP QID:{query_id}] Fallback Extraction: Attempting to extract operation for query: '{query_lower[:100]}...'")
 
-        # Define patterns with priority (more specific or common first).
+        # MODIFIED: Significantly lowered base_confidence values for these fallback patterns
+        # The goal is that if we are using these general regexes, the initial confidence
+        # that we even have the right *type* of operation and粗略 arguments should be modest.
+        # The execution functions then determine their own confidence in *performing* that operation.
         operation_patterns = [
-            # Pattern 1.A: More specific "how many [unit] did [entity] [verb] (in the [specific event])?"
-            # Aims to get a specific event's value.
             (
-                r"^how many ([a-z\s]+?) (?:did|was|were) ([\w\s'-]+?) (score|kick|hit|throw|rush for|pass for|gain|intercept|complete|make)(?:\s+in the\s+([\w\s'-]+))?\??$",
+                r"^how many ([a-z\s]+?) (?:did|was|were) ([\w\s'-]+?) (score|kick|hit|throw|rush for|pass for|gain|intercept|complete|make|lead with|take off)(?:\s+in\s+([\w\s'-]+))?\??$",
                 OP_EXTREME_VALUE_NUMERIC,
                 lambda m: {'unit': m.group(1).strip(),
-                           'entity_desc': m.group(2).strip(),  # Player/Team
-                           'verb_action': m.group(3).strip(),  # Specific action
+                           'entity_desc': m.group(2).strip(),
+                           'verb_action': m.group(3).strip(),
                            'specific_event_modifier': m.group(
                                4).strip() if m.lastindex and m.lastindex >= 4 and m.group(4) else None,
-                           'direction': 'specific_event'},  # Signals it's not a blind total
-                0.92),
-
-            # Pattern 1.B: Explicit "how many total [unit] did [entity] [verb]?"
+                           'direction': 'specific_event'},
+                0.55),  # MODIFIED CONFIDENCE (e.g., from 0.92)
             (
                 r"^how many total ([a-z\s]+?) (?:did|were) ([\w\s'-]+?) (?:score|gain|have|intercept|lead with|take off|make|hit|kick|throw|rush for|pass for)\??$",
                 OP_EXTREME_VALUE_NUMERIC,
                 lambda m: {'unit': m.group(1).strip(),
                            'entity_desc': m.group(2).strip(),
-                           'direction': 'total'},  # Explicit 'total'
-                0.95),
-
-            # Original Pattern 1 (less specific, now lower priority or covered by 1.B if "total" is intended)
-            # This pattern could be re-evaluated or further refined if still needed after the more specific ones.
-            # For now, the combination of 1.A and 1.B should handle "how many [unit] did [entity] [action]" better.
-            # If a query is "how many yards did PlayerX have?" and the intent is total, pattern 1.B should catch it if "total" is used.
-            # If "total" is not used, and it's not a specific event, the system might need other cues or it defaults to sum in execute_extreme_value_numeric if 'total' direction is set.
-            # Let's assume for now that if "total" isn't explicit in the query, we don't default to 'total' direction here unless other patterns imply it.
-
-            # Pattern 2: Count with optional temporal constraint
+                           'direction': 'total'},
+                0.60),  # MODIFIED CONFIDENCE (e.g., from 0.95)
+            (
+                r"^what was the score (?:at the end of|in|during) ([\w\s'-]+?)(?:\s+for\s+([\w\s'-]+?))?\??$",
+                OP_ENTITY_SPAN,
+                # This might be better as a specific SCORE type if contextually it implies numbers usually.
+                # Or, if the output is "7-7", it's a span. If it's "7", it's a number.
+                # For now, keeping as ENTITY_SPAN and its parser will try to get the score.
+                lambda m: {'entity': f"score {m.group(1).strip()}",  # entity_desc might be "score first quarter"
+                           'team': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None,
+                           'temporal_constraint': m.group(1).strip()  # The time period is a temporal constraint
+                           },
+                0.55  # MODIFIED CONFIDENCE
+            ),
+            (
+                r"^how many ([a-z\s]+?) was the (longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+?)(?: of the game)?\??$",
+                OP_EXTREME_VALUE_NUMERIC,
+                lambda m: {'unit': m.group(1).strip(),
+                           'direction': m.group(2).lower().strip(),
+                           'entity_desc': m.group(3).strip()},
+                0.55),  # MODIFIED CONFIDENCE (e.g., from 0.90)
             (
                 r"^(?:how many|number of)\s+([\w\s'-]+?)(?:\s+(?:in|during|for|on)\s+(first half|second half|1st quarter|2nd quarter|3rd quarter|4th quarter|the game|overtime))?(?:\s+were\s+there|\s+did|\s+was|\s+score|\?)?$",
                 OP_COUNT,
                 lambda m: {'entity': m.group(1).strip(),
                            'temporal_constraint': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(
                                2) else None},
-                0.90),
-
-            # Pattern 3: Difference
+                0.45),  # MODIFIED CONFIDENCE (e.g., from 0.90)
             (
                 r"(?:difference between|how many more|how many less)\s+([\w\s'-]+?)(?:\s+(?:and|than)\s+([\w\s'-]+?))?\??$",
                 OP_DIFFERENCE,
                 lambda m: {'entity1': m.group(1).strip(),
                            'entity2': m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None},
-                0.95),
-
-            # Pattern 4: Extreme Value - Entity
+                0.60),  # MODIFIED CONFIDENCE (e.g., from 0.95)
             (
                 r"^(?:who|what player|what team|which player|which team)\s+(?:had|made|scored|threw|kicked|ran for|caught)\s+(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\??$",
                 OP_EXTREME_VALUE,
                 lambda m: {'entity_desc': m.group(2).strip(),
                            'direction': m.group(1).lower().strip()},
-                0.90),
+                0.55),  # MODIFIED CONFIDENCE (e.g., from 0.90)
             (
                 r"^(?:the\s+)?(longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+)\s+(?:was by whom|was by which player|was by what player)\??$",
                 OP_EXTREME_VALUE,
                 lambda m: {'entity_desc': m.group(2).strip(), 'direction': m.group(1).lower().strip()},
-                0.90),
-
-            # Pattern 5: Extreme Value - Numeric (general, for non-action specific queries)
-            (
-                r"^how many ([a-z\s]+?) was the (longest|shortest|highest|lowest|most|least|first|last|final)\s+([\w\s'-]+?)(?: of the game)?\??$",
-                OP_EXTREME_VALUE_NUMERIC,
-                lambda m: {'unit': m.group(1).strip(),
-                           'direction': m.group(2).lower().strip(),
-                           'entity_desc': m.group(3).strip()},  # e.g., "longest field goal", "shortest run"
-                0.90),
-
-            # Pattern 6: Temporal Difference
+                0.55),  # MODIFIED CONFIDENCE (e.g., from 0.90)
             (r"^how many years between\s+([\w\s'-]+?)\s+and\s+([\w\s'-]+?)\??$",
              OP_TEMPORAL_DIFFERENCE,
              lambda m: {'entity1': m.group(1).strip(), 'entity2': m.group(2).strip()},
-             0.85),
-
-            # Pattern 7: Date
+             0.50),  # MODIFIED CONFIDENCE (e.g., from 0.85)
             (r"^(?:when|what date|what year|which year)\s+(?:did|was|is)?\s*(.*)\??$",
              OP_DATE,
              lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.80),
-
-            # Pattern 8: Entity Span (General fallback)
+             0.50),  # MODIFIED CONFIDENCE (e.g., from 0.80)
             (
                 r"^(?:who|which team|what team|which player|what player|what was the name of the|tell me the name of the)\s+(.*)\??$",
                 OP_ENTITY_SPAN,
                 lambda m: {'entity': m.group(1).strip().rstrip('?')},
-                0.80),
-            (r"^(?:who|which|what)\s+(.*)\??$",
+                0.50),  # MODIFIED CONFIDENCE (e.g., from 0.80)
+            (r"^(?:who|which|what)\s+(.*)\??$",  # Most general, lowest confidence
              OP_ENTITY_SPAN,
              lambda m: {'entity': m.group(1).strip().rstrip('?')},
-             0.70),
+             0.35),  # MODIFIED CONFIDENCE (e.g., from 0.70)
         ]
 
         temporal_keywords = ["first half", "second half", "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
@@ -341,15 +329,25 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         for pattern_regex, op_type, arg_func, base_conf in operation_patterns:
             match = re.search(pattern_regex, query_lower, re.IGNORECASE)
             if match:
+                if op_type == OP_COUNT:  # Keep the heuristic to avoid misclassifying value queries as count
+                    potential_units = ["yards", "points", "goals", "tds", "pass", "reception", "run", "score"]
+                    action_verbs = ["score", "kick", "hit", "throw", "rush for", "pass for", "gain", "intercept",
+                                    "complete", "make", "lead with", "take off"]
+                    query_tokens = query_lower.split()
+                    if any(unit in query_tokens for unit in potential_units) and \
+                            any(verb in query_tokens for verb in action_verbs) and \
+                            (
+                                    "did" in query_tokens or "was" in query_tokens or "were" in query_tokens):  # check for past tense verbs
+                        self.logger.debug(
+                            f"[DROP QID:{query_id}] OP_COUNT pattern '{pattern_regex}' matched, but query structure suggests a value extraction (e.g., how many X did Y verb). Skipping this COUNT match.")
+                        continue
                 matched_op_details = {
-                    'pattern_regex': pattern_regex,
-                    'type': op_type,
-                    'arg_func': arg_func,
-                    'match_obj': match,
-                    'base_confidence': base_conf
+                    'pattern_regex': pattern_regex, 'type': op_type,
+                    'arg_func': arg_func, 'match_obj': match,
+                    'base_confidence': base_conf  # This is now the lowered confidence
                 }
                 self.logger.debug(
-                    f"[DROP QID:{query_id}] Fallback pattern matched: Type={op_type}, Regex='{pattern_regex}'")
+                    f"[DROP QID:{query_id}] Fallback pattern matched: Type={op_type}, Regex='{pattern_regex}', BaseConf={base_conf:.2f}")
                 break
 
         if not matched_op_details:
@@ -359,47 +357,37 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                     'operation': OP_ENTITY_SPAN,
                     'args': {'entity': query.strip().rstrip('?'),
                              'query_keywords': self._get_query_keywords(query_lower, query_id)},
-                    'confidence': 0.3,
+                    'confidence': 0.15,  # MODIFIED: Very low confidence for ultimate fallback
                     'rationale': 'Defaulting to entity span extraction due to no clear operational pattern match.'}
-
         try:
             args = matched_op_details['arg_func'](matched_op_details['match_obj'])
-            if not args or not any(v for v in args.values() if v is not None):
+            if not args or not any(v for v in args.values() if v is not None):  # Ensure args are meaningful
                 self.logger.warning(
                     f"[DROP QID:{query_id}] Argument function for pattern '{matched_op_details['pattern_regex']}' returned empty or None arguments: {args}")
                 return {'status': 'success', 'operation': OP_ENTITY_SPAN,
                         'args': {'entity': query.strip().rstrip('?'),
                                  'query_keywords': self._get_query_keywords(query_lower, query_id)},
-                        'confidence': 0.3,
+                        'confidence': 0.15,  # MODIFIED: Very low confidence
                         'rationale': 'Args extraction failed for matched pattern, defaulting to entity span.'}
 
             self.logger.debug(f"[DROP QID:{query_id}] Fallback Extracted Raw Args: {args}")
             args['query_keywords'] = self._get_query_keywords(query_lower, query_id)
 
-            # Refine extracted arguments
             for key_to_refine in ['entity', 'entity_desc', 'entity1', 'entity2']:
                 if key_to_refine in args and isinstance(args[key_to_refine], str):
                     args[key_to_refine] = self._refine_extracted_entity(args[key_to_refine],
                                                                         query_doc=self.nlp(query) if self.nlp else None,
                                                                         query_id=query_id)
-
-            # Consolidate entity_desc from verb_action if specific_event matched (Pattern 1.A)
-            if args.get('direction') == 'specific_event' and args.get('verb_action'):
+            if matched_op_details['type'] == OP_EXTREME_VALUE_NUMERIC and args.get(
+                    'direction') == 'specific_event' and args.get('verb_action'):
                 current_entity_desc = args.get('entity_desc', '')
                 verb_action = args.get('verb_action', '')
                 unit = args.get('unit', '')
-                # Construct a more specific entity_desc for downstream number finding
-                # e.g., "Morris gain yards", "Akers score points"
-                # This helps _find_associated_numbers focus better.
                 if current_entity_desc and verb_action and unit:
                     args['entity_desc'] = f"{current_entity_desc} {verb_action} {unit}"
-                elif current_entity_desc and verb_action:
+                elif current_entity_desc and verb_action:  # If unit is missing, still combine entity and verb
                     args['entity_desc'] = f"{current_entity_desc} {verb_action}"
-                # If unit is missing from query but part of entity_desc, it might already be there.
-                # The goal is for execute_extreme_value_numeric to use this refined entity_desc
-                # to find a *single specific* value associated with this action, not sum totals.
 
-            # Check for temporal constraints if not already set
             if 'temporal_constraint' not in args or not args['temporal_constraint']:
                 temporal_constraint_found = None
                 for keyword in temporal_keywords:
@@ -411,34 +399,28 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                     self.logger.debug(
                         f"[DROP QID:{query_id}] Detected temporal constraint via keywords: {temporal_constraint_found}")
 
-            final_confidence = matched_op_details['base_confidence']
+            final_confidence = matched_op_details['base_confidence']  # This is already the lowered confidence
 
-            # Ensure direction is set if it's an OP_EXTREME_VALUE_NUMERIC but wasn't set by a specific pattern
             if matched_op_details['type'] == OP_EXTREME_VALUE_NUMERIC and 'direction' not in args:
                 self.logger.debug(
-                    f"[DROP QID:{query_id}] No explicit direction for OP_EXTREME_VALUE_NUMERIC, defaulting direction to 'value_of_event' or 'total' if query implies sum")
-                if "total" in query_lower or "sum of" in query_lower:  # Check if query implies a sum
+                    f"[DROP QID:{query_id}] No explicit direction for OP_EXTREME_VALUE_NUMERIC, defaulting to 'value_of_event' or 'total' if query implies sum")
+                if "total" in query_lower or "sum of" in query_lower:
                     args['direction'] = 'total'
                 else:
-                    args['direction'] = 'value_of_event'  # A generic direction if not extremum or total
-
+                    args['direction'] = 'value_of_event'
             self.logger.info(
                 f"[DROP QID:{query_id}] Fallback Final Extracted Operation: {matched_op_details['type']}, Args: {args}, Confidence: {final_confidence:.2f}")
             return {
-                'status': 'success',
-                'operation': matched_op_details['type'],
-                'args': args,
-                'confidence': final_confidence,
-                'rationale': f"Fallback matched {matched_op_details['type']} pattern."
-            }
-
+                'status': 'success', 'operation': matched_op_details['type'],
+                'args': args, 'confidence': final_confidence,  # Return the lowered base_confidence
+                'rationale': f"Fallback matched {matched_op_details['type']} pattern."}
         except Exception as e:
             self.logger.exception(
                 f"[DROP QID:{query_id}] Error during fallback argument processing for pattern '{matched_op_details.get('pattern_regex', 'UNKNOWN')}': {e}")
-            return {'status': 'error',
-                    'operation': matched_op_details.get('type'),
-                    'confidence': 0.1,
-                    'rationale': f'Error processing arguments from fallback: {e}'}
+            operation_type_on_error = matched_op_details.get('type') if matched_op_details else None
+            return {'status': 'error', 'operation': operation_type_on_error,
+                    'confidence': 0.05,
+                    'rationale': f'Error processing arguments from fallback: {e}'}  # MODIFIED CONFIDENCE
 
     def _get_query_keywords(self, query_lower: str, query_id: str) -> List[str]:
         """Helper to extract keywords using KeyBERT or spaCy."""
