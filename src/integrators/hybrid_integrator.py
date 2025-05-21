@@ -637,323 +637,279 @@ class HybridIntegrator:
                                        query: str,
                                        symbolic_result_obj: Dict[str, Any],
                                        neural_output_obj: Union[str, Dict[str, Any]],
+                                       # Can be raw string or pre-parsed dict
                                        query_complexity: float,
                                        query_id: Optional[str]
                                        ) -> Tuple[Dict[str, Any], float, Dict[str, Any]]:
-        qid = query_id or "unknown_qid_fusion"  # Ensure qid is always a string for logging
-        debug = {'fusion_strategy_drop': 'init'}
+        qid = query_id or "unknown_qid_fusion"
+        debug = {'fusion_strategy_drop': 'init', 'symbolic_input': symbolic_result_obj,
+                 'neural_input_type': str(type(neural_output_obj))}
         self.logger.debug(
-            f"[DROP QID:{qid}] Starting fusion. Symbolic input status: {symbolic_result_obj.get('status')}, Neural input type: {type(neural_output_obj)}")
+            f"[DROP QID:{qid}] Starting fusion. Symbolic status: {symbolic_result_obj.get('status')}, Neural input type: {type(neural_output_obj)}")
+
+        # --- Configurable Fusion Thresholds (Consider moving to __init__ or config file) ---
+        STRONG_SYM_CONF_THRESHOLD = 0.80  # Symbolic needs to be quite sure to be prioritized
+        STRONG_NEU_CONF_THRESHOLD = 0.75  # Neural also needs good confidence
+        MIN_USABLE_SYM_CONF = 0.35  # Minimum symbolic confidence to even be considered
+        MIN_USABLE_NEU_CONF = 0.45  # Minimum neural confidence from its parser
+        # How much more confident neural needs to be to override symbolic in type-match disagreement
+        CONF_DELTA_FOR_NEURAL_OVERRIDE_IF_TYPES_MATCH = 0.10
+        # How much more confident neural needs to be to override if types *mis-match*
+        CONF_DELTA_FOR_NEURAL_OVERRIDE_IF_TYPES_MISMATCH = 0.20
+        # Semantic similarity threshold for comparing spans if exact match fails
+        SPAN_SIMILARITY_THRESHOLD_FOR_AGREEMENT = 0.75
 
         # --- Process Symbolic Result ---
         sym_conf = symbolic_result_obj.get('confidence', 0.0)
-        sym_op_type = symbolic_result_obj.get('type')  # This is the OPERATIONAL type
+        sym_op_type = symbolic_result_obj.get('type')
         sym_status = symbolic_result_obj.get('status', 'error')
         sym_rationale = symbolic_result_obj.get('rationale', 'No symbolic rationale.')
+        sym_number_val = self._normalize_drop_number_for_comparison(symbolic_result_obj.get('number'))
+        sym_spans_val = [str(s).strip() for s in symbolic_result_obj.get('spans', []) if str(s).strip()]
+        sym_date_val = symbolic_result_obj.get('date', {})
+        sym_value_present_and_valid = (sym_number_val is not None) or \
+                                      (sym_spans_val) or \
+                                      (isinstance(sym_date_val, dict) and any(
+                                          str(v).strip() for v in sym_date_val.values()))
 
-        sym_number_for_comp = self._normalize_drop_number_for_comparison(symbolic_result_obj.get('number'))
-        sym_spans_for_comp = symbolic_result_obj.get('spans', [])
-        sym_date_for_comp = symbolic_result_obj.get('date', {})
-
-        current_effective_sym_value_type = None
-        if sym_status == 'success':
+        effective_sym_value_type = None
+        if sym_status == 'success' and sym_value_present_and_valid:
             if sym_op_type in ['number', 'count', 'difference', 'extreme_value_numeric',
-                               'temporal_difference'] and sym_number_for_comp is not None:
-                current_effective_sym_value_type = 'number'
-            elif sym_op_type in ['spans', 'entity_span'] and sym_spans_for_comp:  # Ensure spans list is not just empty
-                current_effective_sym_value_type = 'spans'
-            elif sym_op_type == 'extreme_value':
-                if sym_number_for_comp is not None:
-                    current_effective_sym_value_type = 'number'
-                elif sym_spans_for_comp:
-                    current_effective_sym_value_type = 'spans'
-            elif sym_op_type == 'date' and any(v for v in sym_date_for_comp.values() if str(v).strip()):
-                current_effective_sym_value_type = 'date'
-
-        self.logger.debug(
-            f"[DROP QID:{qid}] Fusion Sym Input: status={sym_status}, op_type={sym_op_type}, "
-            f"value_type={current_effective_sym_value_type}, conf={sym_conf:.2f}, "
-            f"num='{sym_number_for_comp}', spans={sym_spans_for_comp}, date={sym_date_for_comp}"
-        )
+                               'temporal_difference'] and sym_number_val is not None:
+                effective_sym_value_type = 'number'
+            elif sym_op_type in ['spans', 'entity_span'] and sym_spans_val:
+                effective_sym_value_type = 'spans'
+            elif sym_op_type == 'extreme_value':  # Can be number or span
+                if sym_number_val is not None:
+                    effective_sym_value_type = 'number'
+                elif sym_spans_val:
+                    effective_sym_value_type = 'spans'
+            elif sym_op_type == 'date' and isinstance(sym_date_val, dict) and any(
+                    str(v).strip() for v in sym_date_val.values()):
+                effective_sym_value_type = 'date'
+        debug['symbolic_processed'] = {'conf': sym_conf, 'op_type': sym_op_type, 'status': sym_status,
+                                       'value_type': effective_sym_value_type, 'num': sym_number_val,
+                                       'spans': sym_spans_val, 'date': sym_date_val}
 
         # --- Process Neural Result ---
         neu_conf = 0.0
         effective_neu_value_type: Optional[str] = None
         neu_parsed_successfully = False
         neural_rationale = "Neural result processing initiated."
-        neu_values_for_comparison = {'number': None, 'spans': [], 'date': {'day': '', 'month': '', 'year': ''}}
+        neu_number_val: Optional[float] = None
+        neu_spans_val: List[str] = []
+        neu_date_val: Dict[str, str] = {}
 
-        if isinstance(neural_output_obj, dict) and neural_output_obj.get('status') == 'success':
-            self.logger.debug(
-                f"[DROP QID:{qid}] Neural output is an already parsed dictionary: {str(neural_output_obj)[:150]}")
+        if isinstance(neural_output_obj, dict) and neural_output_obj.get(
+                'status') == 'success':  # Already parsed by NeuralRetriever
             neu_conf = neural_output_obj.get('confidence', 0.0)
-            effective_neu_value_type = neural_output_obj.get(
-                'type')  # This is 'number', 'spans', 'date' from NeuralRetriever
+            effective_neu_value_type = neural_output_obj.get('type')  # This is 'number', 'spans', 'date'
             neural_rationale = neural_output_obj.get('rationale', 'Neural parsed result from structured input')
+            neu_number_val = self._normalize_drop_number_for_comparison(neural_output_obj.get('number'))
+            neu_spans_val = [str(s).strip() for s in neural_output_obj.get('spans', []) if str(s).strip()]
+            raw_date_neu = neural_output_obj.get('date', {})
+            if isinstance(raw_date_neu, dict) and any(str(v).strip() for v in raw_date_neu.values()):
+                neu_date_val = {k: str(v).strip() for k, v in raw_date_neu.items() if str(v).strip()}
+            neu_parsed_successfully = (neu_number_val is not None) or (neu_spans_val) or (
+                        neu_date_val and any(neu_date_val.values()))
 
-            if effective_neu_value_type == 'number':
-                neu_values_for_comparison['number'] = self._normalize_drop_number_for_comparison(
-                    neural_output_obj.get('number'))
-                if neu_values_for_comparison['number'] is not None: neu_parsed_successfully = True
-            elif effective_neu_value_type == 'spans':
-                neu_values_for_comparison['spans'] = neural_output_obj.get('spans', [])
-                if neu_values_for_comparison['spans'] is not None: neu_parsed_successfully = True
-            elif effective_neu_value_type == 'date':
-                raw_date = neural_output_obj.get('date', {})
-                if isinstance(raw_date, dict) and any(str(v).strip() for v in raw_date.values()):
-                    neu_values_for_comparison['date'] = raw_date
-                    neu_parsed_successfully = True
-            else:
-                self.logger.warning(
-                    f"[DROP QID:{qid}] Neural dictionary (type '{effective_neu_value_type}') missing value or type unhandled.")
-                effective_neu_value_type = None  # Unset if not properly formed
-                neu_parsed_successfully = False
-
-        elif isinstance(neural_output_obj, str):
-            self.logger.debug(
-                f"[DROP QID:{qid}] Neural output is a string, attempting to parse: {neural_output_obj[:100]}")
-            # Use the neural_retriever's own parser
-            parsed_from_string = self.neural_retriever._parse_neural_for_drop(neural_output_obj, query, sym_op_type)
+        elif isinstance(neural_output_obj, str):  # Raw string from LLM, needs parsing
+            parsed_from_string = self.neural_retriever._parse_neural_for_drop(neural_output_obj, query,
+                                                                              sym_op_type or effective_sym_value_type)
             if parsed_from_string:
-                neu_conf = parsed_from_string.get('confidence', 0.6)  # Default confidence if parser doesn't set one
+                neu_conf = parsed_from_string.get('confidence', 0.6)
                 effective_neu_value_type = parsed_from_string.get('type')
                 parsed_value_content = parsed_from_string.get('value')
                 neural_rationale = "Neural LLM output parsed by HybridIntegrator"
 
                 if effective_neu_value_type == 'number':
-                    neu_values_for_comparison['number'] = self._normalize_drop_number_for_comparison(
-                        parsed_value_content)
-                    if neu_values_for_comparison['number'] is not None: neu_parsed_successfully = True
+                    neu_number_val = self._normalize_drop_number_for_comparison(parsed_value_content)
                 elif effective_neu_value_type == 'spans' and isinstance(parsed_value_content, list):
-                    neu_values_for_comparison['spans'] = parsed_value_content
-                    neu_parsed_successfully = True
+                    neu_spans_val = [str(s).strip() for s in parsed_value_content if str(s).strip()]
                 elif effective_neu_value_type == 'date' and isinstance(parsed_value_content, dict):
                     if any(str(v).strip() for v in parsed_value_content.values()):
-                        neu_values_for_comparison['date'] = parsed_value_content
-                        neu_parsed_successfully = True
-                else:
-                    self.logger.warning(
-                        f"[DROP QID:{qid}] Parsing neural string for type '{effective_neu_value_type}' yielded unusable value: {parsed_value_content}")
-                    effective_neu_value_type = None
-                    neu_parsed_successfully = False
+                        neu_date_val = {k: str(v).strip() for k, v in parsed_value_content.items() if str(v).strip()}
+                neu_parsed_successfully = (neu_number_val is not None) or (neu_spans_val) or (
+                            neu_date_val and any(neu_date_val.values()))
             else:
                 neural_rationale = "Failed to parse raw neural string output by HybridIntegrator's call"
-                self.logger.warning(f"[DROP QID:{qid}] {neural_rationale}")
-        else:
-            self.logger.error(
-                f"[DROP QID:{qid}] Unexpected type or error status for neural_output_obj: {type(neural_output_obj)}, content: {str(neural_output_obj)[:100]}")
-            neural_rationale = f"Unexpected neural output format: {str(neural_output_obj)[:100]}"
+        else:  # Error object or unexpected type
+            neural_rationale = f"Unexpected neural output format or error: {str(neural_output_obj)[:100]}"
+        debug['neural_processed'] = {'conf': neu_conf, 'parsed_success': neu_parsed_successfully,
+                                     'value_type': effective_neu_value_type, 'num': neu_number_val,
+                                     'spans': neu_spans_val, 'date': neu_date_val}
 
-        self.logger.debug(
-            f"[DROP QID:{qid}] Fusion Neu Input: parsed_success={neu_parsed_successfully}, value_type={effective_neu_value_type}, conf={neu_conf:.2f}, "
-            f"values_for_comp={neu_values_for_comparison}"
-        )
-
+        # --- Fusion Decision Logic ---
         final_chosen_value_content: Any = None
-        final_chosen_op_type = sym_op_type
-        final_confidence = 0.1
-        final_rationale = 'No confident answer derived from fusion'
+        final_chosen_op_type = sym_op_type  # Default to symbolic op type if available
+        final_confidence = 0.05  # Default to very low
+        final_rationale = 'Fusion: No confident path or agreement found.'
         final_status = 'error'
-        # final_source_type = 'none' # Not used in this version
 
-        is_valid_sym_op_type = sym_op_type is not None and sym_op_type != 'error'
+        # Case 1: Symbolic is strong and provided a valid typed value
+        if sym_status == 'success' and sym_conf >= STRONG_SYM_CONF_THRESHOLD and effective_sym_value_type:
+            debug['fusion_strategy_drop'] = 'priority_strong_symbolic'
+            final_status, final_chosen_op_type, final_chosen_value_content, final_confidence, final_rationale = \
+                'success', sym_op_type, symbolic_result_obj.get(
+                    effective_sym_value_type), sym_conf, f"Strong symbolic: {sym_rationale}"
 
-        # --- Decision Logic Refinements ---
-        # Thresholds for considering a source "strong" enough to be preferred or trusted
-        STRONG_SYM_CONF_THRESHOLD = 0.75  # Increased from 0.65 previously, make it more assertive
-        STRONG_NEU_CONF_THRESHOLD = 0.70  # Neural needs to be reasonably confident
-        MIN_USABLE_SYM_CONF = 0.40  # Min conf for symbolic to be even considered in fallback
-        MIN_USABLE_NEU_CONF = 0.50  # Min conf for neural to be considered in fallback (parser usually assigns higher)
-        CONF_DELTA_FOR_OVERRIDE = 0.15  # How much more confident neural needs to be to override symbolic in disagreement
+        # Case 2: Neural is strong, parsed, and symbolic is weak or failed
+        elif neu_parsed_successfully and neu_conf >= STRONG_NEU_CONF_THRESHOLD and \
+                (sym_status != 'success' or sym_conf < MIN_USABLE_SYM_CONF or not effective_sym_value_type):
+            debug['fusion_strategy_drop'] = 'priority_strong_neural_sym_weak'
+            final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                'success', effective_neu_value_type, neu_conf, f"Strong neural: {neural_rationale}"
+            if effective_neu_value_type == 'number':
+                final_chosen_value_content = neu_number_val
+            elif effective_neu_value_type == 'spans':
+                final_chosen_value_content = neu_spans_val
+            elif effective_neu_value_type == 'date':
+                final_chosen_value_content = neu_date_val
 
-        # 1. Prioritize very strong symbolic results
-        if sym_status == 'success' and sym_conf >= STRONG_SYM_CONF_THRESHOLD and is_valid_sym_op_type and current_effective_sym_value_type is not None:
-            debug['fusion_strategy_drop'] = 'prioritized_very_strong_symbolic'
-            final_chosen_value_content = symbolic_result_obj.get(
-                current_effective_sym_value_type)  # Get native from sym_obj if possible
-            if current_effective_sym_value_type == 'number':
-                final_chosen_value_content = sym_number_for_comp
-            elif current_effective_sym_value_type == 'spans':
-                final_chosen_value_content = sym_spans_for_comp
-            elif current_effective_sym_value_type == 'date':
-                final_chosen_value_content = sym_date_for_comp
-            final_confidence = sym_conf
-            final_rationale = sym_rationale + f" (Strong Symbolic Priority, Conf: {sym_conf:.2f})"
-            final_status = 'success'
-            final_chosen_op_type = sym_op_type
+        # Case 3: Both symbolic and neural have usable results; compare them
+        elif sym_status == 'success' and effective_sym_value_type and neu_parsed_successfully and effective_neu_value_type:
+            # Subcase 3a: Answer types match
+            if effective_sym_value_type == effective_neu_value_type:
+                debug['fusion_strategy_drop'] = 'types_match'
+                current_comparison_type = effective_sym_value_type
+                # Package values for _are_drop_values_equivalent
+                sym_comp_dict = {'number': sym_number_val, 'spans': sym_spans_val, 'date': sym_date_val}
+                neu_comp_dict = {'number': neu_number_val, 'spans': neu_spans_val, 'date': neu_date_val}
 
+                values_agree_exactly = self._are_drop_values_equivalent(sym_comp_dict, neu_comp_dict,
+                                                                        current_comparison_type, qid)
 
-        # 2. Both symbolic and neural provided usable results
-        elif sym_status == 'success' and is_valid_sym_op_type and current_effective_sym_value_type is not None and \
-                neu_parsed_successfully and neu_conf >= MIN_USABLE_NEU_CONF and effective_neu_value_type is not None:
+                # Enhanced span agreement: consider semantic similarity if exact fails
+                values_agree_semantically_for_spans = False
+                if current_comparison_type == 'spans' and not values_agree_exactly and self.encoder and util:
+                    if sym_spans_val and neu_spans_val:  # Both must have spans
+                        # Convert lists of spans to single strings for comparison
+                        sym_span_text = " ".join(sorted(list(set(s.lower() for s in sym_spans_val))))
+                        neu_span_text = " ".join(sorted(list(set(s.lower() for s in neu_spans_val))))
+                        try:
+                            emb1 = self.encoder.encode(sym_span_text, convert_to_tensor=True).to(self.device)
+                            emb2 = self.encoder.encode(neu_span_text, convert_to_tensor=True).to(self.device)
+                            span_similarity = util.cos_sim(emb1, emb2).item()
+                            if span_similarity >= SPAN_SIMILARITY_THRESHOLD_FOR_AGREEMENT:
+                                values_agree_semantically_for_spans = True
+                                debug['fusion_strategy_drop'] += '_spans_sem_agree'
+                        except Exception as sim_err:
+                            self.logger.warning(
+                                f"[DROP QID:{qid}] Error calculating span semantic similarity for fusion: {sim_err}")
 
-            sym_values_dict_for_comp = {'number': sym_number_for_comp, 'spans': sym_spans_for_comp,
-                                        'date': sym_date_for_comp}
-
-            if current_effective_sym_value_type == effective_neu_value_type:
-                debug['fusion_strategy_drop'] = 'sym_neu_value_types_match'
-                values_agree = self._are_drop_values_equivalent(sym_values_dict_for_comp, neu_values_for_comparison,
-                                                                current_effective_sym_value_type, qid)
+                values_agree = values_agree_exactly or values_agree_semantically_for_spans
 
                 if values_agree:
                     debug['fusion_strategy_drop'] += '_values_agree'
-                    # If values agree, take the one with higher confidence, or average confidence
-                    final_confidence = max(sym_conf, neu_conf)  # Or (sym_conf + neu_conf) / 2
-                    final_rationale = f"Symbolic and Neural agreed. Combined Conf: {final_confidence:.2f}. ({sym_rationale} | {neural_rationale})"
-                    # Use neural values as they might be cleaner if LLM produced them well
-                    if effective_neu_value_type == 'number':
-                        final_chosen_value_content = neu_values_for_comparison['number']
-                    elif effective_neu_value_type == 'spans':
-                        final_chosen_value_content = neu_values_for_comparison['spans']
-                    elif effective_neu_value_type == 'date':
-                        final_chosen_value_content = neu_values_for_comparison['date']
-                    final_chosen_op_type = sym_op_type  # Types matched
+                    final_status, final_chosen_op_type, final_confidence = 'success', sym_op_type, max(sym_conf,
+                                                                                                       neu_conf)
+                    final_rationale = f"Sym & Neu agreed (Type: {current_comparison_type}, Agreement: {'exact' if values_agree_exactly else 'semantic'}). Conf: {final_confidence:.2f}."
+                    # Prefer neural if agreement, as it might be cleaner or more complete
+                    if current_comparison_type == 'number':
+                        final_chosen_value_content = neu_number_val
+                    elif current_comparison_type == 'spans':
+                        final_chosen_value_content = neu_spans_val  # Neural spans often better formatted
+                    elif current_comparison_type == 'date':
+                        final_chosen_value_content = neu_date_val
                 else:  # Types match, values disagree
                     debug['fusion_strategy_drop'] += '_values_disagree'
-                    is_close_numeric_disagreement = False
-                    if current_effective_sym_value_type == 'number':
-                        # (Existing numeric closeness logic can be kept here)
-                        sym_n, neu_n = sym_number_for_comp, neu_values_for_comparison['number']
-                        if sym_n is not None and neu_n is not None:
-                            larger_val = max(abs(sym_n), abs(neu_n));
-                            closeness_threshold = (larger_val * 0.1) if larger_val > 20 else (
-                                1.0 if larger_val > 0 else 0.1)  # Tuned threshold
-                            if abs(sym_n - neu_n) <= closeness_threshold: is_close_numeric_disagreement = True; debug[
-                                'fusion_strategy_drop'] += '_numeric_close'
-
-                    # Decision on disagreement:
-                    if neu_conf > sym_conf + CONF_DELTA_FOR_OVERRIDE and not is_close_numeric_disagreement:
-                        # Neural is significantly more confident
+                    if neu_conf >= sym_conf + CONF_DELTA_FOR_NEURAL_OVERRIDE_IF_TYPES_MATCH:
+                        final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                            'success', effective_neu_value_type, neu_conf, f"Neural preferred on disagreement (type {effective_neu_value_type}): {neural_rationale}"
                         if effective_neu_value_type == 'number':
-                            final_chosen_value_content = neu_values_for_comparison['number']
+                            final_chosen_value_content = neu_number_val
                         elif effective_neu_value_type == 'spans':
-                            final_chosen_value_content = neu_values_for_comparison['spans']
+                            final_chosen_value_content = neu_spans_val
                         elif effective_neu_value_type == 'date':
-                            final_chosen_value_content = neu_values_for_comparison['date']
-                        final_confidence = neu_conf
-                        final_rationale = f"Neural preferred on disagreement (Conf: {neu_conf:.2f}). {neural_rationale}"
-                        final_chosen_op_type = sym_op_type  # op_type from matching symbolic rule still makes sense
-                    else:  # Symbolic is more confident, or confidences are close, or numbers are close
-                        if current_effective_sym_value_type == 'number':
-                            final_chosen_value_content = sym_number_for_comp
-                        elif current_effective_sym_value_type == 'spans':
-                            final_chosen_value_content = sym_spans_for_comp
-                        elif current_effective_sym_value_type == 'date':
-                            final_chosen_value_content = sym_date_for_comp
-                        final_confidence = sym_conf
-                        final_rationale = f"Symbolic preferred on disagreement (Conf: {sym_conf:.2f}). {sym_rationale}"
-                        final_chosen_op_type = sym_op_type
-                final_status = 'success'
-
-            else:  # Value types mismatch
-                debug['fusion_strategy_drop'] = 'value_types_mismatch'
-                # Prefer the more confident one, but be wary if overall confidence isn't high
-                if sym_conf >= neu_conf and sym_conf >= MIN_USABLE_SYM_CONF:
-                    if current_effective_sym_value_type == 'number':
-                        final_chosen_value_content = sym_number_for_comp
-                    elif current_effective_sym_value_type == 'spans':
-                        final_chosen_value_content = sym_spans_for_comp
-                    elif current_effective_sym_value_type == 'date':
-                        final_chosen_value_content = sym_date_for_comp
-                    final_confidence = sym_conf
-                    final_rationale = f"Symbolic chosen on type mismatch (SymConf: {sym_conf:.2f}). {sym_rationale}"
-                    final_chosen_op_type = sym_op_type
-                    final_status = 'success'
-                elif neu_conf > sym_conf and neu_conf >= STRONG_NEU_CONF_THRESHOLD:  # Neural must be strong if it's a different type
+                            final_chosen_value_content = neu_date_val
+                    else:  # Symbolic preferred or confidences too close
+                        final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                            'success', sym_op_type, sym_conf, f"Symbolic preferred on disagreement (type {effective_sym_value_type}): {sym_rationale}"
+                        if effective_sym_value_type == 'number':
+                            final_chosen_value_content = sym_number_val
+                        elif effective_sym_value_type == 'spans':
+                            final_chosen_value_content = sym_spans_val
+                        elif effective_sym_value_type == 'date':
+                            final_chosen_value_content = sym_date_val
+            # Subcase 3b: Answer types mismatch
+            else:
+                debug['fusion_strategy_drop'] = 'types_mismatch'
+                if sym_conf > neu_conf + CONF_DELTA_FOR_NEURAL_OVERRIDE_IF_TYPES_MISMATCH and sym_conf >= MIN_USABLE_SYM_CONF:  # Symbolic significantly more confident
+                    final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                        'success', sym_op_type, sym_conf, f"Symbolic preferred on type mismatch (SymType: {effective_sym_value_type}, NeuType: {effective_neu_value_type}): {sym_rationale}"
+                    if effective_sym_value_type == 'number':
+                        final_chosen_value_content = sym_number_val
+                    elif effective_sym_value_type == 'spans':
+                        final_chosen_value_content = sym_spans_val
+                    elif effective_sym_value_type == 'date':
+                        final_chosen_value_content = sym_date_val
+                elif neu_conf > sym_conf + CONF_DELTA_FOR_NEURAL_OVERRIDE_IF_TYPES_MISMATCH and neu_conf >= MIN_USABLE_NEU_CONF:  # Neural significantly more confident
+                    final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                        'success', effective_neu_value_type, neu_conf, f"Neural preferred on type mismatch (SymType: {effective_sym_value_type}, NeuType: {effective_neu_value_type}): {neural_rationale}"
                     if effective_neu_value_type == 'number':
-                        final_chosen_value_content = neu_values_for_comparison['number']
+                        final_chosen_value_content = neu_number_val
                     elif effective_neu_value_type == 'spans':
-                        final_chosen_value_content = neu_values_for_comparison['spans']
+                        final_chosen_value_content = neu_spans_val
                     elif effective_neu_value_type == 'date':
-                        final_chosen_value_content = neu_values_for_comparison['date']
-                    final_confidence = neu_conf
-                    final_rationale = f"Neural chosen on type mismatch (NeuConf: {neu_conf:.2f}). {neural_rationale}"
-                    final_chosen_op_type = effective_neu_value_type  # Neural's value type dictates op type
-                    final_status = 'success'
-                else:  # Neither is confidently asserting its type
-                    final_rationale = f"Type mismatch and low confidence from both. Sym ({sym_op_type}, {sym_conf:.2f}), Neu ({effective_neu_value_type}, {neu_conf:.2f})."
-                    debug['fusion_strategy_drop'] += '_low_conf_decision_error'
-                    final_status = 'error'  # Cannot make a good choice
-                    final_confidence = 0.1
+                        final_chosen_value_content = neu_date_val
+                else:  # Confidence close or both low, unclear which type is correct
+                    final_status = 'error'
+                    final_rationale = f"Type mismatch and ambiguous confidence. Sym({effective_sym_value_type}, {sym_conf:.2f}), Neu({effective_neu_value_type}, {neu_conf:.2f})."
+                    debug['fusion_strategy_drop'] += '_ambiguous_error'
+                    final_chosen_op_type = 'error'  # Mark op_type as error
 
-        # 3. Only Neural is good and parsed
-        elif neu_parsed_successfully and neu_conf >= STRONG_NEU_CONF_THRESHOLD and effective_neu_value_type is not None:
-            debug['fusion_strategy_drop'] = 'parsed_neural_dominant'
+        # Case 4: Only Neural is usable (and not necessarily strong)
+        elif neu_parsed_successfully and neu_conf >= MIN_USABLE_NEU_CONF and effective_neu_value_type:
+            debug['fusion_strategy_drop'] = 'neural_only_usable'
+            final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                'success', effective_neu_value_type, neu_conf, f"Neural only usable: {neural_rationale}"
             if effective_neu_value_type == 'number':
-                final_chosen_value_content = neu_values_for_comparison['number']
+                final_chosen_value_content = neu_number_val
             elif effective_neu_value_type == 'spans':
-                final_chosen_value_content = neu_values_for_comparison['spans']
+                final_chosen_value_content = neu_spans_val
             elif effective_neu_value_type == 'date':
-                final_chosen_value_content = neu_values_for_comparison['date']
-            final_confidence = neu_conf
-            final_rationale = f"Neural dominant result. {neural_rationale}"
-            final_status = 'success'
-            final_chosen_op_type = effective_neu_value_type
+                final_chosen_value_content = neu_date_val
 
-        # 4. Only Symbolic is usable (but not strong)
-        elif sym_status == 'success' and sym_conf >= MIN_USABLE_SYM_CONF and is_valid_sym_op_type and current_effective_sym_value_type is not None:
-            debug['fusion_strategy_drop'] = 'weak_symbolic_fallback_no_good_neural'
-            if current_effective_sym_value_type == 'number':
-                final_chosen_value_content = sym_number_for_comp
-            elif current_effective_sym_value_type == 'spans':
-                final_chosen_value_content = sym_spans_for_comp
-            elif current_effective_sym_value_type == 'date':
-                final_chosen_value_content = sym_date_for_comp
-            final_confidence = sym_conf
-            final_rationale = f"Symbolic fallback as neural was unusable. {sym_rationale}"
-            final_status = 'success'
-            final_chosen_op_type = sym_op_type
+        # Case 5: Only Symbolic is usable (and not necessarily strong)
+        elif sym_status == 'success' and sym_conf >= MIN_USABLE_SYM_CONF and effective_sym_value_type:
+            debug['fusion_strategy_drop'] = 'symbolic_only_usable'
+            final_status, final_chosen_op_type, final_confidence, final_rationale = \
+                'success', sym_op_type, sym_conf, f"Symbolic only usable: {sym_rationale}"
+            if effective_sym_value_type == 'number':
+                final_chosen_value_content = sym_number_val
+            elif effective_sym_value_type == 'spans':
+                final_chosen_value_content = sym_spans_val
+            elif effective_sym_value_type == 'date':
+                final_chosen_value_content = sym_date_val
 
-        # 5. Only Neural is usable (but not strong)
-        elif neu_parsed_successfully and neu_conf >= MIN_USABLE_NEU_CONF and effective_neu_value_type is not None:
-            debug['fusion_strategy_drop'] = 'weak_parsed_neural_fallback_no_good_symbolic'
-            if effective_neu_value_type == 'number':
-                final_chosen_value_content = neu_values_for_comparison['number']
-            elif effective_neu_value_type == 'spans':
-                final_chosen_value_content = neu_values_for_comparison['spans']
-            elif effective_neu_value_type == 'date':
-                final_chosen_value_content = neu_values_for_comparison['date']
-            final_confidence = neu_conf
-            final_rationale = f"Neural fallback as symbolic was unusable. {neural_rationale}"
-            final_status = 'success'
-            final_chosen_op_type = effective_neu_value_type
-
-        # 6. Failure Case - Neither path yielded a usable result above MIN_USABLE thresholds
+        # Case 6: Fallback if no path is clearly superior or usable
         else:
-            debug['fusion_strategy_drop'] = 'failure_no_confident_source'
-            final_rationale = (f"Fusion failed: No sufficiently valid or confident symbolic result "
-                               f"(Status: {sym_status}, SymOpType: {sym_op_type}, SymValueType: {current_effective_sym_value_type}, SymConf: {sym_conf:.2f}) "
-                               f"AND no sufficiently valid or confident neural result "
-                               f"(Parsed: {neu_parsed_successfully}, NeuValueType: {effective_neu_value_type}, NeuConf: {neu_conf:.2f}) found.")
-            self.logger.warning(f"[DROP QID:{qid}] {final_rationale}")
-            final_confidence = 0.05  # Very low for this type of failure
+            debug['fusion_strategy_drop'] = 'fallback_no_clear_choice'
             final_status = 'error'
-            # Attempt to set a type if one was determined, otherwise 'error'
-            final_chosen_op_type = sym_op_type if is_valid_sym_op_type else (
-                effective_neu_value_type if effective_neu_value_type else 'error')
+            final_rationale = f"Fusion failure: Neither symbolic nor neural provided a usable result above minimum thresholds. Sym: {sym_status}, {sym_conf:.2f}. Neu: parsed={neu_parsed_successfully}, {neu_conf:.2f}."
+            final_chosen_op_type = sym_op_type or effective_neu_value_type or 'error'  # Best guess for type
+            final_confidence = 0.05  # Lowest confidence
 
-        # Construct the final answer object
-        final_return_obj = self._create_drop_answer_obj(final_chosen_op_type, final_chosen_value_content)
+        # Final assembly of the answer object
+        final_answer_obj = self._create_drop_answer_obj(final_chosen_op_type, final_chosen_value_content)
+        final_answer_obj['status'] = final_status
+        final_answer_obj['confidence'] = round(final_confidence, 3)
+        final_answer_obj['rationale'] = final_rationale
+        final_answer_obj['type'] = final_chosen_op_type if final_status == 'success' else 'error_fusion'
 
-        # Update with overall status, confidence, and rationale from fusion decision
-        final_return_obj['status'] = final_status
-        final_return_obj['confidence'] = round(final_confidence, 3)
-        final_return_obj['rationale'] = final_rationale
-        final_return_obj[
-            'type'] = final_chosen_op_type if final_status == 'success' else 'error_fusion_decision'  # More specific error type
-
-        final_return_obj['symbolic_time'] = self.component_times.get('symbolic', 0.0)
-        final_return_obj['neural_time'] = self.component_times.get('neural', 0.0)
-        final_return_obj['fusion_time'] = self.component_times.get('fusion', 0.0)
+        # Add component timings to the debug info that will be passed to the aggregator
+        debug['symbolic_time'] = self.component_times.get('symbolic', 0.0)
+        debug['neural_time'] = self.component_times.get('neural', 0.0)  # This is pre-fusion neural time
+        # Fusion time is calculated in the calling _handle_drop_path method
 
         self._update_fusion_metrics(final_confidence, query_complexity, debug)
         self.logger.info(
             f"[DROP QID:{qid}] Fusion Decision: Strategy='{debug['fusion_strategy_drop']}', "
-            f"ChosenOpType='{final_return_obj['type']}', Confidence={final_return_obj['confidence']:.2f}, Status={final_return_obj['status']}"
+            f"ChosenOpType='{final_answer_obj['type']}', Confidence={final_answer_obj['confidence']:.2f}, Status={final_answer_obj['status']}"
         )
-        self.logger.debug(f"[DROP QID:{qid}] Final Fused Object: {final_return_obj}")
+        self.logger.debug(f"[DROP QID:{qid}] Final Fused Object: {final_answer_obj}")
 
-        return final_return_obj, final_confidence, debug
+        return final_answer_obj, final_confidence, debug
 
     def _create_drop_answer_obj(self, answer_type: Optional[str], value: Any) -> Dict[str, Any]:
         """

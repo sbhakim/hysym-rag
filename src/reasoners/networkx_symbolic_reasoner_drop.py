@@ -438,9 +438,11 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
             return {'status': 'error', 'operation': matched_op_details.get('type') if matched_op_details else None,
                     'confidence': 0.05, 'rationale': f'Error processing arguments from fallback: {e}'}
 
-    def _refine_extracted_entity(self, entity_text: str, query_doc: Optional[Any], query_id: str, is_fallback_arg: bool = False) -> str:
+    def _refine_extracted_entity(self, entity_text: str, query_doc: Optional[Any], query_id: str,
+                                 is_fallback_arg: bool = False) -> str:
         """
-        Refines an extracted entity string using NLP if available, with more care for fallback arguments.
+        Refines an extracted entity string using NLP if available.
+        [UPDATED]: Added basic dependency parsing to find head nouns for fallback args.
         """
         original_entity_text = entity_text.strip()
         qid_log_prefix = f"[DROP QID:{query_id}] _refine_extracted_entity"
@@ -448,18 +450,20 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         if not original_entity_text:
             return ""
 
-        # Minimal cleaning first
-        refined = re.sub(r"^(the|a|an|any|what|which|who)\s+", "", original_entity_text, flags=re.IGNORECASE).strip()
-        refined = re.sub(r"\s*'s$", "", refined).strip()
+        refined = re.sub(r"^(the|a|an|any|what|which|who|whose)\s+", "", original_entity_text,
+                         flags=re.IGNORECASE).strip()
+        refined = re.sub(r"\s*'s$", "", refined).strip()  # Remove possessive 's
         refined = refined.rstrip('?.!,:')
 
         if is_fallback_arg:
-            common_prefixes = ["name of the", "the name of the", "the name of", "name of", "scored by", "kicked by",
-                               "thrown by", "gained by", "caught by", "number of", "how many total", "how many"]
-            common_suffixes = ["was by whom", "was by which player", "was by what player", "did", "was", "is", "were",
-                               "score", "kick", "hit", "throw", "rush for", "pass for", "gain", "intercept", "complete",
-                               "make", "lead with", "take off", "of the game"]
-            for _ in range(2):
+            common_prefixes = ["name of the", "the name of the", "the name of", "name of",
+                               "scored by", "kicked by", "thrown by", "gained by", "caught by",
+                               "number of", "how many total", "how many", "value of the", "value of"]
+            common_suffixes = ["was by whom", "was by which player", "was by what player",
+                               "did", "was", "is", "were", "score", "kick", "hit", "throw",
+                               "rush for", "pass for", "gain", "intercept", "complete",
+                               "make", "lead with", "take off", "of the game", "in the game", "by the team"]
+            for _ in range(2):  # Apply twice for nested cases
                 for prefix in common_prefixes:
                     if refined.lower().startswith(prefix.lower()):
                         refined = refined[len(prefix):].strip()
@@ -468,9 +472,10 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                         refined = refined[:-len(suffix)].strip()
             refined = refined.rstrip('?.!,:')
 
-        if not refined:
-            self.logger.debug(f"{qid_log_prefix} Entity '{original_entity_text}' became empty after initial/fallback cleaning, reverting.")
-            return original_entity_text
+        if not refined:  # If cleaning made it empty, revert to original stripped version
+            self.logger.debug(
+                f"{qid_log_prefix} Entity '{original_entity_text}' became empty after initial/fallback cleaning, reverting.")
+            return original_entity_text.strip().rstrip('?.!,:')
 
         if not self.nlp:
             self.logger.debug(f"{qid_log_prefix} spaCy unavailable, returning basic cleaned: '{refined}'")
@@ -478,34 +483,59 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
 
         doc_to_refine = self.nlp(refined)
 
-        if is_fallback_arg and len(doc_to_refine) > 4:
-            self.logger.debug(f"{qid_log_prefix} Fallback arg '{original_entity_text}' (cleaned: '{refined}') is long, attempting deeper NLP refinement.")
-            ner_entities_in_arg = [ent.text.strip() for ent in doc_to_refine.ents
-                                   if ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL'] and len(ent.text.split()) < 5]
-            if ner_entities_in_arg:
-                best_ner_arg = max(ner_entities_in_arg, key=len)
-                self.logger.debug(f"{qid_log_prefix} Refined fallback arg to internal NER '{best_ner_arg}'")
-                return best_ner_arg
-
-            noun_chunks_in_arg = [chunk.text.strip() for chunk in doc_to_refine.noun_chunks
-                                  if not all(tok.is_stop or tok.is_punct for tok in chunk) and len(chunk.text.split()) < 5]
-            if noun_chunks_in_arg:
-                best_noun_chunk_arg = sorted(noun_chunks_in_arg, key=lambda nc: (sum(1 for t in self.nlp(nc) if t.pos_ == 'PROPN'), len(nc)), reverse=True)
-                if best_noun_chunk_arg:
-                    self.logger.debug(f"{qid_log_prefix} Refined fallback arg to Noun Chunk '{best_noun_chunk_arg[0]}'")
-                    return best_noun_chunk_arg[0]
-            self.logger.debug(f"{qid_log_prefix} No significant NER/NounChunk refinement for long fallback arg: '{refined}'")
-
+        # Attempt to find a more core entity using NER from the query document first
         if query_doc:
             for ent in query_doc.ents:
-                if refined.lower() in ent.text.lower() and len(ent.text) > len(refined) and len(ent.text.split()) < 5:
-                    if ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL']:
-                        self.logger.debug(f"{qid_log_prefix} Expanded '{refined}' to query NER span '{ent.text}' (Label: {ent.label_})")
-                        return ent.text.strip()
-                elif ent.text.lower() in refined.lower() and len(ent.text.split()) < 5 and len(ent.text.lower()) >= 3 and ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL']:
-                    self.logger.debug(f"{qid_log_prefix} Refined '{refined}' by matching query NER span '{ent.text}' (Label: {ent.label_})")
+                # If refined text is part of a larger, more specific NER span from the query
+                if refined.lower() in ent.text.lower() and len(ent.text.split()) < 5 and \
+                        ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL']:
+                    self.logger.debug(
+                        f"{qid_log_prefix} Expanded '{refined}' to query NER span '{ent.text}' (Label: {ent.label_})")
+                    return ent.text.strip()
+                # If an NER span from the query is *within* the refined text (e.g., refined="touchdown by PlayerX", NER="PlayerX")
+                elif ent.text.lower() in refined.lower() and len(ent.text.split()) < 5 and \
+                        ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL']:
+                    self.logger.debug(
+                        f"{qid_log_prefix} Refined '{refined}' by matching internal query NER span '{ent.text}' (Label: {ent.label_})")
                     return ent.text.strip()
 
+        # If it's a fallback argument and potentially noisy, try to find the head noun or a strong NER within it.
+        if is_fallback_arg and len(doc_to_refine) > 1:  # Only for multi-token fallback args
+            # Prioritize NER within the fallback argument itself
+            ner_entities_in_arg = [ent.text.strip() for ent in doc_to_refine.ents
+                                   if ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL',
+                                                         'CARDINAL'] and len(ent.text.split()) < 5]
+            if ner_entities_in_arg:
+                best_ner_arg = max(ner_entities_in_arg, key=len)  # Prefer longer NER span
+                self.logger.debug(
+                    f"{qid_log_prefix} Refined fallback arg from '{refined}' to internal NER '{best_ner_arg}'")
+                return best_ner_arg
+
+            # Fallback to noun chunks if NER is not definitive
+            # Try to find the "most significant" noun chunk (e.g., one that is a proper noun or the object of a preposition)
+            best_chunk_text = refined
+            highest_chunk_score = -1
+
+            for chunk in doc_to_refine.noun_chunks:
+                chunk_text = chunk.text.strip()
+                if not chunk_text or len(chunk_text.split()) >= 5: continue
+
+                score = len(chunk_text)  # Base score on length
+                if chunk.root.pos_ == 'PROPN': score += 10  # Boost for proper nouns
+                if chunk.root.dep_ in ('pobj', 'dobj'): score += 5  # Boost if it's an object
+
+                # If this chunk is better, take it
+                if score > highest_chunk_score:
+                    highest_chunk_score = score
+                    best_chunk_text = chunk_text
+
+            if best_chunk_text != refined and highest_chunk_score > len(
+                    refined) / 2:  # Only if substantially different and scored
+                self.logger.debug(
+                    f"{qid_log_prefix} Refined fallback arg from '{refined}' to noun chunk '{best_chunk_text}'")
+                return best_chunk_text
+
+        self.logger.debug(f"{qid_log_prefix} Final refined entity for '{original_entity_text}': '{refined}'")
         return refined
 
     def _get_query_keywords(self, query_lower: str, query_id: str) -> List[str]:
@@ -1130,135 +1160,131 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         """
         Helper to find numbers (values) and their original text spans, attempting to associate
         them with the entity_desc using query_keywords and NLP for better precision.
-        [FIXED: Changed access to entity text to be more robust, avoiding direct token.ent_.text if problematic]
+        [REVISED to more robustly handle entity text and avoid token.ent_ issues]
         """
-        pairs: List[Tuple[Optional[Union[int, float]], str]] = []  #
-        qid_log_prefix = f"[DROP QID:{query_id}] _find_values_and_spans"  #
+        pairs: List[Tuple[Optional[Union[int, float]], str]] = []
+        qid_log_prefix = f"[DROP QID:{query_id}] _find_values_and_spans"
 
         if not self.nlp:
-            self.logger.warning(f"{qid_log_prefix} spaCy unavailable. Fallback will be less accurate.")  #
-            numbers_in_context = self._find_numbers_in_passage(context, query_id)  #
+            self.logger.warning(f"{qid_log_prefix} spaCy unavailable. Fallback will be less accurate.")
+            numbers_in_context = self._find_numbers_in_passage(context, query_id)
             if entity_desc.lower() in context.lower() and numbers_in_context:
                 for num in numbers_in_context:
-                    pairs.append((num, str(num)))  #
-            return list(set(pairs))  #
+                    pairs.append((num, str(num)))
+            return list(set(pairs))
 
-        doc = self.nlp(context)  #
-        entity_desc_lower = entity_desc.lower()  #
+        doc = self.nlp(context)
+        entity_desc_lower = entity_desc.lower()
 
-        processed_entity_desc_keywords = set(kw.lower() for kw in (query_keywords or []))  #
-        if not processed_entity_desc_keywords:
-            desc_doc = self.nlp(entity_desc_lower)  #
+        processed_entity_desc_keywords = set(kw.lower() for kw in (query_keywords or []))
+        if not processed_entity_desc_keywords: # If no query_keywords, generate from entity_desc
+            desc_doc = self.nlp(entity_desc_lower)
             processed_entity_desc_keywords.update(
-                token.lemma_ for token in desc_doc if  #
-                not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ']  #
+                token.lemma_ for token in desc_doc if
+                not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ']
             )
-        if not processed_entity_desc_keywords and entity_desc_lower:
+        if not processed_entity_desc_keywords and entity_desc_lower: # Further fallback
             processed_entity_desc_keywords.update(
-                token.lemma_ for token in self.nlp(entity_desc_lower) if token.pos_ in ['NOUN', 'PROPN'])  #
+                token.lemma_.lower() for token in self.nlp(entity_desc_lower) if token.pos_ in ['NOUN', 'PROPN'])
+
 
         self.logger.debug(
-            f"{qid_log_prefix}: entity_desc='{entity_desc}', keywords for matching: {processed_entity_desc_keywords}")  #
+            f"{qid_log_prefix}: entity_desc='{entity_desc}', keywords for association: {processed_entity_desc_keywords}")
 
-        PROXIMITY_WINDOW = 7  #
-
-        # Keep track of tokens already processed as part of an NER entity to avoid double counting
-        processed_ner_tokens = set()
+        PROXIMITY_WINDOW = 7
+        processed_tokens_from_ner_numbers = set() # Keep track of token indices covered by NER numbers
 
         for sent in doc.sents:
-            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop and not token.is_punct}  #
-            keyword_overlap_count = len(processed_entity_desc_keywords.intersection(sent_lemmas))  #
-            relevance_threshold = 1 if len(processed_entity_desc_keywords) <= 3 else 2  #
+            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop and not token.is_punct}
+            keyword_overlap_count = len(processed_entity_desc_keywords.intersection(sent_lemmas))
+            relevance_threshold = 1 if len(processed_entity_desc_keywords) <= 3 else 2
 
-            if keyword_overlap_count >= relevance_threshold:  #
+            if keyword_overlap_count >= relevance_threshold:
                 self.logger.debug(
-                    f"{qid_log_prefix} Relevant sentence for '{entity_desc}': '{sent.text[:100]}...' (Overlap: {keyword_overlap_count})")  #
+                    f"{qid_log_prefix} Analyzing relevant sentence for '{entity_desc}': '{sent.text[:100]}...' (Overlap: {keyword_overlap_count})")
 
-                # First, process recognized NER entities in the sentence
+                # Pass 1: Process NER entities that are numerical
                 for ent in sent.ents:
                     if ent.label_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT']:
                         num_val = None
-                        original_num_span_text = ent.text  # Use ent.text for the full entity span
+                        original_num_span_text = ent.text # Use the full entity text
                         try:
-                            num_str = original_num_span_text.replace(',', '').replace('$', '').replace('%',
-                                                                                                       '').strip()  #
-                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):  #
-                                num_val = float(num_str) if '.' in num_str else int(num_str)  #
+                            num_str = original_num_span_text.replace(',', '').replace('$', '').replace('%', '').strip()
+                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
+                                num_val = float(num_str) if '.' in num_str else int(num_str)
                                 # Mark tokens within this entity as processed
-                                for i in range(ent.start, ent.end):
-                                    processed_ner_tokens.add(i)
+                                for t_idx in range(ent.start, ent.end):
+                                    processed_tokens_from_ner_numbers.add(t_idx)
                         except ValueError:
-                            pass  # num_val remains None
+                            pass # num_val remains None
 
                         if num_val is not None:
-                            # Association logic (check proximity to keywords)
                             is_associated = False
-                            # Check keywords within the entity itself or in proximity
-                            ent_lemmas = {t.lemma_.lower() for t in ent if not t.is_stop and not t.is_punct}
-                            if processed_entity_desc_keywords.intersection(ent_lemmas):
-                                is_associated = True
-                            else:  # Check proximity if not in entity itself
-                                window_tokens_indices = set(
-                                    range(max(sent.start, ent.start - PROXIMITY_WINDOW), ent.start)) | \
-                                                        set(range(ent.end, min(sent.end, ent.end + PROXIMITY_WINDOW)))
-                                for token_idx in window_tokens_indices:
-                                    if doc[token_idx].lemma_.lower() in processed_entity_desc_keywords:
-                                        is_associated = True
-                                        break
+                            # Check if entity description keywords are within/near this NER number entity
+                            ent_token_indices = set(range(ent.start, ent.end))
+                            # Define window relative to the document tokens
+                            window_start_abs = max(doc[0].i, ent.start - PROXIMITY_WINDOW)
+                            window_end_abs = min(len(doc), ent.end + PROXIMITY_WINDOW)
+                            window_indices = set(range(window_start_abs, ent.start)) | \
+                                             set(range(ent.end, window_end_abs))
+
+                            for token_idx in list(ent_token_indices) + list(window_indices):
+                                if token_idx < len(doc) and doc[token_idx].lemma_.lower() in processed_entity_desc_keywords:
+                                    is_associated = True
+                                    break
 
                             if is_associated:
-                                pairs.append((num_val, original_num_span_text))  #
+                                pairs.append((num_val, original_num_span_text))
                                 self.logger.debug(
-                                    f"{qid_log_prefix} Associated NER value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}' via NER & proximity.")  #
+                                    f"{qid_log_prefix} Associated NER value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}'.")
 
-                # Then, process like_num tokens that were NOT part of an already processed NER entity
+                # Pass 2: Process like_num tokens NOT already part of an NER number
                 for token in sent:
-                    if token.i in processed_ner_tokens:  # Skip if already handled by NER
-                        continue
+                    if token.i in processed_tokens_from_ner_numbers:
+                        continue # Skip if already processed as part of an NER number
 
                     num_val = None
-                    original_num_span_text = token.text  #
+                    original_num_span_text = token.text
 
-                    if token.like_num and not token.is_punct and not token.is_stop:  #
+                    if token.like_num and not token.is_punct and not token.is_stop:
                         try:
-                            num_str = token.text.replace(',', '').strip()  #
-                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):  #
-                                num_val = float(num_str) if '.' in num_str else int(num_str)  #
+                            num_str = token.text.replace(',', '').strip()
+                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
+                                num_val = float(num_str) if '.' in num_str else int(num_str)
                         except ValueError:
-                            pass  #
+                            pass
 
                     if num_val is not None:
-                        is_associated = False  #
-                        # Check proximity for like_num tokens
-                        context_window_start = max(0, token.i - sent.start - PROXIMITY_WINDOW)  #
-                        context_window_end = min(len(sent), token.i - sent.start + 1 + PROXIMITY_WINDOW)  #
+                        is_associated = False
+                        # Check proximity using token indices relative to the document
+                        start_window_abs = max(doc[0].i, token.i - PROXIMITY_WINDOW)
+                        end_window_abs = min(len(doc), token.i + 1 + PROXIMITY_WINDOW)
 
-                        for i in range(context_window_start, context_window_end):  #
-                            # Check relative to sentence start
-                            if sent[i].i == token.i:  # Don't compare token to itself
-                                continue  #
-                            if sent[i].lemma_.lower() in processed_entity_desc_keywords:  #
-                                is_associated = True  #
-                                break  #
+                        for i_abs in range(start_window_abs, end_window_abs):
+                            if i_abs == token.i: # Don't compare token to itself
+                                continue
+                            if i_abs < len(doc) and doc[i_abs].lemma_.lower() in processed_entity_desc_keywords:
+                                is_associated = True
+                                break
 
                         if is_associated:
-                            pairs.append((num_val, original_num_span_text))  #
+                            pairs.append((num_val, original_num_span_text))
                             self.logger.debug(
-                                f"{qid_log_prefix} Associated like_num value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}' due to keyword proximity.")  #
+                                f"{qid_log_prefix} Associated like_num value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}' due to keyword proximity.")
 
-        unique_pairs_set = set()  #
-        final_pairs: List[Tuple[Optional[Union[int, float]], str]] = []  #
+        unique_pairs_set = set()
+        final_pairs: List[Tuple[Optional[Union[int, float]], str]] = []
         for val, span_str in pairs:
-            if (val, span_str) not in unique_pairs_set:  #
-                final_pairs.append((val, span_str))  #
-                unique_pairs_set.add((val, span_str))  #
+            if (val, span_str) not in unique_pairs_set:
+                final_pairs.append((val, span_str))
+                unique_pairs_set.add((val, span_str))
 
         if not final_pairs:
             self.logger.warning(
-                f"{qid_log_prefix} No numbers found specifically associated with '{entity_desc}' using keywords.")  #
+                f"{qid_log_prefix} No numbers found specifically associated with '{entity_desc}' using keywords.")
 
         self.logger.debug(
-            f"{qid_log_prefix} Found {len(final_pairs)} value/span pairs for '{entity_desc}': {final_pairs}")  #
+            f"{qid_log_prefix} Found {len(final_pairs)} value/span pairs for '{entity_desc}': {final_pairs}")
         return final_pairs
 
     def execute_difference(self, args: Dict[str, Any], context: str, query_id: str) -> Dict[str, Any]:
@@ -1454,96 +1480,124 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
                                  query_keywords: List[str] = None) -> List[Union[int, float]]:
         """
         Find numbers associated with an entity description in the context.
+        [UPDATED]: Enhanced with dependency parsing for more direct association.
         """
         qid_log_prefix = f"[DROP QID:{query_id}] _find_associated_numbers"
         values: List[Union[int, float]] = []
+
         if not self.nlp:
             self.logger.warning(f"{qid_log_prefix} spaCy unavailable. Number association will be basic regex based.")
+            # Simplified fallback: find numbers in sentences containing the entity_desc
             all_numbers_in_context = self._find_numbers_in_passage(context, query_id)
-            if entity_desc.lower() in context.lower():
+            if entity_desc.lower() in context.lower():  # Basic check
                 self.logger.debug(
-                    f"{qid_log_prefix} Fallback: entity '{entity_desc}' in context, returning all numbers: {all_numbers_in_context}")
-                return list(set(all_numbers_in_context))
+                    f"{qid_log_prefix} Fallback: entity '{entity_desc}' in context, returning all numbers found in context: {all_numbers_in_context}")
+                return list(set(all_numbers_in_context))  # Return all numbers if entity_desc is present
             return []
 
         doc = self.nlp(context)
-        entity_desc_lemmas = {token.lemma_.lower() for token in self.nlp(entity_desc) if
-                              not token.is_stop and token.pos_ != 'DET'}
-        query_keywords_set = {kw.lower() for kw in (query_keywords or [])} | entity_desc_lemmas
-        if not query_keywords_set and entity_desc:
-            query_keywords_set.update(token.lemma_.lower() for token in self.nlp(entity_desc) if
-                                      token.pos_ in ['NOUN', 'PROPN', 'ADJ', 'VERB'])
+        entity_desc_lower = entity_desc.lower()
 
-        self.logger.debug(
-            f"{qid_log_prefix}: entity_desc='{entity_desc}', keywords for association: {query_keywords_set}")
+        # Keywords from entity_desc and query for matching context more broadly
+        search_keywords = set(kw.lower() for kw in (query_keywords or []))
+        if not search_keywords and entity_desc:
+            desc_doc_temp = self.nlp(entity_desc_lower)
+            search_keywords.update(
+                token.lemma_.lower() for token in desc_doc_temp if not token.is_stop and token.pos_ != 'DET')
 
-        processed_number_token_indices = set()
+        self.logger.debug(f"{qid_log_prefix}: entity_desc='{entity_desc}', keywords for filtering: {search_keywords}")
+
+        candidate_numbers_with_scores: List[Tuple[Union[int, float], float]] = []
 
         for sent in doc.sents:
-            sent_keyword_match = any(tok.lemma_.lower() in query_keywords_set for tok in sent)
-            if not sent_keyword_match:
+            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop and not token.is_punct}
+            # Pre-filter sentences that contain some of the search keywords
+            if not search_keywords or not search_keywords.intersection(sent_lemmas):
                 continue
 
-            self.logger.debug(f"{qid_log_prefix} Analyzing relevant sentence: '{sent.text[:100]}...'")
+            self.logger.debug(
+                f"{qid_log_prefix} Analyzing relevant sentence for '{entity_desc}': '{sent.text[:100]}...'")
 
             for token in sent:
-                if token.i in processed_number_token_indices:
-                    continue
+                if token.like_num and not token.is_stop:
+                    num_val = self._normalize_drop_number_for_comparison(token.text)
+                    if num_val is None:
+                        continue
 
-                num_val: Optional[Union[int, float]] = None
-                num_token_span_for_debug = token.text
+                    # Association scoring:
+                    # 1. Direct syntactic relation to a keyword (strongest cue)
+                    # 2. Keyword in proximity (moderate cue)
+                    # 3. General sentence relevance (weaker cue, already pre-filtered)
+                    association_score = 0.0
 
-                if token.ent_type_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT']:
-                    try:
-                        num_str = token.ent_.text.replace(',', '').replace('$', '').replace('%', '').strip()
-                        if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
-                            num_val = float(num_str) if '.' in num_str else int(num_str)
-                            num_token_span_for_debug = token.ent_.text
-                            for ent_tok_idx in range(token.ent_.start, token.ent_.end):
-                                processed_number_token_indices.add(ent_tok_idx)
-                    except ValueError:
-                        pass
-
-                if num_val is None and token.like_num and not token.is_punct:
-                    try:
-                        num_str = token.text.replace(',', '').strip()
-                        if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
-                            num_val = float(num_str) if '.' in num_str else int(num_str)
-                            processed_number_token_indices.add(token.i)
-                    except ValueError:
-                        pass
-
-                if num_val is not None:
-                    is_strongly_associated = False
-                    head_token = token.head
-                    if head_token.lemma_.lower() in query_keywords_set:
-                        is_strongly_associated = True
+                    # Check for direct syntactic link (e.g., "5 yards", "score of 10")
+                    # Check token.head (parent) or token.children
+                    related_to_keyword_syntactically = False
+                    # Check parent
+                    if token.head.lemma_.lower() in search_keywords:
+                        association_score = 0.8  # Strong association
+                        related_to_keyword_syntactically = True
                         self.logger.debug(
-                            f"{qid_log_prefix} Number '{num_val}' from '{num_token_span_for_debug}' associated with head '{head_token.text}'({head_token.lemma_})")
+                            f"{qid_log_prefix} Num '{num_val}' linked to keyword '{token.head.lemma_}' via head.")
 
-                    if not is_strongly_associated:
+                    # Check children (e.g. "yards: 5")
+                    if not related_to_keyword_syntactically:
                         for child in token.children:
-                            if child.lemma_.lower() in query_keywords_set:
-                                is_strongly_associated = True
+                            if child.lemma_.lower() in search_keywords:
+                                association_score = 0.75  # Strong association
+                                related_to_keyword_syntactically = True
                                 self.logger.debug(
-                                    f"{qid_log_prefix} Number '{num_val}' from '{num_token_span_for_debug}' associated with child '{child.text}'({child.lemma_})")
+                                    f"{qid_log_prefix} Num '{num_val}' linked to keyword '{child.lemma_}' via child.")
                                 break
 
-                    if not is_strongly_associated:
-                        window_tokens = [sent[j] for j in range(max(0, token.i - 3), min(len(sent), token.i + 4)) if
-                                         j != token.i]
-                        if any(wt.lemma_.lower() in query_keywords_set for wt in window_tokens):
-                            is_strongly_associated = True
+                    # Check siblings in a compound phrase or apposition related to a keyword
+                    if not related_to_keyword_syntactically:
+                        if token.head.lemma_.lower() in search_keywords:  # If head is keyword
+                            for sibling in token.head.children:  # Check siblings of the number under that keyword head
+                                if sibling.i != token.i and sibling.lemma_.lower() in search_keywords:  # Another keyword related?
+                                    association_score = 0.7
+                                    self.logger.debug(
+                                        f"{qid_log_prefix} Num '{num_val}' linked to keyword '{token.head.lemma_}' and sibling keyword '{sibling.lemma_}'.")
+                                    break
+
+                    # If no direct syntactic link, check proximity within a window
+                    if association_score < 0.7:  # Only if not strongly linked syntactically
+                        PROXIMITY_WINDOW_TOKENS = 5
+                        window_start = max(sent.start, token.i - PROXIMITY_WINDOW_TOKENS)
+                        window_end = min(sent.end, token.i + 1 + PROXIMITY_WINDOW_TOKENS)
+                        local_context_tokens = doc[window_start:window_end]
+
+                        num_proximal_keywords = 0
+                        for t_ctx in local_context_tokens:
+                            if t_ctx.lemma_.lower() in search_keywords:
+                                num_proximal_keywords += 1
+
+                        if num_proximal_keywords > 0:
+                            association_score = max(association_score,
+                                                    0.4 + (num_proximal_keywords * 0.1))  # Max 0.4 + 0.1*N
                             self.logger.debug(
-                                f"{qid_log_prefix} Number '{num_val}' from '{num_token_span_for_debug}' associated by proximity to keywords.")
+                                f"{qid_log_prefix} Num '{num_val}' has {num_proximal_keywords} keywords in proximity. Score: {association_score:.2f}")
 
-                    if is_strongly_associated:
-                        values.append(num_val)
+                    if association_score > 0.35:  # Minimum threshold to consider it associated
+                        candidate_numbers_with_scores.append((num_val, association_score))
 
-        unique_values = sorted(list(set(values)))
+        # Sort by association score, then by magnitude (e.g. if looking for "total points", higher might be better)
+        candidate_numbers_with_scores.sort(key=lambda x: (x[1], abs(x[0]) if isinstance(x[0], (int, float)) else 0),
+                                           reverse=True)
+
+        # Deduplicate values while keeping the one with the highest association score
+        seen_values = {}
+        for val, score in candidate_numbers_with_scores:
+            if val not in seen_values or score > seen_values[val]:
+                seen_values[val] = score
+
+        unique_values_list = [val for val, score in seen_values.items()]  # Get values
+        # Convert floats that are whole numbers to ints for cleaner representation
+        final_values = [int(v) if isinstance(v, float) and v.is_integer() else v for v in unique_values_list]
+
         self.logger.debug(
-            f"{qid_log_prefix} Found {len(unique_values)} associated numbers for '{entity_desc}': {unique_values}")
-        return unique_values
+            f"{qid_log_prefix} Found {len(final_values)} uniquely associated numbers for '{entity_desc}': {final_values} (Scores: {seen_values})")
+        return final_values
 
     def execute_entity_span(self, args: Dict[str, Any], context: str, query_id: str) -> Dict[str, Any]:
         """

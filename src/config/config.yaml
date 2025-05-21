@@ -4,18 +4,25 @@
 model_name: "meta-llama/Llama-3.2-3B"
 data_dir: "data/" # General data directory
 
-# ---- MODIFICATION START ----
-# Dataset Specific Paths
+# ---- Dataset Specific Paths ----
 hotpotqa_dataset_path: "data/hotpot_dev_distractor_v1.json"
 drop_dataset_path: "data/drop_dataset_dev.json"
+drop_few_shot_examples_path: "data/drop_few_shot_examples.json" # Path for few-shot examples
 
-# Rule Files (Consider making these dataset-specific)
-# rules_file: "rules.json" # This can be a generic fallback or removed if using specific ones
-hotpotqa_rules_file: "data/rules_hotpotqa.json" # Example, if you rename your current rules.json
-drop_rules_file: "data/rules_drop.json"         # You'll need to create this file for DROP rules
-# ---- MODIFICATION END ----
+# ---- Feature Flags ----
+# Control for including few-shot examples in NeuralRetriever for DROP
+# 1 for true (include), 0 for false (exclude)
+use_drop_few_shots: 0 # Set to 1 to enable, 0 to disable
 
-knowledge_base: "small_knowledge_base.txt"
+# Rule Files
+# The main system run (run_hysym_system) will dynamically create and prioritize rules_drop_dynamic.json for DROP.
+# Ablation studies can explicitly choose between these via ablation_config.yaml.
+hotpotqa_rules_file: "data/rules_hotpotqa.json"
+drop_rules_file: "data/rules_drop.json"                     # Static/fallback DROP rules
+drop_rules_dynamic_file: "data/rules_drop_dynamic.json"     # Path where dynamic DROP rules are saved (optional to list here, as main.py handles it)
+empty_rules_file: "data/empty_rules.json"                   # For "no rules" ablation (optional to list here)
+
+knowledge_base: "data/small_knowledge_base.txt" # Ensured path consistency
 
 # Dimension Management and Embedding Configuration
 embeddings:
@@ -57,11 +64,29 @@ error_recovery:
   max_retries: 3
   backoff_factor: 1.5
   fallback_enabled: true
-  cache_ttl: 3600
+  cache_ttl: 3600 # Cache TTL for HybridIntegrator query cache
 
-# Metrics Configuration
+# Metrics Configuration (for MetricsCollector during standard runs)
 metrics:
   detailed_logging: true
-  save_frequency: 100
+  save_frequency: 100       # How often MetricsCollector saves its internal state for standard runs
   history_window: 1000
   performance_tracking: true
+
+# Symbolic Reasoner specific defaults (can be overridden by ablation configs)
+# These are illustrative; your ablation_config.yaml would be the primary source for ablation-specific values
+symbolic_match_threshold_hotpot: 0.1
+symbolic_max_hops_hotpot: 5
+symbolic_match_threshold_drop: 0.1
+symbolic_max_hops_drop: 3
+drop_rule_min_support: 5 # For dynamic rule extraction
+
+# Neural Retriever specific defaults (can be overridden by ablation configs)
+neural_use_quantization: False
+neural_max_context_length: 2048
+neural_chunk_size: 512
+neural_overlap: 128
+
+# System Control Manager defaults
+error_retry_limit: 2
+max_query_time: 30.0 # General default, might be adjusted per dataset in logic

@@ -1,0 +1,57 @@
+# src/config/ablation_config.yaml
+# Common settings (can be overridden per ablation)
+common_embedding_model: "all-MiniLM-L6-v2"
+common_max_hops_drop: 3
+common_match_threshold_drop: 0.1
+# Paths to different rule sets
+dynamic_rules_path_drop: "data/rules_drop_dynamic.json"
+static_rules_path_drop: "data/rules_drop.json"
+no_rules_path: "data/empty_rules.json"
+
+# Ablation configurations for DROP
+drop_ablations:
+  - name: "Baseline Hybrid (Dynamic Rules, Few-Shots)" #  full system
+    rules_file_key: "dynamic_rules_path_drop" # Key to lookup actual path
+    use_few_shots: True
+    disable_symbolic: False
+    disable_neural: False
+
+  - name: "Symbolic Only (Dynamic Rules)"
+    rules_file_key: "dynamic_rules_path_drop"
+    disable_neural: True
+    disable_symbolic: False # Symbolic is active
+
+  - name: "Symbolic Only (Static Rules)"
+    rules_file_key: "static_rules_path_drop"
+    disable_neural: True
+    disable_symbolic: False
+
+  - name: "Symbolic Only (No Rules)" # Tests fallback regex operation extraction
+    rules_file_key: "no_rules_path"
+    disable_neural: True
+    disable_symbolic: False
+
+  - name: "Neural Only (With Few-Shots)"
+    disable_symbolic: True
+    use_few_shots: True
+    disable_neural: False # Neural is active
+
+  - name: "Neural Only (No Few-Shots)"
+    disable_symbolic: True
+    use_few_shots: False
+    disable_neural: False
+
+  - name: "Hybrid (Static Rules, Few-Shots)"
+    rules_file_key: "static_rules_path_drop"
+    use_few_shots: True
+    disable_symbolic: False
+    disable_neural: False
+
+  - name: "Hybrid (Dynamic Rules, No Few-Shots)"
+    rules_file_key: "dynamic_rules_path_drop"
+    use_few_shots: False
+    disable_symbolic: False
+    disable_neural: False
+
+  # Add other specific ablations, e.g., for different fusion strategies if configurable
+  # Or ablating QueryExpander, RG-Retriever if they are modularly disable-able
