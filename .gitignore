@@ -148,6 +148,17 @@ venv.bak/
 # mkdocs documentation
 /site
 
+# Ignore project-specific untracked files
+.idea/
+data/
+extract_hysym.sh
+hysym_code.txt
+hysym_code_1.txt
+hysym_code_2.txt
+hysym_code_3.txt
+metrics/
+tests/hotpotqa_evaluation_results.json
+
 # mypy
 .mypy_cache/
 .dmypy.json
