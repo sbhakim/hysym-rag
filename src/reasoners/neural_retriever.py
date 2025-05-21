@@ -68,60 +68,51 @@ class NeuralRetriever:
         if device is None:
             device = DeviceManager.get_device()
         self.device = device
-        self.logger = logger
+        self.logger = logger # Assuming logger is defined globally or passed
         self.logger.setLevel(logging.DEBUG)  # Use DEBUG for development
 
         ProgressManager.disable_progress()  # Ensure tqdm is off by default if needed
         transformers_logging.set_verbosity_error()  # Reduce transformer logging noise
 
-        # Set logging level for libraries known to be verbose
         logging.getLogger('transformers').setLevel(logging.ERROR)
-        logging.getLogger('sentence_transformers').setLevel(logging.WARNING)  # Keep warnings for ST
+        logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 
         try:
-            # Load tokenizer first
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            # Set pad token if it's missing (common for some models like Llama)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 self.logger.info("Tokenizer pad_token set to eos_token.")
         except Exception as e:
             self.logger.error(f"Failed to load tokenizer for {model_name}: {e}")
-            raise  # Critical error, re-raise
+            raise
 
         try:
-            # Load model
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
-                device_map="auto",  # Automatically distribute across devices if possible
-                torch_dtype="auto",  # Use appropriate dtype
+                device_map="auto",
+                torch_dtype="auto",
                 load_in_8bit=use_quantization,
-                # trust_remote_code=True  # May be needed for some models
             )
-            # Ensure model uses the same pad token ID as tokenizer
             self.model.config.pad_token_id = self.tokenizer.pad_token_id
             print(f"Model {model_name} loaded successfully!")
         except Exception as e:
             self.logger.error(f"Failed to load model {model_name}: {e}")
-            raise  # Critical error, re-raise
+            raise
 
         try:
-            # Load sentence encoder
             self.encoder = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
             self.logger.info("SentenceTransformer encoder loaded successfully.")
         except Exception as e:
             self.logger.error(f"Failed to load SentenceTransformer encoder: {e}")
-            self.encoder = None  # Allow operation without encoder, but log error
+            self.encoder = None
 
         try:
-            # [Updated May 16, 2025]: Enabled dependency parser for noun_chunks
-            self.nlp = spacy.load('en_core_web_sm', disable=['lemmatizer'])
+            self.nlp = spacy.load('en_core_web_sm', disable=['lemmatizer', 'tagger']) # Keep parser for noun_chunks
             self.logger.info("spaCy model 'en_core_web_sm' loaded successfully for NER and parsing.")
         except Exception as e:
             self.logger.warning(f"Failed to load spaCy model: {e}. Span parsing will be limited.")
             self.nlp = None
 
-        # Store configuration parameters
         self.max_context_length = max_context_length
         self.chunk_size = chunk_size
         self.overlap = overlap
@@ -132,11 +123,11 @@ class NeuralRetriever:
         self.guidance_statement_key = guidance_statement_key
         self.guidance_confidence_key = guidance_confidence_key
 
-        # Initialize caches and stats
         self.stats = defaultdict(list)
         self.guidance_cache = {}
         self.context_chunk_cache = {}
-        self._last_scored_chunks = []  # Initialize attribute to store scored chunks for fallback
+        self._last_scored_chunks = []
+
 
     def _process_batch(self, inputs, disable_progress=True):
         """Wrapper for tqdm progress bar, respecting global settings."""
@@ -522,7 +513,6 @@ class NeuralRetriever:
                                               value_str: Optional[Any]
                                               ) -> Optional[float]:
         """Normalizes numbers (string, int, float) to float for comparison, handles None and errors.
-        [Added May 16, 2025]: Copied from hybrid_integrator.py to ensure consistent number normalization.
         """
         if value_str is None:
             return None
@@ -538,19 +528,22 @@ class NeuralRetriever:
                     "zero": 0.0, "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0,
                     "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0,
                     "ten": 10.0
+                    # Add more common number words if needed, e.g., up to twenty, decades, hundreds
                 }
                 if s in words:
                     result = words[s]
-                elif re.fullmatch(r'-?\d+(\.\d+)?', s):
+                elif re.fullmatch(r'-?\d+(\.\d+)?', s): # Regex to match float/int strings
                     result = float(s)
                 else:
-                    self.logger.debug(f"Could not normalize '{value_str}' to a number.")
-                    return None
-
-            # Convert to int if the number is a whole number
-            if result.is_integer():
-                result = float(int(result))
-            return result
+                    # Try to remove trailing non-numeric if it's like "14..."
+                    match_clean_num = re.match(r'(-?\d+(?:\.\d+)?)', s)
+                    if match_clean_num:
+                        result = float(match_clean_num.group(1))
+                        self.logger.debug(f"Normalized '{value_str}' to {result} by stripping trailing non-numeric content.")
+                    else:
+                        self.logger.debug(f"Could not normalize '{value_str}' (cleaned: '{s}') to a recognized number format or word.")
+                        return None
+            return result # Return as float; conversion to int if whole happens later if needed
 
         except (ValueError, TypeError) as e:
             self.logger.debug(f"Error normalizing number '{value_str}': {e}")
@@ -560,83 +553,107 @@ class NeuralRetriever:
                                expected_type_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Parses the neural raw output for DROP dataset, extracting structured answers.
-        Enhanced cleaning and prioritized line parsing.
+        Enhanced cleaning, prioritized line parsing, and more robust type-specific extraction.
         """
-        if not neural_raw_output or not isinstance(neural_raw_output,
-                                                   str) or not neural_raw_output.strip():  # Added isinstance check
+        if not neural_raw_output or not isinstance(neural_raw_output, str) or not neural_raw_output.strip():
             self.logger.debug(
-                f"Cannot parse empty or invalid type neural output for query: {query[:50]}... Type: {type(neural_raw_output)}")
+                f"Cannot parse empty or invalid neural output. Query: {query[:50]}... Type: {type(neural_raw_output)}")
             return None
 
+        query_id_for_log = hashlib.sha1(query.encode('utf-8')).hexdigest()[:8]
         query_lower = query.lower()
 
-        # --- Determine Expected Answer Type (same as your existing logic source [937]-[939]) ---
+        # --- Determine Expected Answer Type ---
         answer_type = expected_type_hint
         if not answer_type:
-            if 'how many' in query_lower or 'difference' in query_lower or 'how much' in query_lower:
+            # (Using your existing comprehensive logic for determining answer_type)
+            if 'how many' in query_lower or 'difference' in query_lower or 'how much' in query_lower or 'count the number of' in query_lower or \
+                    re.search(
+                        r'\b(what|which) (is|was) the (longest|shortest|highest|lowest|first|last)\b.*\b(number|value|score|yards|points|count|total)\b',
+                        query_lower):
                 answer_type = 'number'
-            elif 'who' in query_lower or 'which team' in query_lower or 'which player' in query_lower or 'what team' in query_lower:
+            elif 'who' in query_lower or \
+                    any(ph in query_lower for ph in ['which team', 'which player', 'what team', 'what player']) or \
+                    re.search(
+                        r'\b(what|which) (is|was) the (longest|shortest|first|last)\b.*\b(player|team|name|entity)\b',
+                        query_lower):
                 answer_type = 'spans'
             elif 'when' in query_lower or 'what date' in query_lower or 'which year' in query_lower:
                 answer_type = 'date'
-            elif 'longest' in query_lower or 'shortest' in query_lower or 'most' in query_lower:
-                if 'who' in query_lower or 'which' in query_lower:
-                    answer_type = 'spans'
-                else:
-                    answer_type = 'number'
             else:
-                answer_type = 'spans'  # Default if unsure
+                answer_type = 'spans'  # Default if unsure, as many DROP questions are span-based
 
         self.logger.debug(
-            f"Parsing neural output. Query: '{query[:50]}...'. Determined/Hinted Answer Type: {answer_type}.")
+            f"[QID:{query_id_for_log}] Parsing neural output for DROP. Query: '{query[:50]}...'. Determined/Hinted Answer Type: {answer_type}.")
 
-        # --- Enhanced Cleaning & Prioritized Line Processing ---
-        cleaned_full_output = neural_raw_output.strip()
-        # Remove common LLM prefixes that might precede the actual answer.
-        cleaned_full_output = re.sub(r"^(here's the answer:|the answer is:|answer:)\s*", "", cleaned_full_output,
-                                     flags=re.IGNORECASE)
+        # --- Enhanced Cleaning ---
+        # Remove common conversational/explanation prefixes/suffixes
+        cleaned_output = neural_raw_output.strip()
+        prefixes_suffixes_to_strip = [
+            r"^\s*(here's the answer:|the answer is:|answer:|explanation:|rationale:)\s*",
+            r"\s*(explanation:|rationale:|\(conf:.*?\)|\|---.*|sure, i can help.*$|according to the passage.*$).*",
+            # More aggressive suffix stripping
+            r"\s*the final answer is\s*",
+            r"\s*so, the answer is\s*"
+        ]
+        for pattern in prefixes_suffixes_to_strip:
+            cleaned_output = re.sub(pattern, "", cleaned_output, flags=re.IGNORECASE | re.DOTALL).strip()
 
-        lines = cleaned_full_output.splitlines()
-        text_to_parse_primary = lines[0].strip() if lines else cleaned_full_output  # Focus on the first non-empty line
+        # If after cleaning, the output is just a punctuation or common LLM filler, consider it empty for parsing.
+        if re.fullmatch(r"[.,!?;:]*", cleaned_output) or cleaned_output.lower() in ["okay.", "got it.", "sure."]:
+            self.logger.debug(
+                f"[QID:{query_id_for_log}] Cleaned output is trivial: '{cleaned_output}'. Treating as unparsable.")
+            return None
 
-        # If the primary line is very short (e.g. just a number/short span) and there are more lines,
-        # it's likely the answer. If it's longer, it might contain explanations.
+        # Take the first line primarily, but consider more if it's short or looks like a list item.
+        lines = [line.strip() for line in cleaned_output.splitlines() if line.strip()]
+        text_to_parse_primary = lines[0] if lines else cleaned_output
+        if not text_to_parse_primary:  # If first line became empty after stripping
+            text_to_parse_primary = cleaned_output
+
         self.logger.debug(
-            f"Primary text for parsing: '{text_to_parse_primary[:100]}...' (from full output: '{cleaned_full_output[:100]}...')")
+            f"[QID:{query_id_for_log}] Primary text for parsing: '{text_to_parse_primary[:150]}...' (from cleaned output: '{cleaned_output[:150]}...')")
 
         parsed_value: Any = None
-        confidence = 0.0  # Default confidence, to be updated based on parsing success
+        confidence = 0.0
 
         try:
-            # --- 1. Try Parsing based on determined answer_type from text_to_parse_primary ---
             if answer_type == 'number':
-                # Look for a number at the beginning of the primary text
+                # Priority 1: Exact number match at the start of the primary line
                 num_match = re.match(r'^\s*(-?\d+(?:,\d{3})*(?:\.\d+)?)\b', text_to_parse_primary)
                 if num_match:
-                    number_str = num_match.group(1).replace(',', '')
-                    try:
-                        # Use the retriever's own normalization for consistency
-                        parsed_value = self._normalize_drop_number_for_comparison(number_str)
-                        if parsed_value is not None:
-                            confidence = 0.85  # High confidence if clearly parsed number
-                            self.logger.debug(f"Parsed number via regex from primary line: {parsed_value}")
-                    except ValueError:
-                        self.logger.debug(f"Failed to convert '{number_str}' to float from primary line.")
-                if parsed_value is None:  # Fallback: check for written numbers
-                    first_word_primary = text_to_parse_primary.split()[0].lower().strip(
-                        '.,!?') if text_to_parse_primary.split() else ''
-                    num_from_word = self._normalize_drop_number_for_comparison(first_word_primary)
-                    if num_from_word is not None:
-                        parsed_value = num_from_word
-                        confidence = 0.7
-                        self.logger.debug(f"Parsed number via word mapping from primary line: {parsed_value}")
+                    parsed_value = self._normalize_drop_number_for_comparison(num_match.group(1))
+                    if parsed_value is not None: confidence = 0.85
+
+                # Priority 2: Number word at the start
+                if parsed_value is None:
+                    first_word = text_to_parse_primary.split(" ", 1)[0].lower().rstrip('.,')
+                    parsed_value = self._normalize_drop_number_for_comparison(first_word)
+                    if parsed_value is not None: confidence = 0.75
+
+                # Priority 3: Search for any number in the primary line if start fails
+                if parsed_value is None:
+                    all_numbers_in_line = re.findall(r'-?\d+(?:,\d{3})*(?:\.\d+)?', text_to_parse_primary)
+                    if all_numbers_in_line:
+                        # Heuristic: if "difference is X", "total is X", prefer X
+                        # Or if only one number, use that. Otherwise, be less confident.
+                        if len(all_numbers_in_line) == 1:
+                            parsed_value = self._normalize_drop_number_for_comparison(all_numbers_in_line[0])
+                            if parsed_value is not None: confidence = 0.70
+                        else:  # Multiple numbers, less certain which is the answer
+                            # Try to take the one that seems most like a final answer (e.g. last one if no other cues)
+                            parsed_value = self._normalize_drop_number_for_comparison(all_numbers_in_line[-1])
+                            if parsed_value is not None: confidence = 0.60
+                            self.logger.debug(
+                                f"[QID:{query_id_for_log}] Multiple numbers in primary line for number Q: {all_numbers_in_line}. Picked last: {parsed_value}")
+
 
             elif answer_type == 'spans':
+                candidate_spans = []
+                # Priority 1: Use spaCy NER on the primary line
                 if self.nlp:
-                    # Try NER on the primary line first
                     doc_primary = self.nlp(text_to_parse_primary)
-                    expected_labels = {'PERSON', 'ORG', 'GPE', 'NORP', 'PRODUCT', 'EVENT', 'WORK_OF_ART',
-                                       'LOC'}  # Broader set for spans
+                    expected_labels = {'PERSON', 'ORG', 'GPE', 'LOC', 'PRODUCT', 'EVENT', 'WORK_OF_ART', 'NORP'}
                     if 'who' in query_lower:
                         expected_labels = {'PERSON'}
                     elif 'team' in query_lower:
@@ -644,238 +661,214 @@ class NeuralRetriever:
                     elif 'where' in query_lower:
                         expected_labels = {'GPE', 'LOC'}
 
-                    extracted_spans_primary = [ent.text.strip() for ent in doc_primary.ents if
-                                               ent.label_ in expected_labels]
+                    ner_spans = [ent.text.strip(" .,'") for ent in doc_primary.ents if ent.label_ in expected_labels]
+                    if ner_spans: candidate_spans.extend(ner_spans)
 
-                    # Filter spans using semantic similarity to query if encoder is available
-                    if extracted_spans_primary and self.encoder and util:
-                        query_embedding = self._encode_safely(query_lower)
-                        if query_embedding is not None:
-                            filtered_spans_sem = []
-                            query_embedding = query_embedding.view(1, -1)
-                            for span in extracted_spans_primary:
-                                span_embedding = self._encode_safely(span)
-                                if span_embedding is not None:
-                                    similarity = util.cos_sim(query_embedding, span_embedding.view(1, -1)).item()
-                                    if similarity >= 0.45:  # Similarity threshold
-                                        filtered_spans_sem.append(span)
-                            extracted_spans_primary = filtered_spans_sem
+                # Priority 2: If NER failed or no NLP, look for capitalized phrases or short phrases on first line
+                if not candidate_spans:
+                    # Attempt to grab phrases that look like named entities or key terms
+                    # Remove "Explanation:", "Rationale:" etc. and content after them for span extraction
+                    core_answer_text = re.sub(r"\s*(Explanation:|Rationale:|The final answer is).*", "",
+                                              text_to_parse_primary, flags=re.IGNORECASE).strip()
+                    # Simple split by comma or "and" if they seem to delimit a list. Max 3 spans.
+                    potential_list_delimiters = r'\s*(?:,|and|or)\s*'
+                    if re.search(potential_list_delimiters, core_answer_text):
+                        raw_split_spans = re.split(potential_list_delimiters, core_answer_text)
+                        candidate_spans.extend([s.strip(" .,'") for s in raw_split_spans if s.strip()][:3])
+                    elif len(core_answer_text.split()) <= 7 and core_answer_text:  # Short phrase
+                        candidate_spans.append(core_answer_text.strip(" .,'"))
 
-                    if extracted_spans_primary:
-                        seen = set()  # Deduplicate
-                        parsed_value = [s for s in extracted_spans_primary if
-                                        not (s.lower() in seen or seen.add(s.lower()))]
-                        confidence = 0.7
-                        self.logger.debug(f"Parsed spans from primary line via spaCy NER: {parsed_value}")
-
-                    # Fallback 1: Noun chunks on primary line
-                    if not parsed_value:
-                        non_stop_chunks_primary = [chunk.text.strip() for chunk in doc_primary.noun_chunks if
-                                                   not all(tok.is_stop for tok in chunk) and len(
-                                                       chunk.text.strip()) > 1 and len(chunk.text.split()) < 7]
-                        if non_stop_chunks_primary:  # If any noun chunks, take the first one as a candidate
-                            parsed_value = [non_stop_chunks_primary[0]]  # Could also do semantic scoring here
-                            confidence = 0.55
-                            self.logger.debug(f"Parsed span from primary line via Noun Chunk: {parsed_value}")
-
-                    # Fallback 2: If primary line failed and there are multiple lines, try NER on more context
-                    if not parsed_value and len(lines) > 1 and text_to_parse_primary != cleaned_full_output:
-                        self.logger.debug(
-                            f"Primary line span parsing failed. Trying NER on broader context (up to 3 lines).")
-                        broader_text = "\n".join(lines[:3]).strip()  # Use first few lines
-                        doc_broader = self.nlp(broader_text)
-                        extracted_spans_broader = [ent.text.strip() for ent in doc_broader.ents if
-                                                   ent.label_ in expected_labels]
-                        if extracted_spans_broader and self.encoder and util:  # Semantic filter
-                            # (Repeat semantic filtering logic as above for extracted_spans_broader)
-                            pass  # Placeholder for brevity
-                        if extracted_spans_broader:
-                            seen = set()
-                            parsed_value = [s for s in extracted_spans_broader if
-                                            not (s.lower() in seen or seen.add(s.lower()))]
-                            confidence = 0.6
-                            self.logger.debug(f"Parsed spans from broader context via spaCy NER: {parsed_value}")
-
-                # Fallback 3: If no NLP or still no spans, use primary line if it looks like a short answer
-                if not parsed_value:
-                    if len(text_to_parse_primary) > 1 and len(text_to_parse_primary.split()) < 10 and any(
-                            c.isalpha() for c in text_to_parse_primary):
-                        parsed_value = [text_to_parse_primary]
-                        confidence = 0.4
-                        self.logger.debug(f"Parsed span via primary line heuristic: {parsed_value}")
+                if candidate_spans:
+                    # Deduplicate and filter empty
+                    seen_spans = set()
+                    parsed_value = [s for s in candidate_spans if
+                                    s and s.lower() not in seen_spans and not seen_spans.add(s.lower())]
+                    if parsed_value:
+                        confidence = 0.70
+                    else:
+                        parsed_value = None  # if all spans were empty or duplicates leading to empty
 
             elif answer_type == 'date':
-                # Try parsing date from the primary line first
-                date_patterns = [  # Simplified, assuming output is clean
-                    (r'^\s*(\d{1,2}/\d{1,2}/\d{2,4})\b',
-                     lambda m: {'day': m.group(1).split('/')[1], 'month': m.group(1).split('/')[0],
-                                'year': m.group(1).split('/')[2]}),
-                    (r'^\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\b',
-                     lambda m: {'day': re.search(r'\d{1,2}', m.group(1)).group(),
-                                'month': re.match(r'[A-Za-z]+', m.group(1)).group(),
-                                'year': re.search(r'\d{4}', m.group(1)).group()}),
-                    (r'^\s*(1[89]\d{2}|20\d{2})\b', lambda m: {'day': '', 'month': '', 'year': m.group(1)})  # Year only
-                ]
-                for pattern, parser_func in date_patterns:
-                    match = re.match(pattern, text_to_parse_primary, re.IGNORECASE)
-                    if match:
-                        try:
-                            parsed_value = parser_func(match)
-                            # Basic validation of parsed date components
-                            yr = parsed_value.get('year')
-                            if yr and (1000 <= int(yr) <= 2100):  # Basic year check
-                                confidence = 0.8
-                                self.logger.debug(f"Parsed date via regex from primary line: {parsed_value}")
-                                break  # Stop on first successful date pattern match
-                            else:
-                                parsed_value = None  # Invalid year
-                        except Exception:
-                            parsed_value = None  # Parsing error
-
-                if not parsed_value:  # Fallback to dateutil on the primary line
+                date_found = None
+                # Priority 1: Try dateutil parser on the primary line
+                if date_parser:
                     try:
-                        parsed_dt_obj = date_parser.parse(text_to_parse_primary, fuzzy=False)  # Less fuzzy
-                        parsed_value = {'day': str(parsed_dt_obj.day), 'month': str(parsed_dt_obj.month),
-                                        'year': str(parsed_dt_obj.year)}
-                        confidence = 0.7
-                        self.logger.debug(f"Parsed date via dateutil from primary line: {parsed_value}")
-                    except (ValueError, OverflowError, TypeError) as date_err:
+                        # Attempt to extract only the date part if there's trailing text
+                        # Common pattern: "MM/DD/YYYY Explanation..."
+                        match_date_prefix = re.match(
+                            r"^\s*(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}(?:-\d{1,2}-\d{1,2})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{2,4})",
+                            text_to_parse_primary, re.IGNORECASE)
+                        text_for_date_parsing = match_date_prefix.group(
+                            1) if match_date_prefix else text_to_parse_primary
+
+                        parsed_dt_obj = date_parser.parse(text_for_date_parsing, fuzzy=False)
+                        # Check for plausible year range
+                        if 1000 <= parsed_dt_obj.year <= 2100:
+                            date_found = {'day': str(parsed_dt_obj.day), 'month': str(parsed_dt_obj.month),
+                                          'year': str(parsed_dt_obj.year)}
+                            confidence = 0.80
+                    except (ValueError, OverflowError, TypeError):
                         self.logger.debug(
-                            f"Dateutil parsing failed for primary line '{text_to_parse_primary}': {date_err}")
+                            f"[QID:{query_id_for_log}] Dateutil parsing failed for: '{text_to_parse_primary}'")
+
+                # Priority 2: Regex for YYYY if dateutil fails or it's just a year
+                if not date_found:
+                    year_match = re.search(r'\b(1[89]\d{2}|20\d{2})\b', text_to_parse_primary)
+                    if year_match:
+                        date_found = {'day': '', 'month': '', 'year': year_match.group(1)}
+                        confidence = 0.70
+                parsed_value = date_found
 
             # --- Finalize Result ---
-            if parsed_value is not None:  # Ensure something was actually parsed
-                # Validate against empty strings if spans or numbers resulted in empty after normalization
-                if answer_type == 'spans' and not any(s for s in parsed_value if s):  # All spans are empty
-                    self.logger.debug(f"Parsed spans resulted in only empty strings. Discarding.")
-                    return None
-                if answer_type == 'number' and parsed_value == '':  # Number parsed to empty string
-                    self.logger.debug(f"Parsed number resulted in empty string. Discarding.")
-                    return None
+            if parsed_value is not None:
+                # Final validation against empty values that might have slipped through
+                if answer_type == 'spans' and (not parsed_value or not any(s for s in parsed_value if s)):
+                    parsed_value = None;
+                    confidence = 0.0
+                elif answer_type == 'number' and (
+                        parsed_value == '' or parsed_value is None):  # Check explicit empty string too
+                    parsed_value = None;
+                    confidence = 0.0
+                elif answer_type == 'date' and (not parsed_value or not any(v for v in parsed_value.values() if v)):
+                    parsed_value = None;
+                    confidence = 0.0
 
-                return {
-                    'type': answer_type,
-                    'value': parsed_value,
-                    'confidence': confidence
-                }
-
-            self.logger.warning(
-                f"Failed to parse neural output for expected type '{answer_type}'. Primary text: '{text_to_parse_primary[:100]}...' Full cleaned: '{cleaned_full_output[:100]}...'")
-            return None
+            if parsed_value is not None:
+                self.logger.debug(
+                    f"[QID:{query_id_for_log}] Successfully parsed: Type={answer_type}, Value='{str(parsed_value)[:100]}', Conf={confidence:.2f}")
+                return {'type': answer_type, 'value': parsed_value, 'confidence': confidence}
+            else:  # No value could be parsed
+                self.logger.warning(
+                    f"[QID:{query_id_for_log}] Failed to parse neural output for expected type '{answer_type}'. Output: '{cleaned_output[:100]}...'")
+                return None  # Explicitly return None if parsing fails to produce a value
 
         except Exception as e:
             self.logger.error(
-                f"Critical error parsing neural output for DROP: {str(e)}. Query: '{query[:50]}...'. Raw output: '{neural_raw_output[:100]}...'",
+                f"[QID:{query_id_for_log}] Critical error parsing neural output for DROP: {e}. Raw: '{neural_raw_output[:100]}'",
                 exc_info=True)
             return None
 
     def _create_drop_answer_obj(self, answer_type: Optional[str], value: Any) -> Dict[str, Any]:
         """
-        Create a DROP answer object with validation.
-        Handles 'extreme_value', 'count', and 'difference' types appropriately.
-        Ensures all required fields are included for evaluation.
+        Create a DROP answer object with validation and correct native types for numbers.
         """
+        # Initialize with native types or appropriate empty structures
         obj = {
-            'number': '',
+            'number': "",  # Will be stringified version of native int/float or empty string
             'spans': [],
             'date': {'day': '', 'month': '', 'year': ''},
             'status': 'success',
-            'confidence': 0.5,
-            'rationale': 'Created DROP answer object',
+            'confidence': 0.5,  # Default, will be updated by caller if parser provided one
+            'rationale': 'DROP answer object created',
             'type': answer_type or 'unknown'
         }
-        try:
-            if answer_type in ["number", "count", "difference"]:
-                num_val = self._normalize_drop_number_for_comparison(value)
-                if num_val is not None:
-                    # Convert to int if the value is a whole number
-                    if num_val.is_integer():
-                        num_val = int(num_val)
-                    obj["number"] = str(num_val)
-                    obj["rationale"] = f"Parsed number value: {obj['number']}"
-                    self.logger.debug(f"Created DROP answer: number={obj['number']}")
-                else:
-                    obj["status"] = "error"
-                    obj["rationale"] = f"Invalid number value: {value}"
-                    self.logger.warning(f"Invalid number value for DROP obj: {value}")
+        native_number_value_for_internal_use: Optional[Union[int, float]] = None
 
-            elif answer_type == "extreme_value":
-                if isinstance(value, (int, float, str)) and str(value).replace('.', '').isdigit():
-                    num_val = self._normalize_drop_number_for_comparison(value)
-                    if num_val is not None:
-                        if num_val.is_integer():
-                            num_val = int(num_val)
-                        obj["number"] = str(num_val)
-                        obj["rationale"] = f"Parsed extreme_value as number: {num_val}"
-                        self.logger.debug(f"Created DROP answer (extreme_value as number): number={obj['number']}")
+        try:
+            if answer_type in ["number", "count", "difference", "extreme_value_numeric", "temporal_difference"] or \
+                    (answer_type == "extreme_value" and isinstance(value, (int, float, str)) and str(value).strip() and \
+                     self._normalize_drop_number_for_comparison(
+                         str(value)) is not None):  # Ensure it's a number-like string
+
+                normalized_num = self._normalize_drop_number_for_comparison(value)
+
+                if normalized_num is not None:
+                    if normalized_num.is_integer():
+                        native_number_value_for_internal_use = int(normalized_num)
                     else:
-                        obj["status"] = "error"
-                        obj["rationale"] = f"Invalid extreme_value number: {value}"
-                elif isinstance(value, list):
-                    spans_in = value if isinstance(value, list) else ([value] if value is not None else [])
-                    # Deduplicate spans while (case-insensitive)
-                    seen = set()
-                    obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip() and str(v).strip().lower() not in seen and not seen.add(str(v).strip().lower())]
-                    obj["rationale"] = f"Parsed extreme_value as spans: {obj['spans']}"
-                    self.logger.debug(f"Created DROP answer (extreme_value as spans): spans={obj['spans']}")
+                        native_number_value_for_internal_use = float(normalized_num)
+                    obj["number"] = str(native_number_value_for_internal_use)  # Store as string for DROP schema
+                    obj["rationale"] = f"Parsed number value: {obj['number']}"
                 else:
                     obj["status"] = "error"
-                    obj["rationale"] = f"Invalid extreme_value value: {value}"
-                    self.logger.warning(f"Invalid extreme_value value: {value}")
+                    obj["rationale"] = f"Invalid or unnormalizable number value: {value}"
+                    obj["number"] = ""  # Ensure it's an empty string for error cases
+
+            elif answer_type == "extreme_value" and isinstance(value, list):  # extreme_value resulting in spans
+                spans_in = value
+                seen = set()
+                obj["spans"] = [str(s).strip() for s in spans_in if
+                                str(s).strip() and str(s).strip().lower() not in seen and not seen.add(
+                                    str(s).strip().lower())]
+                obj["rationale"] = f"Parsed extreme_value as spans: {obj['spans']}"
 
             elif answer_type in ["spans", "entity_span"]:
-                spans_in = value if isinstance(value, list) else ([value] if value is not None else [])
-                # Deduplicate spans (case-insensitive)
+                spans_in = value if isinstance(value, list) else (
+                    [str(value)] if value is not None and str(value).strip() else [])
                 seen = set()
-                obj["spans"] = [str(v).strip() for v in spans_in if str(v).strip() and str(v).strip().lower() not in seen and not seen.add(str(v).strip().lower())]
+                obj["spans"] = [str(s).strip() for s in spans_in if
+                                str(s).strip() and str(s).strip().lower() not in seen and not seen.add(
+                                    str(s).strip().lower())]
                 obj["rationale"] = f"Parsed spans: {obj['spans']}"
-                self.logger.debug(f"Created DROP answer: type={answer_type}, spans={obj['spans']}")
+                if not obj["spans"] and spans_in:  # If input was not empty but result is, log warning
+                    self.logger.warning(
+                        f"Value '{value}' for spans resulted in empty list after cleaning for type '{answer_type}'")
+
 
             elif answer_type == "date":
                 if isinstance(value, dict) and all(k in value for k in ['day', 'month', 'year']):
                     try:
-                        d = int(value.get('day', '')) if value.get('day', '') else 0
-                        m = int(value.get('month', '')) if value.get('month', '') else 0
-                        y = int(value.get('year', '')) if value.get('year', '') else 0
-                        if (1 <= d <= 31 or d == 0) and (1 <= m <= 12 or m == 0) and (1000 <= y <= 3000 or y == 0):
-                            obj["date"] = {k: str(v).strip() for k, v in value.items() if k in ['day', 'month', 'year']}
+                        d_str = str(value.get('day', '')).strip()
+                        m_str = str(value.get('month', '')).strip()
+                        y_str = str(value.get('year', '')).strip()
+
+                        # Allow empty day/month if year is present
+                        d = int(d_str) if d_str and d_str.isdigit() else 0
+                        m = int(m_str) if m_str and m_str.isdigit() else 0
+                        y = int(y_str) if y_str and y_str.isdigit() else 0
+
+                        valid_date = False
+                        if y_str and (1000 <= y <= 2100):  # Year is mandatory and valid
+                            if d_str and m_str:  # Full date
+                                if (1 <= d <= 31) and (1 <= m <= 12): valid_date = True
+                            elif not d_str and not m_str:  # Year only
+                                valid_date = True
+                            elif m_str and not d_str:  # Month and Year
+                                if (1 <= m <= 12): valid_date = True
+                            # Other partial date combinations could be handled if needed
+
+                        if valid_date:
+                            obj["date"] = {'day': d_str, 'month': m_str, 'year': y_str}
                             obj["rationale"] = f"Parsed date: {obj['date']}"
-                            self.logger.debug(f"Created DROP answer: date={obj['date']}")
                         else:
-                            raise ValueError("Invalid date components")
-                    except (ValueError, TypeError):
+                            raise ValueError(
+                                f"Invalid or incomplete date components: D:'{d_str}', M:'{m_str}', Y:'{y_str}'")
+                    except (ValueError, TypeError) as e:
                         obj["status"] = "error"
-                        obj["rationale"] = f"Invalid date component values: {value}"
-                        self.logger.warning(f"Invalid date component values: {value}")
+                        obj["rationale"] = f"Invalid date component values: {value}. Error: {e}"
                 else:
                     obj["status"] = "error"
                     obj["rationale"] = f"Invalid date dictionary value: {value}"
-                    self.logger.warning(f"Invalid date dictionary value: {value}")
 
-            elif answer_type == "error":
+            elif answer_type == "error":  # Explicit error type passed in
                 obj["status"] = "error"
-                obj["rationale"] = str(value).strip() if value else "Unknown error"
-                self.logger.debug(f"Created DROP error answer: {obj['rationale']}")
+                obj["rationale"] = str(value).strip() if value else "Unknown error from parsing stage"
 
-            else:
+            else:  # Unknown or unhandled answer type
                 obj["status"] = "error"
-                obj["rationale"] = f"Unsupported or invalid answer type: {answer_type}"
+                obj[
+                    "rationale"] = f"Unsupported answer type for _create_drop_answer_obj: '{answer_type}', value: '{str(value)[:100]}'"
                 self.logger.warning(obj["rationale"])
+
+            # If after all processing, no valid answer field is populated for a 'success' status, mark as error.
+            if obj['status'] == 'success' and not obj['number'] and not obj['spans'] and not any(obj['date'].values()):
+                obj['status'] = 'error'
+                obj[
+                    'rationale'] = f"Successfully processed but no valid answer content extracted for type '{answer_type}' from value '{str(value)[:100]}'."
+                self.logger.warning(f"DROP object created successfully but is empty for type '{answer_type}'.")
 
             return obj
 
         except Exception as e:
-            self.logger.error(f"Error creating DROP answer object (Type: {answer_type}, Value: {value}): {str(e)}")
-            error_obj = {
-                'number': '',
-                'spans': [],
-                'date': {'day': '', 'month': '', 'year': ''},
-                'status': 'error',
-                'confidence': 0.1,
-                'rationale': f"Internal error creating answer object: {str(e)}",
-                'type': answer_type or 'error'
+            self.logger.error(
+                f"Critical error creating DROP answer object (Type: {answer_type}, Value: {value}): {str(e)}",
+                exc_info=True)
+            return {
+                'number': "", 'spans': [], 'date': {'day': '', 'month': '', 'year': ''},
+                'status': 'error', 'confidence': 0.05,  # Very low confidence on creation error
+                'rationale': f"Internal system error creating answer object: {str(e)}",
+                'type': answer_type or 'error_creation'
             }
-            return error_obj
 
     def _empty_drop(self) -> Dict[str, Any]:
         """Return an empty DROP answer object dictionary."""
@@ -892,61 +885,88 @@ class NeuralRetriever:
     def _post_process_response(self, response: str, dataset_type: Optional[str], query_id: str, query: str) -> str:
         """
         Post-processes the raw LLM response for cleaner output.
-        Improved logic for DROP to extract core answer with span filtering.
+        For DROP, primarily relies on the structured object already created by _parse_neural_for_drop.
+        This function aims to provide a clean *string* representation if needed elsewhere,
+        but the primary result for DROP in retrieve_answer is the structured dictionary.
         """
         if not response or not isinstance(response, str):
-            self.logger.warning(f"[NR QID:{query_id}] Empty or invalid response type for post-processing: {type(response)}")
-            return ""
+            self.logger.warning(
+                f"[NR QID:{query_id}] Empty or invalid response type for post-processing: {type(response)}")
+            return ""  # Return empty string for invalid input
 
-        # General cleaning: remove leading/trailing whitespace
         response = response.strip()
         if not response:
-            return ""
+            return ""  # Return empty string if stripping leads to empty
 
-        # --- DROP Specific Post-processing ---
+        self.logger.debug(f"[NR PostProc QID:{query_id}] Original response to post-process: '{response[:150]}...'")
+
         if dataset_type == 'drop':
-            self.logger.debug(f"[NR DROP PostProc QID:{query_id}] Original: '{response[:100]}...'")
-            # Remove common explanation prefixes/suffixes more aggressively
-            response = re.sub(r"^\s*(Answer:|Explanation:|Rationale:|The answer is)[:\s]*", "", response, flags=re.IGNORECASE).strip()
-            response = re.sub(r"\s*(Explanation:|Rationale:).*", "", response, flags=re.IGNORECASE).strip()
-            # Remove units
-            response = re.sub(r'\s+\b(yards?|points?|feet|meters?)\b', '', response, flags=re.IGNORECASE).strip()
+            # For DROP, the structured parsing is done in _parse_neural_for_drop.
+            # This function should aim to return a concise string representation if needed,
+            # but the main output of retrieve_answer for DROP is the dict.
+            # Let's try parsing it again to get a clean representation if it wasn't already a structured output.
+            # However, retrieve_answer() should already return the dict from _create_drop_answer_obj.
+            # This path in _post_process_response for DROP might be less critical if retrieve_answer passes dicts.
 
-            # Parse response into structured DROP answer
-            parsed = self._parse_neural_for_drop(response, query)
-            if parsed:
-                answer_type = parsed.get('type')
-                value = parsed.get('value')
-                if answer_type in ['number', 'count', 'difference']:
-                    response = str(value)
-                    self.logger.debug(f"[NR DROP PostProc QID:{query_id}] Extracted number: {response}")
-                elif answer_type in ['spans', 'entity_span']:
-                    spans = value if isinstance(value, list) else [value]
-                    response = ' '.join(spans)
-                    self.logger.debug(f"[NR DROP PostProc QID:{query_id}] Extracted spans: {response}")
-                elif answer_type == 'date':
-                    date = value
-                    response = f"{date.get('month', '')}/{date.get('day', '')}/{date.get('year', '')}".strip('/')
-                    self.logger.debug(f"[NR DROP PostProc QID:{query_id}] Extracted date: {response}")
-            else:
-                # Fallback: use cleaned response
-                response = re.sub(r'[.,!?;:]$', '', response).strip()
-                self.logger.warning(f"[NR DROP PostProc QID:{query_id}] Could not parse structured answer. Using cleaned response: '{response[:50]}...'")
+            # Aggressive cleaning of common LLM conversational fluff if not already handled
+            cleaned_response = re.sub(r"^\s*(here's the answer:|the answer is:|answer:|explanation:|rationale:)\s*", "",
+                                      response, flags=re.IGNORECASE).strip()
+            cleaned_response = re.sub(
+                r"\s*(explanation:|rationale:|\(conf:.*?\)|\|---.*|\s*note:.*|\s*important:.*|\s*therefore,.*$).*", "",
+                cleaned_response, flags=re.IGNORECASE | re.DOTALL).strip()
 
-        # --- General Text QA Post-processing ---
+            # If the cleaning results in an empty string, use the original (stripped) response
+            if not cleaned_response and response:
+                cleaned_response = response
+
+            # Heuristic: if the cleaned response is very short, it might be the direct answer.
+            # Otherwise, it might still contain explanations.
+            # Focus on the first meaningful line.
+            first_meaningful_line = cleaned_response.split('\n')[0].strip()
+
+            # Further remove common units if they are trailing the number for cleaner numerical strings.
+            # This specific cleaning is more about generating a "clean string" than parsing the structure.
+            if re.match(r"^-?\d+(\.\d+)?\s+(yards?|points?|feet|meters?|degrees|percent|usd|\$|eur|€)$",
+                        first_meaningful_line, flags=re.IGNORECASE):
+                first_meaningful_line = re.sub(r'\s+\b(yards?|points?|feet|meters?|degrees|percent|usd|\$|eur|€)\b', '',
+                                               first_meaningful_line, flags=re.IGNORECASE).strip()
+
+            final_string_representation = re.sub(r'[.,!?;:]$', '',
+                                                 first_meaningful_line).strip()  # Remove trailing punctuation for simple strings
+
+            self.logger.debug(
+                f"[NR PostProc QID:{query_id}] DROP - Processed string representation: '{final_string_representation[:100]}...' (Original input to func: '{response[:50]}...')")
+            return final_string_representation if final_string_representation else " "  # Ensure non-empty return
+
         else:  # HotpotQA or other text types
-            self.logger.debug(f"[NR Text PostProc QID:{query_id}] Original: '{response[:100]}...'")
             # Remove common instruction/prompt remnants
-            response = re.sub(r"^(Answer:|Response:|Based on the context.*?:)\s*", "", response, flags=re.IGNORECASE).strip()
-            # Remove text after a potential follow-up question or explanation marker if model adds them
-            stop_phrases = ["\nQuestion:", "\nExplanation:", "\nRationale:", "\nContext:", "\n---"]
+            processed_text = re.sub(r"^(Answer:|Response:|Based on the context.*?:)\s*", "", response,
+                                    flags=re.IGNORECASE).strip()
+            # Remove text after a potential follow-up question or explanation marker
+            stop_phrases = ["\nQuestion:", "\nExplanation:", "\nRationale:", "\nContext:", "\n---",
+                            "\nI hope this helps!"]
             for phrase in stop_phrases:
-                if phrase in response:
-                    response = response.split(phrase)[0].strip()
+                if phrase in processed_text:
+                    processed_text = processed_text.split(phrase)[0].strip()
 
-        self.logger.debug(f"[NR PostProc QID:{query_id}] Final processed response: '{response[:100]}...'")
-        # Final check for empty string after processing
-        return response if response else " "  # Return single space if empty, to avoid downstream errors
+            # Attempt to isolate the most direct answer sentence if possible (simple heuristic)
+            sentences = [s.strip() for s in re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=[\.!?])\s+', processed_text) if
+                         s.strip()]
+            if sentences:
+                # If first sentence is short and seems like a direct answer, use it.
+                # Otherwise, if multiple sentences, check if one is a clear summary or answer.
+                # This is complex; for now, let's take the first sentence if it's substantial,
+                # or the whole processed_text if it's already concise.
+                if len(sentences[0].split()) > 2 and len(sentences[0]) > 10:  # Heuristic for a "substantial" sentence
+                    final_string_representation = sentences[0]
+                else:
+                    final_string_representation = processed_text  # Use the cleaned full text if first sentence is too short
+            else:
+                final_string_representation = processed_text
+
+            self.logger.debug(
+                f"[NR PostProc QID:{query_id}] TextQA - Processed string representation: '{final_string_representation[:100]}...'")
+            return final_string_representation if final_string_representation else " "
 
     def _chunk_context(self, context: str) -> List[Dict]:
         """Chunks context into smaller pieces with overlap, adding embeddings."""
@@ -1127,116 +1147,101 @@ class NeuralRetriever:
                              symbolic_guidance: Optional[List[Dict]] = None) -> List[Dict]:
         """
         Finds chunks most relevant to the question using similarity and guidance boosts.
-        [Updated May 16, 2025]: Added numerical boost for 'difference' or 'more' queries to prioritize chunks with numbers,
-        increased top_k for numerical queries, and enhanced logging for debugging.
+        [Updated May 20, 2025]: Enhanced numerical query detection and boost tuning.
         """
         if not chunks:
             self.logger.warning("No chunks provided to _get_relevant_chunks.")
             return []
         if question_embedding is None or question_embedding.nelement() == 0:
             self.logger.error("Question embedding is None or empty. Cannot score chunks.")
-            # Fallback: return top_k chunks based on support score if available
             return sorted(chunks, key=lambda x: x.get('support_score', 0), reverse=True)[:self.top_k]
 
         scored_chunks = []
-        question_emb = question_embedding.view(1, -1)  # Ensure 2D for similarity calculation
+        question_emb = question_embedding.view(1, -1)
 
-        # [Added May 16, 2025]: Determine if query is numerical (e.g., 'difference', 'more')
-        is_numerical_query = any(keyword in chunks[0].get('text', '').lower() for keyword in ['difference', 'more'])
+        # Enhanced numerical query detection (using keywords from the query itself)
+        # Assuming 'question' string is accessible here or passed if needed.
+        # For now, using a simplified check based on first chunk, can be improved.
+        # For better accuracy, this check should use the original question string.
+        temp_question_text_for_check = chunks[0].get('text', '').lower()  # Placeholder, replace with actual question
+        is_numerical_query = any(keyword in temp_question_text_for_check for keyword in
+                                 ['how many', 'difference', 'sum', 'total', 'average', 'count', 'number of']) or \
+                             any(keyword in temp_question_text_for_check for keyword in
+                                 ['more', 'less', 'fewer', 'greater', 'smaller'])
+
         effective_top_k = self.top_k * 2 if is_numerical_query and len(chunks) > self.top_k else self.top_k
+        # Increase numerical boost if it's a strong numerical query
+        numerical_boost_value = 0.3 if is_numerical_query else 0.0
         self.logger.debug(
-            f"Effective top_k for chunk selection: {effective_top_k}{' (increased for numerical query)' if is_numerical_query else ''}")
+            f"Effective top_k: {effective_top_k}. Numerical query: {is_numerical_query} (Boost: {numerical_boost_value}).")
 
-        # --- Calculate Scores ---
         try:
             for i, chunk in enumerate(chunks):
                 chunk_emb = chunk.get('embedding')
-                # Validate chunk embedding
                 if chunk_emb is None or not isinstance(chunk_emb, torch.Tensor) or chunk_emb.nelement() == 0:
                     self.logger.warning(f"Chunk {i} missing valid embedding. Assigning score 0.")
                     score = 0.0
                     debug_scores = {'base_sim': 0.0, 'support_boost': 0.0, 'guidance_boost': 0.0,
                                     'numerical_boost': 0.0}
                 else:
-                    chunk_emb = chunk_emb.to(self.device).view(1, -1)  # Ensure 2D and on correct device
-                    # Dimension check
+                    chunk_emb = chunk_emb.to(self.device).view(1, -1)
                     if chunk_emb.shape[1] != question_emb.shape[1]:
                         self.logger.error(
                             f"Dimension mismatch: question ({question_emb.shape}), chunk {i} ({chunk_emb.shape}). Skipping chunk.")
                         continue
 
-                    # Calculate base similarity
                     base_sim = util.cos_sim(chunk_emb, question_emb).item()
-
-                    # Calculate boosts
                     support_boost = chunk.get('support_score', 0.0) * self.support_boost
                     guidance_boost = self._calculate_guidance_boost(chunk,
                                                                     symbolic_guidance) if symbolic_guidance else 0.0
-                    # [Added May 16, 2025]: Boost chunks with numerical content for numerical queries
-                    numerical_boost = 0.0
-                    if is_numerical_query:
-                        chunk_text = chunk.get('text', '').lower()
-                        if re.search(r'\b\d+\b', chunk_text):  # Presence of numbers
-                            numerical_boost = 0.2  # Boost numerical chunks
-                            self.logger.debug(
-                                f"Applied numerical boost of {numerical_boost} to chunk {i} containing numbers.")
 
-                    # Final score with boosts
-                    score = base_sim + support_boost + guidance_boost + numerical_boost
+                    current_numerical_boost = 0.0
+                    if is_numerical_query:
+                        chunk_text_lower = chunk.get('text', '').lower()
+                        # Check for presence of digits or number-related keywords in the chunk
+                        if re.search(r'\b\d+\b', chunk_text_lower) or any(num_word in chunk_text_lower for num_word in
+                                                                          ["one", "two", "three", "four", "five",
+                                                                           "percent", "average"]):
+                            current_numerical_boost = numerical_boost_value
+                            self.logger.debug(f"Applied numerical boost of {current_numerical_boost} to chunk {i}.")
+
+                    score = base_sim + support_boost + guidance_boost + current_numerical_boost
                     debug_scores = {
                         'base_sim': base_sim,
                         'support_boost': support_boost,
                         'guidance_boost': guidance_boost,
-                        'numerical_boost': numerical_boost
+                        'numerical_boost': current_numerical_boost
                     }
-
-                scored_chunks.append({
-                    'score': score,
-                    'chunk': chunk,  # Keep reference to original chunk dict
-                    'debug_scores': debug_scores
-                })
-
+                scored_chunks.append({'score': score, 'chunk': chunk, 'debug_scores': debug_scores})
         except Exception as e:
             self.logger.exception(f"Error scoring chunks: {e}")
-            # Fallback: return top_k based on support score or original order
             return sorted(chunks, key=lambda x: x.get('support_score', 0), reverse=True)[:self.top_k]
 
-        # Store scores for potential fallback use later
-        self._last_scored_chunks = scored_chunks  # Store before sorting might change order if scores are same
-
-        # --- Select Top Chunks ---
-        # Sort by final score
+        self._last_scored_chunks = scored_chunks
         scored_chunks.sort(key=lambda x: x['score'], reverse=True)
 
-        # [Updated May 16, 2025]: Enhanced logging to include numerical boost
         debug_strings = [
             "{:.3f} (S:{:.2f} P:{:.2f} G:{:.2f} N:{:.2f})".format(
-                sc['score'],
-                sc['debug_scores']['base_sim'],
-                sc['debug_scores']['support_boost'],
-                sc['debug_scores']['guidance_boost'],
-                sc['debug_scores']['numerical_boost']
-            )
-            for sc in scored_chunks[:5]
+                sc['score'], sc['debug_scores']['base_sim'], sc['debug_scores']['support_boost'],
+                sc['debug_scores']['guidance_boost'], sc['debug_scores']['numerical_boost']
+            ) for sc in scored_chunks[:5]
         ]
-        self.logger.debug(f"Top 5 chunk scores (Base+Boosts): {debug_strings}")
+        self.logger.debug(f"Top 5 chunk scores (Base+Support+Guidance+Numerical Boosts): {debug_strings}")
 
-        # Select effective_top_k, ensuring unique chunks
         relevant_chunks = []
         ids_added = set()
         for sc in scored_chunks:
             chunk_to_add = sc['chunk']
-            chunk_id = id(chunk_to_add)  # Use object id for uniqueness check
+            chunk_id = id(chunk_to_add)
             if chunk_id not in ids_added:
                 relevant_chunks.append(chunk_to_add)
                 ids_added.add(chunk_id)
                 if len(relevant_chunks) >= effective_top_k:
-                    break  # Stop once we have effective_top_k unique chunks
+                    break
 
-        if not relevant_chunks and chunks:  # Ensure we always return at least one chunk if possible
-            self.logger.warning(
-                "No chunks met selection criteria (e.g., all had errors or low scores), returning highest scored chunk as fallback.")
-            relevant_chunks = [scored_chunks[0]['chunk']] if scored_chunks else [chunks[0]]  # Safest fallback
+        if not relevant_chunks and chunks:
+            self.logger.warning("No chunks met selection criteria, returning highest scored chunk as fallback.")
+            relevant_chunks = [scored_chunks[0]['chunk']] if scored_chunks else [chunks[0]]
 
         self.logger.info(f"Selected {len(relevant_chunks)} relevant chunks for prompt.")
         return relevant_chunks
@@ -1308,88 +1313,143 @@ class NeuralRetriever:
             return self._create_fallback_prompt(question)
 
         prompt_parts = []
+        query_id_for_log = hashlib.sha1(question.encode('utf-8')).hexdigest()[:8]  # For logging context
 
-        # --- Guidance Section (Keep existing logic from source [1075]-[1079]) ---
+        # --- Guidance Section ---
         try:
             relevant_guidance_texts = []
             if symbolic_guidance:
                 sorted_guidance = sorted([g for g in symbolic_guidance if isinstance(g, dict)],
                                          key=lambda x: x.get('confidence', 0.0), reverse=True)
-                for guide in sorted_guidance[:3]:
-                    statement = guide.get('response', '')  # 'response' is the standardized key from _format_guidance
+                for guide_idx, guide in enumerate(sorted_guidance[:2]):  # Limit to top 2 for brevity
+                    statement = guide.get('response', '')
                     confidence = guide.get('confidence', 0.0)
                     if statement and isinstance(statement,
-                                                str) and statement.strip() and confidence > 0.5:  # Check type
+                                                str) and statement.strip() and confidence > 0.45:  # Slightly lower threshold
                         safe_statement = statement.replace("{", "{{").replace("}", "}}")
-                        relevant_guidance_texts.append(f"- {safe_statement} (Confidence: {confidence:.2f})")
+                        relevant_guidance_texts.append(
+                            f"- Clue {guide_idx + 1}: {safe_statement} (Symbolic Confidence: {confidence:.2f})")
             if relevant_guidance_texts:
-                prompt_parts.append("You MAY use the following background information if relevant:")  # Softer phrasing
+                prompt_parts.append(
+                    "Hint: Consider the following potentially relevant facts derived from symbolic reasoning (their accuracy is not guaranteed):")
                 prompt_parts.extend(relevant_guidance_texts)
-                prompt_parts.append("---")  # Clearer separator
+                prompt_parts.append("---")
         except Exception as e:
-            self.logger.warning(f"Error processing guidance for prompt: {e}")
+            self.logger.warning(f"[QID:{query_id_for_log}] Error processing guidance for prompt: {e}")
 
-        # --- Context Section (Keep existing logic from source [1080]-[1084]) ---
+        # --- Context Section ---
         context_parts = []
-        added_content = set()
+        added_content_hashes = set()  # To avoid adding duplicate chunk text
         chars_added = 0
-        context_char_limit = int(self.max_context_length * 2.5)
+        # Prioritize shorter, more distinct chunks if many are available
+        # Sort chunks by length if many, or use as is if few
+        sorted_chunks_for_prompt = sorted(chunks, key=lambda c: len(c.get('text', ''))) if len(
+            chunks) > self.top_k * 2 else chunks
 
-        for chunk_idx, chunk in enumerate(chunks):  # Iterate relevant chunks
+        for chunk_idx, chunk in enumerate(sorted_chunks_for_prompt):
             chunk_text = chunk.get('text', '').strip()
-            if chunk_text and chunk_text not in added_content:
+            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8')).hexdigest()
+            if chunk_text and chunk_hash not in added_content_hashes:
+                # A bit more aggressive context char limit for LLM token budget
+                context_char_limit = int(self.max_context_length * 2.0)  # Reduced multiplier
                 if chars_added + len(chunk_text) < context_char_limit:
-                    # Add chunk index for clarity in prompt if many chunks
                     context_parts.append(f"Passage {chunk_idx + 1}:\n{chunk_text}")
-                    added_content.add(chunk_text)
+                    added_content_hashes.add(chunk_hash)
                     chars_added += len(chunk_text)
                 else:
-                    self.logger.debug("Context character limit reached for prompt. Stopping context addition.")
+                    self.logger.debug(
+                        f"[QID:{query_id_for_log}] Context character limit reached for prompt. Added {len(context_parts)} passages.")
                     break
         if not context_parts:
-            prompt_parts.append("Context:\n[No relevant context passages could be retrieved for this query.]")
+            prompt_parts.append("Context:\n[No relevant context passages were retrieved.]")
         else:
-            prompt_parts.append("Use ONLY the following context passages to answer the question:")
-            prompt_parts.append("\n\n---\n\n".join(context_parts))  # Better separation for multiple passages
+            prompt_parts.append("Based ONLY on the following context passages, answer the question.")
+            prompt_parts.append("\n\n---\n\n".join(context_parts))
         prompt_parts.append("---")
 
         # --- Instruction and Question Section ---
         instruction = ""
+        query_lower = question.lower()  # For instruction determination
+
         if dataset_type == 'drop':
-            # MODIFICATION: More direct and specific instructions for DROP
-            question_lower = question.lower()
-            if 'how many' in question_lower or 'difference' in question_lower or re.search(
-                    r'\b(what|which) (is|was) the (longest|shortest|highest|lowest|first|last)\b.*\b(number|value|score|yards|points|count)\b',
-                    question_lower):
-                instruction = "Answer with ONLY the single, precise numerical value. Do NOT include units (e.g., 'yards', 'points'). Do NOT provide any explanation or reasoning. Just the number."
-                if 'difference' in question_lower:
-                    instruction += " For difference queries, state only the final calculated difference."
-            elif 'who' in question_lower or 'which team' in question_lower or 'which player' in question_lower or 'what team' in question_lower or \
-                    re.search(
-                        r'\b(what|which) (is|was) the (longest|shortest|highest|lowest|first|last)\b.*\b(player|team|name)\b',
-                        question_lower):
-                instruction = "Answer with ONLY the name(s) of the player(s), team(s), or entity(ies). If multiple, separate with a standard delimiter if natural. Do NOT provide any explanation or reasoning."
-            elif 'when' in question_lower or 'what date' in question_lower or 'which year' in question_lower:
-                instruction = "Answer with ONLY the date. If a full date (month, day, year), provide it. If only year, provide just the year. Format as MM/DD/YYYY or YYYY. Do NOT provide any explanation or reasoning."
-            else:  # Default DROP instruction
-                instruction = "Based ONLY on the context passages, provide the single, most precise answer. This might be a number, a short text span (like a name), or a date. Do NOT include explanations. Do NOT include units unless explicitly part of the answer span."
+            self.logger.debug(
+                f"[QID:{query_id_for_log}] Determining DROP-specific instruction for query: '{query_lower[:50]}...'")
+            is_count_query = 'how many' in query_lower or 'count the number of' in query_lower
+            is_difference_query = 'difference' in query_lower or 'how many more' in query_lower or 'how many less' in query_lower
+            is_extreme_value_numeric_query = re.search(
+                r'\b(what|which) (is|was) the (longest|shortest|highest|lowest|first|last)\b.*\b(number|value|score|yards|points|count|total)\b',
+                query_lower) or \
+                                             ('how much' in query_lower and any(
+                                                 ext in query_lower for ext in ['longest', 'shortest']))
 
-            self.logger.debug(f"DROP Instruction: {instruction}")
+            is_who_which_what_span_query = 'who' in query_lower or \
+                                           any(ph in query_lower for ph in
+                                               ['which team', 'which player', 'what team', 'what player']) or \
+                                           re.search(
+                                               r'\b(what|which) (is|was) the (longest|shortest|first|last)\b.*\b(player|team|name|entity)\b',
+                                               query_lower)
+            is_date_query = 'when' in query_lower or 'what date' in query_lower or 'which year' in query_lower
 
+            if is_count_query or is_difference_query or is_extreme_value_numeric_query:
+                instruction = "Your task is to provide ONLY the single, final numerical answer. Do NOT include units (like 'yards' or 'points'). Do NOT include any reasoning, explanation, or introductory phrases. For example, if the answer is 7, respond with '7'."
+                if is_difference_query:
+                    instruction += " If the question asks for a difference, calculate it and provide only the resulting number."
+                elif is_extreme_value_numeric_query:
+                    instruction += " If the question asks for an extreme value (e.g., longest), provide that specific number."
+                self.logger.debug(f"[QID:{query_id_for_log}] DROP Instruction (Number): {instruction}")
+            elif is_who_which_what_span_query:
+                instruction = "Your task is to provide ONLY the name(s) of the player(s), team(s), or specific entity(ies) requested. If multiple distinct entities are requested by the question, separate them with a comma. Do NOT provide explanations or introductory phrases."
+                self.logger.debug(f"[QID:{query_id_for_log}] DROP Instruction (Spans): {instruction}")
+            elif is_date_query:
+                instruction = "Your task is to provide ONLY the date. If the answer is a full date, format it as MM/DD/YYYY. If only a year, provide just the YYYY. If only month and year, format as MM/YYYY. Do NOT provide explanations or introductory phrases."
+                self.logger.debug(f"[QID:{query_id_for_log}] DROP Instruction (Date): {instruction}")
+            else:  # Default DROP instruction if specific type not matched
+                instruction = "Carefully analyze the question and context. Provide the single, most precise answer. This could be a number (output only the number), a short text span (like a name or specific phrase from the text), or a date (MM/DD/YYYY or YYYY). Do NOT include explanations or units unless they are explicitly part of the answer span itself."
+                self.logger.debug(f"[QID:{query_id_for_log}] DROP Instruction (Default): {instruction}")
         else:  # Default / HotpotQA
             instruction = "Based ONLY on the context passages and any relevant background information provided, answer the following question accurately and concisely. Provide only the answer, no explanations."
 
         prompt_parts.append(f"Question: {question.strip()}")
         prompt_parts.append(f"\n{instruction}")
-        # MODIFICATION: Change "Answer:" to a more explicit instruction for the LLM's output start.
-        prompt_parts.append("\n\nPrecise Answer:")  # More direct
+        prompt_parts.append("\n\nPrecise Answer:")
 
         final_prompt = "\n\n".join(prompt_parts)
         final_chars = len(final_prompt)
-        if final_chars > self.max_context_length * 5:
+
+        # Aggressive truncation to fit tokenizer's max_length.
+        # This happens *before* tokenization. It's a safeguard.
+        # The tokenizer will also truncate if this isn't enough.
+        if final_chars > self.tokenizer.model_max_length * 4:  # Heuristic: avg 4 chars per token
+            self.logger.warning(
+                f"[QID:{query_id_for_log}] Final prompt length ({final_chars} chars) significantly exceeds estimated model limits. Aggressively truncating central context part.")
+            # Calculate available space for context
+            non_context_len = len(prompt_parts[0]) + len(prompt_parts[1]) + len(prompt_parts[-3]) + len(
+                prompt_parts[-2]) + len(prompt_parts[-1]) + (len(prompt_parts) * 2)  # separators
+            available_for_context = (self.tokenizer.model_max_length * 4) - non_context_len - 100  # Extra buffer
+
+            if context_parts and available_for_context > 0:
+                current_context_str = "\n\n---\n\n".join(context_parts)
+                if len(current_context_str) > available_for_context:
+                    truncated_context_str = current_context_str[:available_for_context] + " [CONTEXT TRUNCATED]"
+                    prompt_parts_idx_context_header = -1
+                    for idx, part_str in enumerate(prompt_parts):
+                        if "Use ONLY the following context passages" in part_str or "[No relevant context passages could be retrieved]" in part_str:
+                            prompt_parts_idx_context_header = idx
+                            break
+                    if prompt_parts_idx_context_header != -1 and prompt_parts_idx_context_header + 1 < len(
+                            prompt_parts):
+                        prompt_parts[prompt_parts_idx_context_header + 1] = truncated_context_str
+                        final_prompt = "\n\n".join(prompt_parts)
+                        self.logger.info(
+                            f"[QID:{query_id_for_log}] Context truncated to fit. New prompt length: {len(final_prompt)}")
+            else:
+                self.logger.warning(
+                    f"[QID:{query_id_for_log}] Could not effectively truncate context while preserving structure.")
+
+        elif final_chars > self.max_context_length * 5:  # Original slightly less aggressive warning
             self.logger.warning(
                 f"Final prompt length ({final_chars} chars) may exceed model limits for LLM {self.model.config.model_type if hasattr(self.model, 'config') else 'N/A'}.")
-        elif final_chars > self.max_context_length:  # Max context length of the tokenizer
+        elif final_chars > self.max_context_length:
             self.logger.warning(
                 f"Final prompt length ({final_chars} chars) exceeds tokenizer max_length ({self.max_context_length}). Will be truncated by tokenizer.")
 

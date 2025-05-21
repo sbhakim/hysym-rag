@@ -660,7 +660,7 @@ if __name__ == "__main__":
                         help='Dataset to use for evaluation (hotpotqa or drop)')
     parser.add_argument('--log-dir', default='logs', help='Directory to save log files')
     parser.add_argument('--no-output-capture', action='store_true', help='Disable output capture to file')
-    parser.add_argument('--samples', type=int, default=50, help='Number of samples to process')
+    parser.add_argument('--samples', type=int, default=500, help='Number of samples to process')
     parser.add_argument('--debug', action='store_true', help='Enable DEBUG level logging for main and src components')
     parser.add_argument('--show-progress', action='store_true', help='Show tqdm progress bars')
 
