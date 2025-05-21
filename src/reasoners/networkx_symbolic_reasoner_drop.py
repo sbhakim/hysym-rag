@@ -535,112 +535,118 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         """
         Extract entity spans from passage using spaCy NER, dependency parsing, and refined matching.
         Enhanced with NER label specificity, scoring, and generic span filtering.
+        [FIXED: Changed self.encoder to self.embedder and ensured correct tensor operations for util.cos_sim]
         """
-        qid_log_prefix = f"[DROP QID:{query_id}] _find_entities_in_passage"
+        qid_log_prefix = f"[DROP QID:{query_id}] _find_entities_in_passage" # [cite: 2425]
         if not self.nlp:
-            self.logger.warning(f"{qid_log_prefix} spaCy not available. Using fallback regex entity extraction.")
-            return self._fallback_entity_extraction(passage, entity, query_id)
+            self.logger.warning(f"{qid_log_prefix} spaCy not available. Using fallback regex entity extraction.") # [cite: 2425]
+            return self._fallback_entity_extraction(passage, entity, query_id) # [cite: 2425]
         if not entity or not isinstance(entity, str):
-            self.logger.warning(f"{qid_log_prefix} Invalid entity provided: {entity}")
-            return []
+            self.logger.warning(f"{qid_log_prefix} Invalid entity provided: {entity}") # [cite: 2427]
+            return [] # [cite: 2427]
 
         try:
-            doc = self.nlp(passage)
-            entity_lower = entity.lower().strip()
-            entity_clean = re.sub(r"^(the|a|an|his|her|its|their|any|some)\s+", "", entity_lower).strip()
-            entity_clean = entity_clean.split(" of ")[0].strip()
+            doc = self.nlp(passage) # [cite: 2428]
+            entity_lower = entity.lower().strip() # [cite: 2428]
+            entity_clean = re.sub(r"^(the|a|an|his|her|its|their|any|some)\s+", "", entity_lower).strip() # [cite: 2428]
+            entity_clean = entity_clean.split(" of ")[0].strip() # [cite: 2428]
             if not entity_clean:
-                entity_clean = entity_lower
+                entity_clean = entity_lower # [cite: 2428]
 
-            query_keywords_set = set(kw.lower() for kw in (query_keywords or []))
-            processed_entity_desc_keywords = query_keywords_set
+            query_keywords_set = set(kw.lower() for kw in (query_keywords or [])) # [cite: 2429]
+            processed_entity_desc_keywords = query_keywords_set # [cite: 2429]
             if not processed_entity_desc_keywords:
-                desc_doc = self.nlp(entity_clean)
+                desc_doc = self.nlp(entity_clean) # [cite: 2429]
                 processed_entity_desc_keywords.update(
-                    token.lemma_ for token in desc_doc
-                    if not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ']
+                    token.lemma_ for token in desc_doc # [cite: 2429]
+                    if not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ'] # [cite: 2430]
                 )
             if not processed_entity_desc_keywords and entity_clean:
                 processed_entity_desc_keywords.update(
-                    token.lemma_ for token in self.nlp(entity_clean) if token.pos_ in ['NOUN', 'PROPN']
+                    token.lemma_ for token in self.nlp(entity_clean) if token.pos_ in ['NOUN', 'PROPN'] # [cite: 2431]
                 )
 
-            candidate_spans_with_scores: List[Tuple[str, int, int, float]] = []
+            candidate_spans_with_scores: List[Tuple[str, int, int, float]] = [] # [cite: 2431]
 
             # 1. Direct/Lemma Match with NER expansion
             for token in doc:
-                token_text_lower = token.text.lower()
-                token_lemma_lower = token.lemma_.lower()
-                is_core_match = (token_text_lower == entity_clean or
-                                 token_lemma_lower == entity_clean or
-                                 (len(entity_clean.split()) > 1 and (token_text_lower in entity_clean.split() or token_lemma_lower in entity_clean.split())))
+                token_text_lower = token.text.lower() # [cite: 2431]
+                token_lemma_lower = token.lemma_.lower() # [cite: 2432]
+                is_core_match = (token_text_lower == entity_clean or # [cite: 2432]
+                                 token_lemma_lower == entity_clean or # [cite: 2432]
+                                 (len(entity_clean.split()) > 1 and (token_text_lower in entity_clean.split() or token_lemma_lower in entity_clean.split()))) # [cite: 2433]
 
                 if is_core_match:
-                    expanded_span_text = token.text
-                    score = 0.6
-                    for ent in doc.ents:
-                        if token.i >= ent.start and token.i < ent.end:
-                            if ent.label_ in {'PERSON', 'ORG', 'GPE', 'LOC', 'PRODUCT', 'EVENT', 'WORK_OF_ART', 'NORP'}:
-                                expanded_span_text = ent.text
-                                score = 0.85
-                                break
-                    if expanded_span_text == token.text:
-                        for chunk in doc.noun_chunks:
-                            if token.i >= chunk.start and token.i < chunk.end:
-                                expanded_span_text = chunk.text
-                                score = 0.7
-                                break
-                    candidate_spans_with_scores.append((expanded_span_text.strip(), token.idx, token.idx + len(expanded_span_text), score))
-                    self.logger.debug(f"{qid_log_prefix} Found potential entity via direct/lemma: '{expanded_span_text}' (Score: {score})")
+                    expanded_span_text = token.text # [cite: 2433]
+                    score = 0.6 # [cite: 2433]
+                    for ent in doc.ents: # [cite: 2434]
+                        if token.i >= ent.start and token.i < ent.end: # [cite: 2434]
+                            if ent.label_ in {'PERSON', 'ORG', 'GPE', 'LOC', 'PRODUCT', 'EVENT', 'WORK_OF_ART', 'NORP'}: # [cite: 2434]
+                                expanded_span_text = ent.text # [cite: 2435]
+                                score = 0.85 # [cite: 2435]
+                                break # [cite: 2435]
+                    if expanded_span_text == token.text: # [cite: 2435]
+                        for chunk in doc.noun_chunks: # [cite: 2436]
+                            if token.i >= chunk.start and token.i < chunk.end: # [cite: 2436]
+                                expanded_span_text = chunk.text # [cite: 2436]
+                                score = 0.7 # [cite: 2437]
+                                break # [cite: 2437]
+                    candidate_spans_with_scores.append((expanded_span_text.strip(), token.idx, token.idx + len(expanded_span_text), score)) # [cite: 2437]
+                    self.logger.debug(f"{qid_log_prefix} Found potential entity via direct/lemma: '{expanded_span_text}' (Score: {score})") # [cite: 2438]
 
             # 2. General NER pass
             for ent in doc.ents:
                 if ent.label_ not in ['DATE', 'TIME', 'PERCENT', 'MONEY', 'QUANTITY', 'ORDINAL', 'CARDINAL'] or \
-                   (entity_lower.isdigit() and ent.label_ == 'CARDINAL'):
-                    score = 0.5
-                    ent_text_lower = ent.text.lower()
+                   (entity_lower.isdigit() and ent.label_ == 'CARDINAL'): # [cite: 2438]
+                    score = 0.5 # [cite: 2439]
+                    ent_text_lower = ent.text.lower() # [cite: 2439]
                     if entity_clean in ent_text_lower:
-                        score += 0.2
-                    elif self.encoder and util and processed_entity_desc_keywords:
+                        score += 0.2 # [cite: 2439]
+                    # UPDATED BLOCK: Changed self.encoder to self.embedder and ensured tensor operations
+                    elif self.embedder and util and processed_entity_desc_keywords: # [cite: 2440]
                         try:
-                            sim = util.cos_sim(self.encoder.encode(entity_lower), self.encoder.encode(ent.text)).item()
-                            if sim > 0.6:
-                                score += sim * 0.2
+                            # Ensure inputs to embedder are strings and then convert to tensor and move to device
+                            entity_lower_emb = self.embedder.encode(entity_lower, convert_to_tensor=True).to(self.device)
+                            ent_text_emb = self.embedder.encode(ent.text, convert_to_tensor=True).to(self.device)
+                            sim = util.cos_sim(entity_lower_emb, ent_text_emb).item() # [cite: 2440]
+                            if sim > 0.6: # [cite: 2440]
+                                score += sim * 0.2 # [cite: 2441]
                         except Exception as e_enc:
-                            self.logger.warning(f"{qid_log_prefix} Could not compute similarity for NER span '{ent.text}': {e_enc}")
-                    candidate_spans_with_scores.append((ent.text.strip(), ent.start_char, ent.end_char, score))
-                    self.logger.debug(f"{qid_log_prefix} Found entity via NER ({ent.label_}): '{ent.text}' (Score: {score})")
+                            self.logger.warning(f"{qid_log_prefix} Could not compute similarity for NER span '{ent.text}': {e_enc}") # [cite: 2441]
+                    # END OF UPDATED BLOCK
+                    candidate_spans_with_scores.append((ent.text.strip(), ent.start_char, ent.end_char, score)) # [cite: 2442]
+                    self.logger.debug(f"{qid_log_prefix} Found entity via NER ({ent.label_}): '{ent.text}' (Score: {score})") # [cite: 2442]
 
             # Sort by score (desc) then by start_char (asc)
-            candidate_spans_with_scores.sort(key=lambda x: (x[3], -x[1]), reverse=True)
+            candidate_spans_with_scores.sort(key=lambda x: (x[3], -x[1]), reverse=True) # [cite: 2442]
 
             # Deduplicate based on character indices
-            final_spans_text_only = []
-            added_char_indices = set()
+            final_spans_text_only = [] # [cite: 2443]
+            added_char_indices = set() # [cite: 2443]
             for text, start_char, end_char, score in candidate_spans_with_scores:
-                has_major_overlap = False
-                for i in range(start_char, end_char):
-                    if i in added_char_indices:
-                        has_major_overlap = True
-                        break
+                has_major_overlap = False # [cite: 2443]
+                for i in range(start_char, end_char): # [cite: 2443]
+                    if i in added_char_indices: # [cite: 2444]
+                        has_major_overlap = True # [cite: 2444]
+                        break # [cite: 2444]
                 if not has_major_overlap:
-                    final_spans_text_only.append(text)
-                    for i in range(start_char, end_char):
-                        added_char_indices.add(i)
+                    final_spans_text_only.append(text) # [cite: 2444]
+                    for i in range(start_char, end_char): # [cite: 2445]
+                        added_char_indices.add(i) # [cite: 2445]
 
             # Deduplicate case-insensitive
-            seen_final = set()
-            deduplicated_final_spans = [s for s in final_spans_text_only if s.lower() not in seen_final and not seen_final.add(s.lower())]
+            seen_final = set() # [cite: 2445]
+            deduplicated_final_spans = [s for s in final_spans_text_only if s.lower() not in seen_final and not seen_final.add(s.lower())] # [cite: 2445]
 
             # Filter out generic spans
-            if len(entity_lower) > 3:
-                deduplicated_final_spans = [s for s in deduplicated_final_spans if len(s.strip()) > 2 or s.lower() == entity_clean]
+            if len(entity_lower) > 3: # [cite: 2446]
+                deduplicated_final_spans = [s for s in deduplicated_final_spans if len(s.strip()) > 2 or s.lower() == entity_clean] # [cite: 2446]
 
-            self.logger.debug(f"{qid_log_prefix} Final refined & deduplicated spans for '{entity}': {deduplicated_final_spans}")
-            return deduplicated_final_spans
+            self.logger.debug(f"{qid_log_prefix} Final refined & deduplicated spans for '{entity}': {deduplicated_final_spans}") # [cite: 2446]
+            return deduplicated_final_spans # [cite: 2446]
 
-        except Exception as e:
-            self.logger.exception(f"{qid_log_prefix} Error extracting entities for '{entity}': {str(e)}")
+        except Exception as e: # [cite: 2446]
+            self.logger.exception(f"{qid_log_prefix} Error extracting entities for '{entity}': {str(e)}") # [cite: 2447]
             return []
 
     def _fallback_entity_extraction(self, passage: str, entity: str, query_id: str) -> List[str]:
@@ -1124,114 +1130,135 @@ class GraphSymbolicReasonerDrop(GraphSymbolicReasoner):
         """
         Helper to find numbers (values) and their original text spans, attempting to associate
         them with the entity_desc using query_keywords and NLP for better precision.
+        [FIXED: Changed access to entity text to be more robust, avoiding direct token.ent_.text if problematic]
         """
-        pairs: List[Tuple[Optional[Union[int, float]], str]] = []
-        qid_log_prefix = f"[DROP QID:{query_id}] _find_values_and_spans"
+        pairs: List[Tuple[Optional[Union[int, float]], str]] = []  #
+        qid_log_prefix = f"[DROP QID:{query_id}] _find_values_and_spans"  #
 
         if not self.nlp:
-            self.logger.warning(f"{qid_log_prefix} spaCy unavailable. Fallback will be less accurate.")
-            numbers_in_context = self._find_numbers_in_passage(context, query_id)
+            self.logger.warning(f"{qid_log_prefix} spaCy unavailable. Fallback will be less accurate.")  #
+            numbers_in_context = self._find_numbers_in_passage(context, query_id)  #
             if entity_desc.lower() in context.lower() and numbers_in_context:
                 for num in numbers_in_context:
-                    pairs.append((num, str(num)))
-            return list(set(pairs))
+                    pairs.append((num, str(num)))  #
+            return list(set(pairs))  #
 
-        doc = self.nlp(context)
-        entity_desc_lower = entity_desc.lower()
+        doc = self.nlp(context)  #
+        entity_desc_lower = entity_desc.lower()  #
 
-        processed_entity_desc_keywords = set(kw.lower() for kw in (query_keywords or []))
+        processed_entity_desc_keywords = set(kw.lower() for kw in (query_keywords or []))  #
         if not processed_entity_desc_keywords:
-            desc_doc = self.nlp(entity_desc_lower)
+            desc_doc = self.nlp(entity_desc_lower)  #
             processed_entity_desc_keywords.update(
-                token.lemma_ for token in desc_doc if
-                not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ']
+                token.lemma_ for token in desc_doc if  #
+                not token.is_stop and not token.is_punct and token.pos_ in ['NOUN', 'PROPN', 'VERB', 'ADJ']  #
             )
         if not processed_entity_desc_keywords and entity_desc_lower:
             processed_entity_desc_keywords.update(
-                token.lemma_ for token in self.nlp(entity_desc_lower) if token.pos_ in ['NOUN', 'PROPN'])
+                token.lemma_ for token in self.nlp(entity_desc_lower) if token.pos_ in ['NOUN', 'PROPN'])  #
 
         self.logger.debug(
-            f"{qid_log_prefix}: entity_desc='{entity_desc}', keywords for matching: {processed_entity_desc_keywords}")
+            f"{qid_log_prefix}: entity_desc='{entity_desc}', keywords for matching: {processed_entity_desc_keywords}")  #
 
-        PROXIMITY_WINDOW = 7
+        PROXIMITY_WINDOW = 7  #
+
+        # Keep track of tokens already processed as part of an NER entity to avoid double counting
+        processed_ner_tokens = set()
 
         for sent in doc.sents:
-            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop and not token.is_punct}
-            keyword_overlap_count = len(processed_entity_desc_keywords.intersection(sent_lemmas))
-            relevance_threshold = 1 if len(processed_entity_desc_keywords) <= 3 else 2
+            sent_lemmas = {token.lemma_.lower() for token in sent if not token.is_stop and not token.is_punct}  #
+            keyword_overlap_count = len(processed_entity_desc_keywords.intersection(sent_lemmas))  #
+            relevance_threshold = 1 if len(processed_entity_desc_keywords) <= 3 else 2  #
 
-            if keyword_overlap_count >= relevance_threshold:
+            if keyword_overlap_count >= relevance_threshold:  #
                 self.logger.debug(
-                    f"{qid_log_prefix} Relevant sentence for '{entity_desc}': '{sent.text[:100]}...' (Overlap: {keyword_overlap_count})")
+                    f"{qid_log_prefix} Relevant sentence for '{entity_desc}': '{sent.text[:100]}...' (Overlap: {keyword_overlap_count})")  #
 
+                # First, process recognized NER entities in the sentence
+                for ent in sent.ents:
+                    if ent.label_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT']:
+                        num_val = None
+                        original_num_span_text = ent.text  # Use ent.text for the full entity span
+                        try:
+                            num_str = original_num_span_text.replace(',', '').replace('$', '').replace('%',
+                                                                                                       '').strip()  #
+                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):  #
+                                num_val = float(num_str) if '.' in num_str else int(num_str)  #
+                                # Mark tokens within this entity as processed
+                                for i in range(ent.start, ent.end):
+                                    processed_ner_tokens.add(i)
+                        except ValueError:
+                            pass  # num_val remains None
+
+                        if num_val is not None:
+                            # Association logic (check proximity to keywords)
+                            is_associated = False
+                            # Check keywords within the entity itself or in proximity
+                            ent_lemmas = {t.lemma_.lower() for t in ent if not t.is_stop and not t.is_punct}
+                            if processed_entity_desc_keywords.intersection(ent_lemmas):
+                                is_associated = True
+                            else:  # Check proximity if not in entity itself
+                                window_tokens_indices = set(
+                                    range(max(sent.start, ent.start - PROXIMITY_WINDOW), ent.start)) | \
+                                                        set(range(ent.end, min(sent.end, ent.end + PROXIMITY_WINDOW)))
+                                for token_idx in window_tokens_indices:
+                                    if doc[token_idx].lemma_.lower() in processed_entity_desc_keywords:
+                                        is_associated = True
+                                        break
+
+                            if is_associated:
+                                pairs.append((num_val, original_num_span_text))  #
+                                self.logger.debug(
+                                    f"{qid_log_prefix} Associated NER value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}' via NER & proximity.")  #
+
+                # Then, process like_num tokens that were NOT part of an already processed NER entity
                 for token in sent:
+                    if token.i in processed_ner_tokens:  # Skip if already handled by NER
+                        continue
+
                     num_val = None
-                    original_num_span_text = token.text
-                    is_ner_num = False
+                    original_num_span_text = token.text  #
 
-                    if token.ent_type_ and token.ent_type_ in ['CARDINAL', 'QUANTITY', 'MONEY', 'PERCENT']:
+                    if token.like_num and not token.is_punct and not token.is_stop:  #
                         try:
-                            original_num_span_text = token.ent_.text
-                            num_str = original_num_span_text.replace(',', '').replace('$', '').replace('%', '').strip()
-                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
-                                num_val = float(num_str) if '.' in num_str else int(num_str)
-                                is_ner_num = True
+                            num_str = token.text.replace(',', '').strip()  #
+                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):  #
+                                num_val = float(num_str) if '.' in num_str else int(num_str)  #
                         except ValueError:
-                            pass
-
-                    elif token.like_num and not token.is_punct and not token.is_stop and not is_ner_num:
-                        try:
-                            num_str = token.text.replace(',', '').strip()
-                            if re.fullmatch(r'-?\d+(\.\d+)?', num_str):
-                                num_val = float(num_str) if '.' in num_str else int(num_str)
-                        except ValueError:
-                            pass
+                            pass  #
 
                     if num_val is not None:
-                        is_associated = False
-                        num_token_indices = []
-                        if is_ner_num:
-                            num_ent = token.ent_
-                            start_char, end_char = num_ent.start_char, num_ent.end_char
-                        else:
-                            start_char, end_char = token.idx, token.idx + len(token.text)
+                        is_associated = False  #
+                        # Check proximity for like_num tokens
+                        context_window_start = max(0, token.i - sent.start - PROXIMITY_WINDOW)  #
+                        context_window_end = min(len(sent), token.i - sent.start + 1 + PROXIMITY_WINDOW)  #
 
-                        current_num_tokens = [t for t in sent if
-                                              t.idx >= start_char and (t.idx + len(t.text)) <= end_char]
-                        if not current_num_tokens:
-                            continue
-
-                        first_num_token_idx_in_sent = current_num_tokens[0].i - sent.start
-                        last_num_token_idx_in_sent = current_num_tokens[-1].i - sent.start
-
-                        context_window_start = max(0, first_num_token_idx_in_sent - PROXIMITY_WINDOW)
-                        context_window_end = min(len(sent), last_num_token_idx_in_sent + 1 + PROXIMITY_WINDOW)
-
-                        for i in range(context_window_start, context_window_end):
-                            if sent[i].i >= current_num_tokens[0].i and sent[i].i <= current_num_tokens[-1].i:
-                                continue
-                            if sent[i].lemma_.lower() in processed_entity_desc_keywords:
-                                is_associated = True
-                                break
+                        for i in range(context_window_start, context_window_end):  #
+                            # Check relative to sentence start
+                            if sent[i].i == token.i:  # Don't compare token to itself
+                                continue  #
+                            if sent[i].lemma_.lower() in processed_entity_desc_keywords:  #
+                                is_associated = True  #
+                                break  #
 
                         if is_associated:
-                            pairs.append((num_val, original_num_span_text))
+                            pairs.append((num_val, original_num_span_text))  #
                             self.logger.debug(
-                                f"{qid_log_prefix} Associated value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}' due to keyword proximity.")
+                                f"{qid_log_prefix} Associated like_num value={num_val} (from span='{original_num_span_text}') with entity_desc='{entity_desc}' due to keyword proximity.")  #
 
-        unique_pairs_set = set()
-        final_pairs: List[Tuple[Optional[Union[int, float]], str]] = []
+        unique_pairs_set = set()  #
+        final_pairs: List[Tuple[Optional[Union[int, float]], str]] = []  #
         for val, span_str in pairs:
-            if (val, span_str) not in unique_pairs_set:
-                final_pairs.append((val, span_str))
-                unique_pairs_set.add((val, span_str))
+            if (val, span_str) not in unique_pairs_set:  #
+                final_pairs.append((val, span_str))  #
+                unique_pairs_set.add((val, span_str))  #
 
         if not final_pairs:
             self.logger.warning(
-                f"{qid_log_prefix} No numbers found specifically associated with '{entity_desc}' using keywords.")
+                f"{qid_log_prefix} No numbers found specifically associated with '{entity_desc}' using keywords.")  #
 
         self.logger.debug(
-            f"{qid_log_prefix} Found {len(final_pairs)} value/span pairs for '{entity_desc}': {final_pairs}")
+            f"{qid_log_prefix} Found {len(final_pairs)} value/span pairs for '{entity_desc}': {final_pairs}")  #
         return final_pairs
 
     def execute_difference(self, args: Dict[str, Any], context: str, query_id: str) -> Dict[str, Any]:
