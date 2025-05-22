@@ -15,6 +15,7 @@ try:
     # UnifiedResponseAggregator will be passed as an instance to the constructor.
     # It's now defined in src.system.response_aggregator.py and imported via src.system.__init__.py
     from .system_logic_helpers import _determine_reasoning_path_logic, _optimize_thresholds_logic
+    from src.reasoners.dummy_reasoners import DummySymbolicReasoner, DummyNeuralRetriever # <<<--- ADD THIS LINE
 except ImportError:
     # Fallback if run directly or structure differsfv
     import sys
@@ -24,6 +25,7 @@ except ImportError:
     from src.resources.resource_manager import ResourceManager
     from src.utils.metrics_collector import MetricsCollector
     from src.system.system_logic_helpers import _determine_reasoning_path_logic, _optimize_thresholds_logic
+    from src.reasoners.dummy_reasoners import DummySymbolicReasoner, DummyNeuralRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -288,55 +290,169 @@ class SystemControlManager:
             query_id: str, dataset_type: Optional[str]
     ) -> Tuple[Any, str]:
         """
-        Selects and executes the processing path with fallbacks, returning the result and path taken.
+        Selects and executes the processing path, respecting active components
+        and providing fallbacks if the initially chosen path is unavailable or fails.
+        Returns the result and the path taken.
         """
-        self.logger.debug(f"Executing _timed_process_query for QID {query_id}, Dataset: '{dataset_type}'")
-        dt_lower = dataset_type.lower() if dataset_type else 'unknown'
+        self.logger.debug(f"SCM._timed_process_query: Processing QID {query_id}, Dataset: '{dataset_type}'")
 
-        path_selection_start_time = time.time()
-        # Call the new select_reasoning_path which uses the helper
-        current_reasoning_path = forced_path if forced_path else self.select_reasoning_path(query_complexity, query_id,
-                                                                                            dataset_type)
+        # Determine component activity status
+        is_symbolic_active = not isinstance(self.hybrid_integrator.symbolic_reasoner, DummySymbolicReasoner)
+        is_neural_active = not isinstance(self.hybrid_integrator.neural_retriever, DummyNeuralRetriever)
         self.logger.debug(
-            f"Path selection for QID {query_id} took: {time.time() - path_selection_start_time:.4f}s. Initial Path: {current_reasoning_path}")
+            f"SCM._timed_process_query: QID {query_id} - Symbolic Active: {is_symbolic_active}, Neural Active: {is_neural_active}")
 
-        paths_to_try = [current_reasoning_path]
-        if dt_lower == 'drop' and not forced_path:  # For DROP, define fallback paths if the initial path fails
-            if current_reasoning_path == 'hybrid':
-                paths_to_try.extend(['symbolic', 'neural'])
-            elif current_reasoning_path == 'symbolic':
-                paths_to_try.extend(['hybrid', 'neural'])
-            elif current_reasoning_path == 'neural':
-                paths_to_try.extend(['hybrid', 'symbolic'])
-            # Ensure no duplicate paths if initial_path was already one of the fallbacks
-            paths_to_try = list(dict.fromkeys(paths_to_try))
+        initial_selected_path_by_scm = "hybrid"  # Default
+        if not forced_path:
+            path_selection_start_time = time.time()
+            initial_selected_path_by_scm = self.select_reasoning_path(query_complexity, query_id, dataset_type)
+            self.logger.debug(
+                f"SCM._timed_process_query: QID {query_id} - Path selection took: {time.time() - path_selection_start_time:.4f}s. SCM Initial Path Choice: {initial_selected_path_by_scm}"
+            )
+
+        primary_path_to_try = forced_path if forced_path else initial_selected_path_by_scm
+        self.logger.info(
+            f"SCM._timed_process_query: QID {query_id} - Primary path to attempt: '{primary_path_to_try}' (Forced: {forced_path is not None})")
+
+        # Define an ordered list of paths to attempt based on the primary path and active components
+        paths_to_attempt_execution = []
+
+        if primary_path_to_try == "hybrid":
+            if is_symbolic_active and is_neural_active:
+                paths_to_attempt_execution.append("hybrid")
+            # Fallbacks if hybrid is chosen but not fully active, or if hybrid itself fails
+            if is_symbolic_active:  # Symbolic is a common fallback
+                paths_to_attempt_execution.append("symbolic")
+            if is_neural_active:  # Neural is another common fallback
+                paths_to_attempt_execution.append("neural")
+        elif primary_path_to_try == "symbolic":
+            if is_symbolic_active:
+                paths_to_attempt_execution.append("symbolic")
+            # Fallbacks if symbolic is chosen (even if not active) or if active symbolic fails
+            if is_neural_active:  # If symbolic was chosen (even if dummy), neural is a potential fallback
+                paths_to_attempt_execution.append("neural")
+            if is_symbolic_active and is_neural_active:  # If symbolic was chosen and active, hybrid is a fallback
+                paths_to_attempt_execution.append("hybrid")
+        elif primary_path_to_try == "neural":
+            if is_neural_active:
+                paths_to_attempt_execution.append("neural")
+            # Fallbacks
+            if is_symbolic_active:
+                paths_to_attempt_execution.append("symbolic")
+            if is_symbolic_active and is_neural_active:
+                paths_to_attempt_execution.append("hybrid")
+        else:
+            self.logger.error(
+                f"SCM._timed_process_query: QID {query_id} - Unknown primary_path_to_try: '{primary_path_to_try}'. Constructing default fallbacks.")
+            # Default fallback order if primary path is unknown
+            if is_symbolic_active and is_neural_active:
+                paths_to_attempt_execution.append("hybrid")
+            if is_symbolic_active:
+                paths_to_attempt_execution.append("symbolic")
+            if is_neural_active:
+                paths_to_attempt_execution.append("neural")
+
+        # Remove duplicates while preserving order
+        paths_to_attempt_execution = list(dict.fromkeys(paths_to_attempt_execution))
+
+        if not paths_to_attempt_execution:
+            # This can happen if, for example, SCM chose "symbolic" but symbolic is disabled, AND neural is also disabled.
+            self.logger.error(
+                f"SCM._timed_process_query: QID {query_id} - No viable paths to attempt after considering active components. Primary choice: '{primary_path_to_try}'. SymActive: {is_symbolic_active}, NeuActive: {is_neural_active}.")
+            error_msg = "No active reasoning components available for the chosen or fallback paths."
+            if dataset_type and dataset_type.lower() == 'drop':
+                return ({"error": error_msg, "type": "error_object", "spans": [], 'number': '',
+                         'date': {'day': '', 'month': '', 'year': ''}, "status": "error",
+                         "rationale": error_msg}, "no_active_path")
+            else:
+                return (f"Error: {error_msg}", "no_active_path")
+
+        self.logger.info(
+            f"SCM._timed_process_query: QID {query_id} - Ordered paths to attempt execution: {paths_to_attempt_execution}")
 
         last_exception = None
-        for path_attempt in paths_to_try:
+        for path_attempt_name in paths_to_attempt_execution:
             self.logger.debug(
-                f"QID:{query_id} Attempting path '{path_attempt}' (Remaining: {paths_to_try[paths_to_try.index(path_attempt):]})")
+                f"SCM._timed_process_query: QID {query_id} - Evaluating attempt for path '{path_attempt_name}' from candidates {paths_to_attempt_execution}"
+            )
+
+            # Check if this path is actually viable with current *active* components
+            path_is_viable_for_attempt = False
+            if path_attempt_name == "hybrid":
+                if is_symbolic_active and is_neural_active:
+                    path_is_viable_for_attempt = True
+            elif path_attempt_name == "symbolic":
+                if is_symbolic_active:
+                    path_is_viable_for_attempt = True
+            elif path_attempt_name == "neural":
+                if is_neural_active:
+                    path_is_viable_for_attempt = True
+
+            if not path_is_viable_for_attempt:
+                self.logger.warning(
+                    f"SCM._timed_process_query: QID {query_id} - Path '{path_attempt_name}' is NOT viable with current active components (Sym: {is_symbolic_active}, Neu: {is_neural_active}). Skipping this candidate."
+                )
+                # If this non-viable path was the SCM's initial choice, it's important to note
+                if path_attempt_name == initial_selected_path_by_scm and not forced_path and last_exception is None:
+                    last_exception = ValueError(
+                        f"Path '{path_attempt_name}' selected by SCM but components are disabled by ablation.")
+                continue  # Try next path in the candidate list
+
+            self.logger.info(
+                f"SCM._timed_process_query: QID {query_id} - Now attempting execution of viable path: '{path_attempt_name}'")
             try:
                 result_obj = self._execute_processing_path(
-                    path_attempt, query, context, query_complexity, supporting_facts, query_id, dataset_type
+                    path_attempt_name, query, context, query_complexity,
+                    supporting_facts, query_id, dataset_type
                 )
-                # If _execute_processing_path itself returns an error dict, it's still a "successful" execution of this function
-                # The error status within result_obj will be handled by process_query_with_fallback
+
                 self.logger.info(
-                    f"QID:{query_id} Successfully attempted path '{path_attempt}'. Result type: {type(result_obj)}")
-                return result_obj, path_attempt  # Return the result and the path that produced it
+                    f"SCM._timed_process_query: QID {query_id} - Path '{path_attempt_name}' execution attempt completed. Result type: {type(result_obj)}"
+                )
+
+                # Check if the result from the executed path is an error returned by a dummy component
+                # This indicates the path was "executed" but was a dummy.
+                if isinstance(result_obj, dict) and \
+                        result_obj.get("rationale", "").startswith("[Dummy") and \
+                        result_obj.get("status") == "error":
+                    dummy_error_msg = result_obj.get('rationale')
+                    self.logger.warning(
+                        f"SCM._timed_process_query: QID {query_id} - Path '{path_attempt_name}' used a dummy component and returned: {dummy_error_msg}. Will try next path if available.")
+                    if last_exception is None:  # Store this as the reason for failure if no prior exception
+                        last_exception = ValueError(dummy_error_msg)
+                    continue  # Try the next path
+
+                # If it's not a dummy error, this path attempt was successful (even if the result_obj itself indicates a domain error)
+                return result_obj, path_attempt_name
             except Exception as e:
                 self.logger.warning(
-                    f"QID:{query_id} Path '{path_attempt}' execution failed: {str(e)}. Trying next path if available.")
-                last_exception = e  # Store the last exception
-                continue  # Try the next path in paths_to_try
+                    f"SCM._timed_process_query: QID {query_id} - Path '{path_attempt_name}' execution raised an EXCEPTION: {str(e)}. Trying next path if available.",
+                    exc_info=True
+                )
+                last_exception = e  # Store the exception
+                continue  # Try the next path in paths_to_attempt_execution
 
-        # If all paths in paths_to_try fail
-        self.logger.error(f"QID:{query_id} All attempted paths ({paths_to_try}) failed.")
+        # If loop finishes, all attempted viable paths failed
+        self.logger.error(
+            f"SCM._timed_process_query: QID {query_id} - All viable candidate paths ({paths_to_attempt_execution}) failed or were skipped.")
         if last_exception:
-            raise last_exception  # Re-raise the last encountered exception to trigger retry in the calling function
+            # Re-raise the last encountered exception (could be from a dummy or a real execution)
+            # This will be handled by the retry logic in process_query_with_fallback
+            self.logger.error(
+                f"SCM._timed_process_query: QID {query_id} - Re-raising last exception: {str(last_exception)}")
+            raise last_exception
         else:
-            # This case should be rare if paths_to_try is not empty
-            raise ValueError(f"All paths failed for QID {query_id}, but no specific exception was captured.")
+            # This case means no paths in paths_to_attempt_execution were viable or attempted,
+            # or they failed silently without exceptions (which shouldn't happen with the dummy error check).
+            final_error_msg = "No viable processing path found or all attempted paths failed without a specific exception."
+            self.logger.error(f"SCM._timed_process_query: QID {query_id} - {final_error_msg}")
+            # Return a structured error for the calling function
+            if dataset_type and dataset_type.lower() == 'drop':
+                return ({"error": final_error_msg, "type": "error_object", "spans": [], 'number': '',
+                         'date': {'day': '', 'month': '', 'year': ''}, "status": "error",
+                         "rationale": final_error_msg}, "no_path_executed")
+            else:
+                return (f"Error: {final_error_msg}", "no_path_executed")
 
     def select_reasoning_path(
             self,
