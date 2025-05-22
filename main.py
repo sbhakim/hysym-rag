@@ -8,7 +8,7 @@ import warnings
 import argparse
 import logging
 import urllib3  # type: ignore
-import yaml     # Added for loading ablation_config.yaml
+import yaml
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Union
 import torch
@@ -35,8 +35,6 @@ try:
     from src.utils.rule_extractor import RuleExtractor
     from src.queries.query_logger import QueryLogger
     from src.resources.resource_manager import ResourceManager
-    # FeedbackManager might be part of a different workflow, not directly in ablation baseline setup
-    # from src.feedback.feedback_manager import FeedbackManager
     from src.config.config_loader import ConfigLoader
     from src.queries.query_expander import QueryExpander
     from src.utils.evaluation import Evaluation
@@ -46,7 +44,7 @@ try:
     from src.utils.device_manager import DeviceManager
     from src.utils.progress import tqdm, ProgressManager
     from src.utils.output_capture import capture_output
-    from src.ablation_study import run_ablation_study # Added import for ablation study
+    from src.ablation_study import run_ablation_study
 except ImportError as e:
     print(f"Error importing HySym-RAG components: {e}")
     print("Please ensure main.py is run from the project root directory or PYTHONPATH is set correctly.")
@@ -54,13 +52,10 @@ except ImportError as e:
 
 urllib3.disable_warnings()  # type: ignore
 warnings.filterwarnings("ignore", category=UserWarning, module="spacy.util")
-ProgressManager.SHOW_PROGRESS = False # Default, can be overridden by args
+ProgressManager.SHOW_PROGRESS = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-# Default to INFO, can be overridden by --debug for main, or specific debug for ablation
-# logger.setLevel(logging.DEBUG) # Set by --debug arg if present
-
 
 def load_hotpotqa(hotpotqa_path: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
     """
@@ -111,7 +106,6 @@ def load_hotpotqa(hotpotqa_path: str, max_samples: Optional[int] = None) -> List
     logger.info(f"Finished loading HotpotQA. Total samples: {len(dataset)}.")
     return dataset
 
-
 def load_drop_dataset(drop_path: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Loads a portion of the DROP dataset.
@@ -129,8 +123,7 @@ def load_drop_dataset(drop_path: str, max_samples: Optional[int] = None) -> List
 
     total_loaded_qas = 0
     for passage_id, passage_content in data.items():
-        if not isinstance(passage_content,
-                          dict) or 'passage' not in passage_content or 'qa_pairs' not in passage_content:
+        if not isinstance(passage_content, dict) or 'passage' not in passage_content or 'qa_pairs' not in passage_content:
             logger.warning(f"Skipping invalid passage structure for passage_id: {passage_id}")
             continue
 
@@ -146,13 +139,13 @@ def load_drop_dataset(drop_path: str, max_samples: Optional[int] = None) -> List
 
             question = qa_pair['question']
             answer_obj = qa_pair['answer']
-            query_id = qa_pair.get("query_id", f"{passage_id}-{qa_pair_idx}") # Ensure unique QID
+            query_id = qa_pair.get("query_id", f"{passage_id}-{qa_pair_idx}")
 
             dataset.append({
                 "query_id": query_id,
                 "query": question,
                 "context": passage_text,
-                "answer": answer_obj, # This is the structured answer for DROP
+                "answer": answer_obj,
                 "type": "ground_truth_available_drop"
             })
             total_loaded_qas += 1
@@ -160,12 +153,11 @@ def load_drop_dataset(drop_path: str, max_samples: Optional[int] = None) -> List
                 logger.info(f"Loaded {total_loaded_qas} DROP samples (max requested: {max_samples}).")
                 return dataset
 
-        if max_samples and total_loaded_qas >= max_samples: # Check after outer loop as well
+        if max_samples and total_loaded_qas >= max_samples:
             break
 
     logger.info(f"Finished loading DROP. Total samples: {len(dataset)}.")
     return dataset
-
 
 def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     """Main execution function for the HySym-RAG system for standard evaluation runs."""
@@ -175,8 +167,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
     for lib_name in ['transformers', 'sentence_transformers', 'urllib3.connectionpool', 'h5py', 'numexpr', 'spacy']:
         logging.getLogger(lib_name).setLevel(logging.WARNING)
 
-    # Configure project-specific logger levels (can be overridden by --debug)
-    # (These are already top-level in the original code, keeping for consistency)
+    # Configure project-specific logger levels
     logging.getLogger('src.utils.dimension_manager').setLevel(logging.INFO if not (args and args.debug) else logging.DEBUG)
     logging.getLogger('src.integrators.hybrid_integrator').setLevel(logging.INFO if not (args and args.debug) else logging.DEBUG)
     logging.getLogger('src.reasoners.networkx_symbolic_reasoner_base').setLevel(logging.INFO if not (args and args.debug) else logging.DEBUG)
@@ -185,7 +176,6 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
     logging.getLogger('src.system.system_control_manager').setLevel(logging.INFO if not (args and args.debug) else logging.DEBUG)
     logging.getLogger('src.system.response_aggregator').setLevel(logging.INFO if not (args and args.debug) else logging.DEBUG)
     logging.getLogger('src.system.system_logic_helpers').setLevel(logging.INFO if not (args and args.debug) else logging.DEBUG)
-
 
     # 1. Load configuration
     print("Loading configuration...")
@@ -206,7 +196,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
         default_data_dir = os.path.join(project_root, "data")
         hotpotqa_path = config.get("hotpotqa_dataset_path", os.path.join(default_data_dir, "hotpot_dev_distractor_v1.json"))
         drop_path = config.get("drop_dataset_path", os.path.join(default_data_dir, "drop_dataset_dev.json"))
-        rules_path_default_name = "rules.json" # Fallback name if specific paths don't exist
+        rules_path_default_name = "rules.json"
         hotpotqa_rules_path = config.get("hotpotqa_rules_file", os.path.join(default_data_dir, "rules_hotpotqa.json"))
         drop_rules_path = config.get("drop_rules_file", os.path.join(default_data_dir, "rules_drop.json"))
         kb_path_default = os.path.join(default_data_dir, "small_knowledge_base.txt")
@@ -238,15 +228,14 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
     target_dim = alignment_config.get('target_dim', 768)
     dimensionality_manager = DimensionalityManager(target_dim=target_dim, device=device)
 
-    # 5. Select and Ensure Rules File (This logic determines the 'rules_path' for the run)
-    # For DROP, this might be overridden by dynamically generated rules later.
+    # 5. Select and Ensure Rules File
     current_rules_path = ""
     if dataset_type.lower() == 'drop':
         current_rules_path = drop_rules_path
         if not os.path.exists(current_rules_path):
             logger.warning(f"Configured DROP rules file {current_rules_path} not found, checking default.")
             current_rules_path = os.path.join(default_data_dir, rules_path_default_name)
-    else:  # hotpotqa or other
+    else:
         current_rules_path = hotpotqa_rules_path
         if not os.path.exists(current_rules_path):
             logger.warning(f"Configured HotpotQA rules file {current_rules_path} not found, checking default.")
@@ -270,7 +259,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
     # 7. Load Evaluation Dataset and Potentially Extract/Override Rules
     print(f"Loading evaluation dataset: {dataset_type.upper()}...")
     test_queries: List[Dict[str, Any]] = []
-    ground_truths: Dict[str, Any] = {} # query_id -> answer object
+    ground_truths: Dict[str, Any] = {}
 
     if dataset_type.lower() == 'drop':
         if not os.path.exists(drop_path):
@@ -278,8 +267,8 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             return {"error": f"DROP dataset not found at {drop_path}"}
         print(f"Loading DROP dataset from {drop_path}...")
         test_queries = load_drop_dataset(drop_path, max_samples=samples)
-        for s in test_queries: # Populate ground_truths for DROP
-             if "query_id" in s and "answer" in s:
+        for s in test_queries:
+            if "query_id" in s and "answer" in s:
                 ground_truths[s["query_id"]] = s["answer"]
 
         # Dynamic rule extraction for DROP
@@ -289,8 +278,8 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             print("Extracting DROP-specific rules dynamically...")
             try:
                 dynamic_rules = rule_extractor.extract_rules_from_drop(
-                    drop_json_path=drop_path, # Pass full dataset for comprehensive rule extraction
-                    questions=questions_for_rules, # Can be a subset for speed if needed
+                    drop_json_path=drop_path,
+                    questions=questions_for_rules,
                     passages=passages_for_rules,
                     min_support=config.get('drop_rule_min_support', 5)
                 )
@@ -299,7 +288,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
                 with open(dynamic_rules_path, "w", encoding="utf-8") as f:
                     json.dump(dynamic_rules, f, indent=2)
                 print(f"Saved {len(dynamic_rules)} dynamically extracted DROP rules to {dynamic_rules_path}")
-                current_rules_path = dynamic_rules_path # Override to use dynamic rules
+                current_rules_path = dynamic_rules_path
                 logger.info(f"Switched to use dynamically extracted rules: {current_rules_path}")
             except Exception as e:
                 logger.error(f"Failed to extract/save dynamic DROP rules: {e}. Using pre-configured: {current_rules_path}")
@@ -312,9 +301,8 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             return {"error": f"HotpotQA dataset not found at {hotpotqa_path}"}
         print(f"Loading HotpotQA dataset from {hotpotqa_path}...")
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=samples)
-        for sample_item in test_queries: # Populate ground_truths for HotpotQA
+        for sample_item in test_queries:
             ground_truths[sample_item["query_id"]] = sample_item["answer"]
-        # current_rules_path is already set to hotpotqa_rules_path
     else:
         logger.error(f"Unknown dataset_type '{dataset_type}'. Cannot load data.")
         return {"error": f"Unknown dataset_type '{dataset_type}'"}
@@ -323,7 +311,6 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
         logger.error("No test queries loaded. Exiting.")
         return {"error": "No test queries loaded"}
     print(f"Loaded {len(test_queries)} test queries. Using rules from: {current_rules_path}")
-
 
     # Initialize SampleDebugger
     NUM_RANDOM_SAMPLES_TO_PRINT = 2
@@ -342,14 +329,18 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
                 rules_file=current_rules_path,
                 match_threshold=config.get('symbolic_match_threshold_drop', 0.1),
                 max_hops=config.get('symbolic_max_hops_drop', 3),
-                embedding_model=embedding_model_name, device=device, dim_manager=dimensionality_manager
+                embedding_model=embedding_model_name,
+                device=device,
+                dim_manager=dimensionality_manager
             )
-        else: # hotpotqa
+        else:
             symbolic_reasoner = GraphSymbolicReasoner(
                 rules_file=current_rules_path,
                 match_threshold=config.get('symbolic_match_threshold_hotpot', 0.1),
                 max_hops=config.get('symbolic_max_hops_hotpot', 5),
-                embedding_model=embedding_model_name, device=device, dim_manager=dimensionality_manager
+                embedding_model=embedding_model_name,
+                device=device,
+                dim_manager=dimensionality_manager
             )
         count_rules = len(getattr(symbolic_reasoner, 'rules', []))
         print(f"Symbolic Reasoner loaded {count_rules} rules successfully from {current_rules_path}.")
@@ -369,7 +360,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
                 logger.warning(f"Few-shot examples file for DROP ('{nr_few_shot_path}') not found. NR will not use them.")
                 nr_few_shot_path = None
         elif dataset_type.lower() == 'drop' and not use_drop_few_shots_flag:
-             logger.info("Few-shot examples for DROP are disabled by configuration.")
+            logger.info("Few-shot examples for DROP are disabled by configuration.")
 
         neural_retriever = NeuralRetriever(
             model_name,
@@ -402,7 +393,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             neural_retriever=neural_retriever,
             query_expander=query_expander,
             dim_manager=dimensionality_manager,
-            dataset_type=dataset_type # Pass dataset_type
+            dataset_type=dataset_type
         )
     except Exception as e:
         logger.exception(f"Fatal error initializing Hybrid Integrator: {e}")
@@ -438,7 +429,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
     elif kb_path:
         logger.warning(f"General knowledge base file specified but not found: {kb_path}")
 
-    # Main Query Processing Loop (Copied and adapted from original)
+    # Main Query Processing Loop
     print(f"\n=== Testing System with {len(test_queries)} Queries from {dataset_type.upper()} Dataset ===")
     results_list: List[Dict[str, Any]] = []
 
@@ -448,10 +439,10 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
     for q_info in query_iterator:
         query_id_val = q_info.get("query_id")
         query_text_val = q_info.get("query")
-        gt_answer_obj = q_info.get("answer") # Ground truth object
+        gt_answer_obj = q_info.get("answer")
         local_context_val = q_info.get("context", general_context)
         forced_path_val = q_info.get("forced_path")
-        query_type_val = q_info.get("type", "") # e.g., 'ground_truth_available_drop'
+        query_type_val = q_info.get("type", "")
         supporting_facts_val = q_info.get("supporting_facts")
 
         if not query_id_val or not query_text_val:
@@ -469,7 +460,6 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             complexity_score_val = query_expander.get_query_complexity(query_text_val)
             logger.info(f"Query '{query_id_val}' Complexity Score: {complexity_score_val:.4f}")
 
-            # process_query_with_fallback returns a tuple: (formatted_response_dict, reasoning_path_string)
             final_response_obj, actual_reasoning_path_val = system_manager.process_query_with_fallback(
                 query=query_text_val,
                 context=local_context_val,
@@ -480,9 +470,8 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
                 dataset_type=dataset_type
             )
 
-            # 'prediction_val' is the actual content of the 'result' field from the SCM's formatted response
             prediction_val = final_response_obj.get('result')
-            results_list.append(final_response_obj) # Store the entire SCM output
+            results_list.append(final_response_obj)
 
             print("\n" + "-" * 10 + f" Results for QID: {query_id_val} " + "-" * 10)
             if dataset_type == 'drop' and isinstance(prediction_val, dict):
@@ -492,39 +481,40 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             print(f"  Reasoning Path: {actual_reasoning_path_val}")
             print(f"  Overall Processing Time: {final_response_obj.get('processing_time', 0.0):.3f}s")
             print(f"  Status: {final_response_obj.get('status', 'unknown')}")
-            # ... (rest of the printing logic for resource delta, explanation from original)
             res_delta = final_response_obj.get('resource_usage', {})
             if res_delta:
                 delta_str_parts = [f"{k.capitalize()}: {v * 100:+.1f}%" for k, v in res_delta.items()]
-                if delta_str_parts: print(f"  Resource Delta: {', '.join(delta_str_parts)}")
+                if delta_str_parts:
+                    print(f"  Resource Delta: {', '.join(delta_str_parts)}")
             explanation_text = final_response_obj.get('explanation')
-            if explanation_text: print(f"  Explanation: {explanation_text}")
+            if explanation_text:
+                print(f"  Explanation: {explanation_text}")
             print("-" * (30 + len(str(query_id_val))))
-
 
             # Evaluation
             if query_type_val.startswith("ground_truth_available") and \
                gt_answer_obj is not None and \
                final_response_obj.get('status') == 'success':
-                if query_id_val in ground_truths: # Ensure GT was loaded
+                if query_id_val in ground_truths:
                     gt_answer_for_eval = ground_truths[query_id_val]
                     eval_metrics_dict = evaluator.evaluate(
-                        predictions={query_id_val: prediction_val}, # prediction_val is the 'result' field
+                        predictions={query_id_val: prediction_val},
                         ground_truths={query_id_val: gt_answer_for_eval},
-                        # supporting_facts and reasoning_chain can be added if relevant for specific metrics
                     )
                     print("  Evaluation Metrics:")
                     print(f"    Exact Match: {eval_metrics_dict.get('average_exact_match', 0.0):.3f}")
                     print(f"    F1 Score: {eval_metrics_dict.get('average_f1', 0.0):.3f}")
                     if dataset_type != 'drop':
                         print(f"    ROUGE-L: {eval_metrics_dict.get('average_rougeL', 0.0):.3f}")
-                        # Add other text metrics if needed
-                    final_response_obj['evaluation_metrics'] = eval_metrics_dict # Attach to main result log
+                    final_response_obj['evaluation_metrics'] = eval_metrics_dict
 
                     sample_debugger.print_debug_if_selected(
-                        query_id=query_id_val, query_text=query_text_val,
-                        ground_truth_answer=gt_answer_for_eval, system_prediction_value=prediction_val,
-                        actual_reasoning_path=actual_reasoning_path_val, eval_metrics=eval_metrics_dict,
+                        query_id=query_id_val,
+                        query_text=query_text_val,
+                        ground_truth_answer=gt_answer_for_eval,
+                        system_prediction_value=prediction_val,
+                        actual_reasoning_path=actual_reasoning_path_val,
+                        eval_metrics=eval_metrics_dict,
                         dataset_type=dataset_type
                     )
                 else:
@@ -533,17 +523,19 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
                 logger.warning(f"Skipping evaluation for QID {query_id_val} due to status: '{final_response_obj.get('status')}'.")
 
         except Exception as e:
-            # Error handling from original
             print(f"\n--- ERROR in main processing loop for query {query_id_val} ---")
             logger.exception(f"Unhandled exception for query_id {query_id_val} in main loop: {e}")
             results_list.append({
-                'query_id': query_id_val, 'query': query_text_val, 'status': 'critical_error_in_main_loop',
-                'error': str(e), 'reasoning_path': actual_reasoning_path_val
+                'query_id': query_id_val,
+                'query': query_text_val,
+                'status': 'critical_error_in_main_loop',
+                'error': str(e),
+                'reasoning_path': actual_reasoning_path_val
             })
             print(f"Error: {e}")
             print("-" * 30)
 
-    # After processing all queries (from original code)
+    # After processing all queries
     print("\n" + "=" * 20 + " System Performance Summary (from SystemControlManager) " + "=" * 20)
     try:
         scm_perf_summary = system_manager.get_performance_metrics()
@@ -561,7 +553,7 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
         if scm_path_stats:
             for path, path_data in scm_path_stats.items():
                 count = path_data.get('execution_count', 0)
-                success_count = path_data.get('success_count', 0) # Renamed for clarity
+                success_count = path_data.get('success_count', 0)
                 avg_time = path_data.get('avg_time_sec', 0.0)
                 perc_total = path_data.get('percentage_of_total_queries', 0.0)
                 print(f"- Path '{path}': Executed={count} ({perc_total:.1f}%), Succeeded={success_count}, AvgTime={avg_time:.3f}s")
@@ -578,7 +570,6 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
         logger.error(f"Error generating SystemControlManager performance summary: {report_err}", exc_info=True)
 
     print("\n" + "=" * 20 + " Comprehensive Academic Analysis (from MetricsCollector) " + "=" * 20)
-    # Log directory logic from original
     current_dataset_log_dir = os.path.join(args.log_dir if args and hasattr(args, 'log_dir') else 'logs', dataset_type)
     os.makedirs(current_dataset_log_dir, exist_ok=True)
 
@@ -588,16 +579,16 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
             print("No data collected by MetricsCollector to generate an academic report.")
             return {"status": "No data for academic report"}
 
-        # Performance Metrics print from original
         perf_metrics = academic_report.get('performance_metrics', {})
         if 'processing_time' in perf_metrics and isinstance(perf_metrics['processing_time'], dict) and perf_metrics['processing_time'].get('count', 0) > 0:
             proc_time_stats = perf_metrics['processing_time']
             print("\nPerformance Metrics (from Metrics Collector):")
             print(f"- Avg Processing Time: {proc_time_stats.get('mean', 0.0):.3f}s (Std: {proc_time_stats.get('std', 0.0):.3f}, Median: {proc_time_stats.get('median', 0.0):.3f})")
-            if 'percentile_95' in proc_time_stats: print(f"- 95th Percentile Time: {proc_time_stats.get('percentile_95', 0.0):.3f}s")
+            if 'percentile_95' in proc_time_stats:
+                print(f"- 95th Percentile Time: {proc_time_stats.get('percentile_95', 0.0):.3f}s")
         else:
             print("- No processing time metrics collected by MetricsCollector or count is zero.")
-        # ... (Rest of the academic report printing from original: Reasoning Analysis, Resource Efficiency, Statistical Analysis) ...
+
         print("\nReasoning Analysis (from Metrics Collector):")
         ra = academic_report.get('reasoning_analysis', {})
         cc = ra.get('chain_characteristics', {})
@@ -613,7 +604,8 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
                 peak_u = metrics_val.get('peak_usage', 0.0) * 100
                 score = metrics_val.get('efficiency_score', None)
                 print(f"- {resource.capitalize()}: Mean Delta {mean_u:+.1f}%, Peak Delta {peak_u:.1f}%, Score {score:.2f if score is not None else 'N/A'}")
-        if 'trends' in em_metrics: print(f"- Efficiency Trends: {em_metrics.get('trends', {})}")
+        if 'trends' in em_metrics:
+            print(f"- Efficiency Trends: {em_metrics.get('trends', {})}")
 
         print("\nStatistical Analysis (from Metrics Collector):")
         sa_metrics = academic_report.get('statistical_analysis', {})
@@ -624,15 +616,14 @@ def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: O
         print(f"- Correlations: {sa_metrics.get('correlations', {})}")
         print(f"- Regression: {sa_metrics.get('regression_analysis', {})}")
 
-
         report_file_name = f"academic_report_{dataset_type}_{time.strftime('%Y%m%d_%H%M%S')}.json"
         report_file_path = os.path.join(current_dataset_log_dir, report_file_name)
         try:
             with open(report_file_path, 'w', encoding='utf-8') as rf:
-                json.dump(academic_report, rf, indent=2, default=str) # Use default=str for non-serializable
+                json.dump(academic_report, rf, indent=2, default=str)
             print(f"\nAcademic report saved to: {report_file_path}")
         except Exception as save_err:
-             print(f"Warning: Could not save academic report to {report_file_path}: {save_err}")
+            print(f"Warning: Could not save academic report to {report_file_path}: {save_err}")
 
         print("\n" + "=" * 20 + " End of Run " + "=" * 20)
         return academic_report
@@ -658,7 +649,7 @@ def execute_ablation_study(args: argparse.Namespace):
         logger.error("model_name not found in main configuration.")
         return
 
-    default_data_dir = os.path.join(script_dir, "data") # Assuming main.py is in project root
+    default_data_dir = os.path.join(script_dir, "data")
 
     # 2. Load Ablation Configurations
     ablation_config_yaml_path = args.ablation_config
@@ -668,6 +659,14 @@ def execute_ablation_study(args: argparse.Namespace):
     with open(ablation_config_yaml_path, 'r') as f:
         loaded_ablation_configs_yaml = yaml.safe_load(f)
 
+    # Extract common parameters for symbolic reasoner and few-shot examples
+    common_embedding_model = loaded_ablation_configs_yaml.get('common_embedding_model', 'all-MiniLM-L6-v2')
+    common_max_hops_drop = loaded_ablation_configs_yaml.get('common_max_hops_drop', 3)
+    common_match_threshold_drop = loaded_ablation_configs_yaml.get('common_match_threshold_drop', 0.1)
+    common_max_hops_hotpotqa = loaded_ablation_configs_yaml.get('common_max_hops_hotpotqa', 5)
+    common_match_threshold_hotpotqa = loaded_ablation_configs_yaml.get('common_match_threshold_hotpotqa', 0.25)
+    common_few_shot_examples_path_drop = loaded_ablation_configs_yaml.get('drop_few_shot_examples_path', os.path.join(default_data_dir, "drop_few_shot_examples.json"))
+
     # Resolve rule file paths from keys
     common_paths = {
         "dynamic_rules_path_drop": loaded_ablation_configs_yaml.get("dynamic_rules_path_drop", os.path.join(default_data_dir, "rules_drop_dynamic.json")),
@@ -675,12 +674,10 @@ def execute_ablation_study(args: argparse.Namespace):
         "no_rules_path": loaded_ablation_configs_yaml.get("no_rules_path", os.path.join(default_data_dir, "empty_rules.json")),
         "rules_path_hotpotqa_baseline": config.get("hotpotqa_rules_file", os.path.join(default_data_dir, "rules_hotpotqa.json"))
     }
-    # Create empty_rules.json if it doesn't exist for 'no_rules_path'
     if not os.path.exists(common_paths["no_rules_path"]):
         os.makedirs(os.path.dirname(common_paths["no_rules_path"]), exist_ok=True)
         with open(common_paths["no_rules_path"], "w") as f_empty:
             json.dump([], f_empty)
-
 
     ablation_configurations_list = []
     if dataset_type == 'drop':
@@ -688,17 +685,32 @@ def execute_ablation_study(args: argparse.Namespace):
             processed_cfg = cfg_params.copy()
             if 'rules_file_key' in processed_cfg:
                 processed_cfg['rules_file'] = common_paths.get(processed_cfg['rules_file_key'], processed_cfg.get('rules_file'))
+            processed_cfg['embedding_model'] = processed_cfg.get('embedding_model', common_embedding_model)
+            processed_cfg['match_threshold'] = processed_cfg.get('match_threshold', common_match_threshold_drop)
+            processed_cfg['max_hops'] = processed_cfg.get('max_hops', common_max_hops_drop)
+            processed_cfg['few_shot_examples_path'] = processed_cfg.get('few_shot_examples_path', common_few_shot_examples_path_drop)
+            processed_cfg['model_name'] = model_name  # Add model_name to each configuration
             ablation_configurations_list.append(processed_cfg)
     elif dataset_type == 'hotpotqa':
-        # Similar logic if you have hotpotqa_ablations in your YAML
-        for cfg_params in loaded_ablation_configs_yaml.get('hotpotqa_ablations', []): # Assuming a key like 'hotpotqa_ablations'
+        for cfg_params in loaded_ablation_configs_yaml.get('hotpotqa_ablations', []):
             processed_cfg = cfg_params.copy()
-            if 'rules_file_key' in processed_cfg: # e.g. rules_path_hotpotqa_baseline
-                 processed_cfg['rules_file'] = common_paths.get(processed_cfg['rules_file_key'], processed_cfg.get('rules_file'))
+            if 'rules_file_key' in processed_cfg:
+                processed_cfg['rules_file'] = common_paths.get(processed_cfg['rules_file_key'], processed_cfg.get('rules_file'))
+            processed_cfg['embedding_model'] = processed_cfg.get('embedding_model', common_embedding_model)
+            processed_cfg['match_threshold'] = processed_cfg.get('match_threshold', common_match_threshold_hotpotqa)
+            processed_cfg['max_hops'] = processed_cfg.get('max_hops', common_max_hops_hotpotqa)
+            processed_cfg['model_name'] = model_name  # Add model_name to each configuration
             ablation_configurations_list.append(processed_cfg)
     else:
         logger.error(f"Unsupported dataset_type '{dataset_type}' for ablation.")
         return
+
+    # Filter configurations based on --ablation-name
+    if args.ablation_name:
+        ablation_configurations_list = [cfg for cfg in ablation_configurations_list if cfg['name'] == args.ablation_name]
+        if not ablation_configurations_list:
+            logger.error(f"No ablation configuration found with name '{args.ablation_name}'.")
+            return
 
     if not ablation_configurations_list:
         logger.error(f"No ablation configurations found for dataset_type '{dataset_type}' in {args.ablation_config}.")
@@ -717,53 +729,55 @@ def execute_ablation_study(args: argparse.Namespace):
         logger.error(f"Failed to load samples for {dataset_type} for ablation study.")
         return
 
-    # 4. Initialize Baseline Components (similar to run_hysym_system setup)
+    # 4. Initialize Baseline Components
     device = DeviceManager.get_device()
     resource_manager = ResourceManager(
         config_path=os.path.join(script_dir, "src", "config", "resource_config.yaml"),
-        enable_performance_tracking=True, history_window_size=100
+        enable_performance_tracking=True,
+        history_window_size=100
     )
     dimensionality_manager = DimensionalityManager(
-        target_dim=config.get('alignment', {}).get('target_dim', 768), device=device
+        target_dim=config.get('alignment', {}).get('target_dim', 768),
+        device=device
     )
     rules_path_baseline = ""
     if dataset_type == 'drop':
-        # For DROP baseline, usually dynamic rules are preferred.
-        # Check if dynamic rules were generated in the main config and use that path.
-        # This logic assumes dynamic rules are the baseline for DROP.
         rules_path_baseline = common_paths["dynamic_rules_path_drop"]
-        if not os.path.exists(rules_path_baseline) or os.path.getsize(rules_path_baseline) <= 2: # Check if empty JSON []
-             logger.warning(f"Dynamic DROP rules at {rules_path_baseline} not found or empty. Falling back to static rules for baseline.")
-             rules_path_baseline = common_paths["static_rules_path_drop"]
-             if not os.path.exists(rules_path_baseline): # Final fallback
-                 rules_path_baseline = os.path.join(default_data_dir, "rules_drop.json") # Default static path
-                 logger.warning(f"Static DROP rules also not found at {common_paths['static_rules_path_drop']}. Using default {rules_path_baseline}")
-    else: # hotpotqa
+        if not os.path.exists(rules_path_baseline) or os.path.getsize(rules_path_baseline) <= 2:
+            logger.warning(f"Dynamic DROP rules at {rules_path_baseline} not found or empty. Falling back to static rules for baseline.")
+            rules_path_baseline = common_paths["static_rules_path_drop"]
+            if not os.path.exists(rules_path_baseline):
+                rules_path_baseline = os.path.join(default_data_dir, "rules_drop.json")
+                logger.warning(f"Static DROP rules also not found at {common_paths['static_rules_path_drop']}. Using default {rules_path_baseline}")
+    else:
         rules_path_baseline = common_paths["rules_path_hotpotqa_baseline"]
 
     logger.info(f"Baseline rules path for {dataset_type} ablation: {rules_path_baseline}")
 
-
     symbolic_reasoner_baseline: Union[GraphSymbolicReasoner, GraphSymbolicReasonerDrop]
-    embedding_model_name = config.get('embeddings', {}).get('model_name', 'all-MiniLM-L6-v2')
+    embedding_model_name = config.get('embeddings', {}).get('model_name', common_embedding_model)
     if dataset_type == 'drop':
         symbolic_reasoner_baseline = GraphSymbolicReasonerDrop(
             rules_file=rules_path_baseline,
-            match_threshold=config.get('symbolic_match_threshold_drop', 0.1),
-            max_hops=config.get('symbolic_max_hops_drop', 3),
-            embedding_model=embedding_model_name, device=device, dim_manager=dimensionality_manager
+            match_threshold=common_match_threshold_drop,
+            max_hops=common_max_hops_drop,
+            embedding_model=embedding_model_name,
+            device=device,
+            dim_manager=dimensionality_manager
         )
     else:
         symbolic_reasoner_baseline = GraphSymbolicReasoner(
             rules_file=rules_path_baseline,
-            match_threshold=config.get('symbolic_match_threshold_hotpot', 0.1),
-            max_hops=config.get('symbolic_max_hops_hotpot', 5),
-            embedding_model=embedding_model_name, device=device, dim_manager=dimensionality_manager
+            match_threshold=common_match_threshold_hotpotqa,
+            max_hops=common_max_hops_hotpotqa,
+            embedding_model=embedding_model_name,
+            device=device,
+            dim_manager=dimensionality_manager
         )
 
     nr_few_shot_path_baseline = None
     if dataset_type == 'drop' and bool(config.get("use_drop_few_shots", 0)):
-        nr_few_shot_path_baseline = config.get("drop_few_shot_examples_path", os.path.join(default_data_dir, "drop_few_shot_examples.json"))
+        nr_few_shot_path_baseline = common_few_shot_examples_path_drop
         if not os.path.exists(nr_few_shot_path_baseline):
             logger.warning(f"Baseline DROP few-shot file not found: {nr_few_shot_path_baseline}. NR will not use them for baseline.")
             nr_few_shot_path_baseline = None
@@ -771,6 +785,9 @@ def execute_ablation_study(args: argparse.Namespace):
     neural_retriever_baseline = NeuralRetriever(
         model_name,
         use_quantization=config.get('neural_use_quantization', False),
+        max_context_length=config.get('neural_max_context_length', 2048),
+        chunk_size=config.get('neural_chunk_size', 512),
+        overlap=config.get('neural_overlap', 128),
         device=device,
         few_shot_examples_path=nr_few_shot_path_baseline
     )
@@ -778,7 +795,7 @@ def execute_ablation_study(args: argparse.Namespace):
     query_expander_baseline = QueryExpander(
         complexity_config=complexity_config_yaml_path if os.path.exists(complexity_config_yaml_path) else None
     )
-    response_aggregator_baseline = UnifiedResponseAggregator(include_explanations=True) # Include explanations for debug
+    response_aggregator_baseline = UnifiedResponseAggregator(include_explanations=True)
 
     hybrid_integrator_baseline = HybridIntegrator(
         symbolic_reasoner=symbolic_reasoner_baseline,
@@ -787,8 +804,6 @@ def execute_ablation_study(args: argparse.Namespace):
         dim_manager=dimensionality_manager,
         dataset_type=dataset_type
     )
-    # MetricsCollector for baseline SCM is temporary; ablation_study.py creates its own per config.
-    # Log directory for this SCM's MC isn't critical as its report isn't the primary output here.
     temp_mc_log_dir = os.path.join(args.log_dir if args and hasattr(args, 'log_dir') else 'logs', dataset_type, "metrics_temp_baseline_scm")
     system_manager_baseline = SystemControlManager(
         hybrid_integrator=hybrid_integrator_baseline,
@@ -799,40 +814,66 @@ def execute_ablation_study(args: argparse.Namespace):
         max_query_time=config.get('max_query_time', 30.0)
     )
 
-    # 5. Run the Ablation Study
-    ablation_results_summary = run_ablation_study(
-        samples=samples_for_ablation,
-        dataset_type=dataset_type,
-        rules_path_baseline=rules_path_baseline,
-        device=device,
-        neural_retriever_baseline=neural_retriever_baseline,
-        query_expander_baseline=query_expander_baseline,
-        response_aggregator_baseline=response_aggregator_baseline,
-        resource_manager_baseline=resource_manager,
-        system_manager_baseline=system_manager_baseline,
-        dimensionality_manager_baseline=dimensionality_manager,
-        ablation_configurations=ablation_configurations_list
-    )
+    # 5. Run the Ablation Study with Progress Bar
+    print(f"\nRunning ablation study with {len(ablation_configurations_list)} configurations...")
+    config_iterator = tqdm(ablation_configurations_list, desc="Ablation Configurations", unit="config",
+                           disable=not ProgressManager.SHOW_PROGRESS)
 
-    # 6. Save or Print Ablation Summary
+    ablation_results_summary = None
+    try:
+        ablation_results_summary = run_ablation_study(
+            samples=samples_for_ablation,
+            dataset_type=dataset_type,
+            rules_path_baseline=rules_path_baseline,
+            device=device,
+            neural_retriever_baseline=neural_retriever_baseline,
+            query_expander_baseline=query_expander_baseline,
+            response_aggregator_baseline=response_aggregator_baseline,
+            resource_manager_baseline=resource_manager,
+            system_manager_baseline=system_manager_baseline,
+            dimensionality_manager_baseline=dimensionality_manager,
+            ablation_configurations=config_iterator
+        )
+    except Exception as e:
+        logger.error(f"Ablation study failed: {e}", exc_info=True)
+        return {"error": f"Ablation study failed: {e}"}
+
+    # 6. Save and Print Ablation Summary
     ablation_log_dir = os.path.join(args.log_dir if args and hasattr(args, 'log_dir') else 'logs', dataset_type, "ablation_results")
     os.makedirs(ablation_log_dir, exist_ok=True)
     ablation_summary_file = os.path.join(ablation_log_dir, f"ablation_summary_{dataset_type}_{time.strftime('%Y%m%d_%H%M%S')}.json")
     try:
         with open(ablation_summary_file, 'w') as f:
-            json.dump(ablation_results_summary, f, indent=2, default=lambda o: '<not serializable>') # Handle non-serializable
+            json.dump(ablation_results_summary, f, indent=2, default=lambda o: str(o))
         print(f"\nAblation study summary saved to: {ablation_summary_file}")
     except Exception as e:
         print(f"Warning: Could not save ablation study summary: {e}")
-        print("\n--- Ablation Results Summary ---")
-        # Basic print if JSON fails (could be due to complex objects like torch tensors if not handled)
-        for cfg_name, report_data in ablation_results_summary.get('all_ablation_reports', {}).items():
-            print(f"\nConfig: {cfg_name}")
-            if isinstance(report_data, dict) and 'error' not in report_data:
-                print(f"  Mean F1: {report_data.get('response_quality_f1', {}).get('mean', 'N/A')}")
-            elif isinstance(report_data, dict) and 'error' in report_data:
-                 print(f"  Error: {report_data['error']}")
 
+    # Print detailed statistical significance results
+    print("\n=== Ablation Study Results Summary ===")
+    ablation_results = ablation_results_summary.get('ablation_results', {})
+    for config_name, report_data in ablation_results.items():
+        print(f"\nConfiguration: {config_name}")
+        if 'error' in report_data:
+            print(f"  Error: {report_data['error']}")
+            continue
+
+        # Print relative changes
+        relative_changes = report_data.get('relative_changes', {})
+        print("  Relative Changes from Baseline:")
+        for metric, change in relative_changes.items():
+            print(f"    {metric}: {change * 100:.1f}%")
+
+        # Print statistical significance
+        stats_results = report_data.get('statistical_significance_vs_baseline', {})
+        print("  Statistical Significance vs. Baseline:")
+        for metric, stats in stats_results.items():
+            if 'error' in stats:
+                print(f"    {metric}: {stats['error']}")
+            else:
+                print(f"    {metric}: p-value={stats['p_value']:.3g}, effect_size={stats['effect_size']:.2f}, "
+                      f"CI=[{stats['ci_lower']:.2f}, {stats['ci_upper']:.2f}], "
+                      f"significant={stats['significant']}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run HySym-RAG system with output capture and optional ablation study.')
@@ -843,22 +884,20 @@ if __name__ == "__main__":
     parser.add_argument('--samples', type=int, default=100, help='Number of samples to process (for standard run or ablation)')
     parser.add_argument('--debug', action='store_true', help='Enable DEBUG level logging for main and src components')
     parser.add_argument('--show-progress', action='store_true', help='Show tqdm progress bars')
-    # Arguments for ablation study
     parser.add_argument('--run-ablation', action='store_true', help='Run the ablation study instead of a standard evaluation.')
     parser.add_argument('--ablation-config', type=str, default='src/config/ablation_config.yaml',
                         help='Path to the YAML file defining ablation configurations.')
-
+    parser.add_argument('--ablation-name', type=str, default=None,
+                        help='Name of a specific ablation configuration to run (e.g., "1. Baseline Hybrid (Dynamic Rules, Few-Shots)"). If not specified, runs all.')
 
     parsed_args = parser.parse_args()
 
-    # Set logger level based on debug flag
     if parsed_args.debug:
         logger.setLevel(logging.DEBUG)
-        logging.getLogger('src').setLevel(logging.DEBUG) # Set base 'src' logger to DEBUG
+        logging.getLogger('src').setLevel(logging.DEBUG)
         print("--- DEBUG Logging Enabled for main.py and 'src' package ---")
-        # Specific components can also be set to DEBUG if needed, already handled in run_hysym_system
     else:
-        logger.setLevel(logging.INFO) # Default main logger to INFO if not debug
+        logger.setLevel(logging.INFO)
 
     ProgressManager.SHOW_PROGRESS = parsed_args.show_progress
     dataset_log_dir = os.path.join(parsed_args.log_dir, parsed_args.dataset)
@@ -866,7 +905,6 @@ if __name__ == "__main__":
 
     if parsed_args.run_ablation:
         print(f"--- Starting Ablation Study for {parsed_args.dataset.upper()} ---")
-        # Output capture for ablation study can be handled similarly if desired
         if parsed_args.no_output_capture:
             execute_ablation_study(parsed_args)
         else:
@@ -880,7 +918,6 @@ if __name__ == "__main__":
                 print(f"ERROR: Failed to set up output capture or run ablation study: {e}", file=sys.stderr)
                 logger.error(f"Failed to set up output capture or run ablation study: {e}", exc_info=True)
     else:
-        # Standard system run
         if parsed_args.no_output_capture:
             print("--- Running standard HySym-RAG evaluation without output capture. ---")
             run_hysym_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)

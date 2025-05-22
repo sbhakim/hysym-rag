@@ -1,57 +1,84 @@
 # src/config/ablation_config.yaml
-# Common settings (can be overridden per ablation)
-common_embedding_model: "all-MiniLM-L6-v2"
-common_max_hops_drop: 3
-common_match_threshold_drop: 0.1
-# Paths to different rule sets
-dynamic_rules_path_drop: "data/rules_drop_dynamic.json"
-static_rules_path_drop: "data/rules_drop.json"
-no_rules_path: "data/empty_rules.json"
+
+# Common settings (can be overridden per ablation if needed in _create_modified_system_manager)
+# These are mostly for reference; the main config.yaml and component defaults are primary
+common_embedding_model: "all-MiniLM-L6-v2"  # Default embedding model for symbolic reasoner
+common_max_hops_drop: 3                     # Default max hops for DROP symbolic reasoner
+common_match_threshold_drop: 0.1            # Default match threshold for DROP symbolic reasoner
+common_max_hops_hotpotqa: 5                 # Default max hops for HotpotQA symbolic reasoner
+common_match_threshold_hotpotqa: 0.25       # Default match threshold for HotpotQA symbolic reasoner
+drop_few_shot_examples_path: "data/drop_few_shot_examples.json"  # Default path for DROP few-shot examples
+
+# Paths to different rule sets - These are CRITICAL and used by main.py's execute_ablation_study
+# to resolve 'rules_file_key' in each ablation configuration.
+dynamic_rules_path_drop: "data/rules_drop_dynamic.json"  # Dynamically generated rules for DROP
+static_rules_path_drop: "data/rules_drop.json"           # Manually curated static rules for DROP
+no_rules_path: "data/empty_rules.json"                   # Empty JSON array for no-rules ablation
+rules_path_hotpotqa_baseline: "data/rules_hotpotqa.json" # Baseline rules for HotpotQA
 
 # Ablation configurations for DROP
 drop_ablations:
-  - name: "Baseline Hybrid (Dynamic Rules, Few-Shots)" #  full system
-    rules_file_key: "dynamic_rules_path_drop" # Key to lookup actual path
+  # --- IMPORTANT BASELINE ---
+  - name: "1. Baseline Hybrid (Dynamic Rules, Few-Shots)"  # Full system as intended
+    rules_file_key: "dynamic_rules_path_drop"
     use_few_shots: True
     disable_symbolic: False
     disable_neural: False
 
-  - name: "Symbolic Only (Dynamic Rules)"
+  # --- ABLATING MAJOR PATHS ---
+  - name: "2. Neural Only (With Few-Shots)"
+    disable_symbolic: True
+    use_few_shots: True
+    disable_neural: False
+
+  - name: "3. Symbolic Only (Dynamic Rules)"
     rules_file_key: "dynamic_rules_path_drop"
     disable_neural: True
-    disable_symbolic: False # Symbolic is active
+    disable_symbolic: False
 
-  - name: "Symbolic Only (Static Rules)"
+  # --- ABLATING KEY FEATURES WITHIN HYBRID ---
+  - name: "4. Hybrid (Dynamic Rules, No Few-Shots)"
+    rules_file_key: "dynamic_rules_path_drop"
+    use_few_shots: False
+    disable_symbolic: False
+    disable_neural: False
+
+  - name: "5. Hybrid (Static Rules, With Few-Shots)"
+    rules_file_key: "static_rules_path_drop"
+    use_few_shots: True
+    disable_symbolic: False
+    disable_neural: False
+
+  # --- ABLATING KEY FEATURES WITHIN INDIVIDUAL PATHS ---
+  - name: "6. Neural Only (No Few-Shots)"
+    disable_symbolic: True
+    use_few_shots: False
+    disable_neural: False
+
+  - name: "7. Symbolic Only (Static Rules)"
     rules_file_key: "static_rules_path_drop"
     disable_neural: True
     disable_symbolic: False
 
-  - name: "Symbolic Only (No Rules)" # Tests fallback regex operation extraction
+  - name: "8. Symbolic Only (No Rules)"
     rules_file_key: "no_rules_path"
     disable_neural: True
     disable_symbolic: False
 
-  - name: "Neural Only (With Few-Shots)"
-    disable_symbolic: True
-    use_few_shots: True
-    disable_neural: False # Neural is active
-
-  - name: "Neural Only (No Few-Shots)"
-    disable_symbolic: True
-    use_few_shots: False
-    disable_neural: False
-
-  - name: "Hybrid (Static Rules, Few-Shots)"
-    rules_file_key: "static_rules_path_drop"
-    use_few_shots: True
+# Ablation configurations for HotpotQA
+hotpotqa_ablations:
+  - name: "1. Baseline Hybrid (HotpotQA)"
+    rules_file_key: "rules_path_hotpotqa_baseline"
     disable_symbolic: False
     disable_neural: False
 
-  - name: "Hybrid (Dynamic Rules, No Few-Shots)"
-    rules_file_key: "dynamic_rules_path_drop"
-    use_few_shots: False
+  - name: "2. Symbolic Only (HotpotQA)"
+    rules_file_key: "rules_path_hotpotqa_baseline"
+    disable_neural: True
     disable_symbolic: False
+
+  - name: "3. Neural Only (HotpotQA)"
+    disable_symbolic: True
     disable_neural: False
 
-  # Add other specific ablations, e.g., for different fusion strategies if configurable
-  # Or ablating QueryExpander, RG-Retriever if they are modularly disable-able
+# Add other specific ablations as needed, e.g., for different fusion strategies or component disabling
