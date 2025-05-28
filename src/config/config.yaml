@@ -1,7 +1,8 @@
 # src/config/config.yaml
 
 # Basic System Configuration
-model_name: "meta-llama/Llama-3.2-3B"
+# model_name: "meta-llama/Llama-3.2-3B" # Previous model
+model_name: "mistralai/Mistral-7B-Instruct-v0.1" # New model
 data_dir: "data/" # General data directory
 
 # ---- Dataset Specific Paths ----
@@ -82,7 +83,8 @@ symbolic_max_hops_drop: 3
 drop_rule_min_support: 5 # For dynamic rule extraction
 
 # Neural Retriever specific defaults (can be overridden by ablation configs)
-neural_use_quantization: False
+# neural_use_quantization: False # Previous setting
+neural_use_quantization: True   # Enabled for Mistral 7B
 neural_max_context_length: 2048
 neural_chunk_size: 512
 neural_overlap: 128
