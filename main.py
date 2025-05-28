@@ -8,11 +8,11 @@ import warnings
 import argparse
 import logging
 import urllib3  # type: ignore
-import yaml
+import yaml # For execute_ablation_study (will be moved)
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Union
 import torch
-import numpy as np  # <--- ADDED IMPORT
+import numpy as np
 
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
@@ -45,7 +45,9 @@ try:
     from src.utils.device_manager import DeviceManager
     from src.utils.progress import tqdm, ProgressManager
     from src.utils.output_capture import capture_output
-    from src.ablation_study import run_ablation_study
+    from src.ablation_study import setup_and_orchestrate_ablation # MODIFIED IMPORT
+    from src.utils.data_loaders import load_hotpotqa, load_drop_dataset # MODIFIED IMPORT
+
 except ImportError as e:
     print(f"Error importing HySym-RAG components: {e}")
     print("Please ensure main.py is run from the project root directory or PYTHONPATH is set correctly.")
@@ -59,109 +61,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-def load_hotpotqa(hotpotqa_path: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
-    """
-    Loads a portion of the HotpotQA dataset.
-    Each sample includes a query, ground-truth answer,
-    combined context, and a 'type' = 'ground_truth_available_hotpotqa'.
-    """
-    if not os.path.exists(hotpotqa_path):
-        logger.error(f"HotpotQA dataset file not found at: {hotpotqa_path}")
-        return []
-    dataset: List[Dict[str, Any]] = []
-    try:
-        with open(hotpotqa_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load or parse HotpotQA JSON from {hotpotqa_path}: {e}")
-        return []
-
-    count = 0
-    for example in data:
-        if not all(k in example for k in ['question', 'answer', 'supporting_facts', 'context', '_id']):
-            logger.warning(f"Skipping invalid HotpotQA example (missing keys): {example.get('_id', 'Unknown ID')}")
-            continue
-
-        question = example['question']
-        answer = example['answer']
-        supporting_facts = example['supporting_facts']
-
-        context_str_parts = []
-        for title, sents in example.get('context', []):
-            if isinstance(title, str) and isinstance(sents, list):
-                combined_sents = " ".join(str(s) for s in sents)
-                context_str_parts.append(f"{title}: {combined_sents}")
-        context_str = "\n".join(context_str_parts)
-
-        dataset.append({
-            "query_id": example['_id'],
-            "query": question,
-            "answer": answer,
-            "context": context_str,
-            "type": "ground_truth_available_hotpotqa",
-            "supporting_facts": supporting_facts
-        })
-        count += 1
-        if max_samples and count >= max_samples:
-            logger.info(f"Loaded {count} HotpotQA samples (max requested: {max_samples}).")
-            break
-    logger.info(f"Finished loading HotpotQA. Total samples: {len(dataset)}.")
-    return dataset
-
-
-def load_drop_dataset(drop_path: str, max_samples: Optional[int] = None) -> List[Dict[str, Any]]:
-    """
-    Loads a portion of the DROP dataset.
-    """
-    if not os.path.exists(drop_path):
-        logger.error(f"DROP dataset file not found at: {drop_path}")
-        return []
-    dataset: List[Dict[str, Any]] = []
-    try:
-        with open(drop_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load or parse DROP JSON from {drop_path}: {e}")
-        return []
-
-    total_loaded_qas = 0
-    for passage_id, passage_content in data.items():
-        if not isinstance(passage_content,
-                          dict) or 'passage' not in passage_content or 'qa_pairs' not in passage_content:
-            logger.warning(f"Skipping invalid passage structure for passage_id: {passage_id}")
-            continue
-
-        passage_text = passage_content['passage']
-        if not isinstance(passage_content['qa_pairs'], list):
-            logger.warning(f"Invalid qa_pairs format (not a list) for passage_id: {passage_id}")
-            continue
-
-        for qa_pair_idx, qa_pair in enumerate(passage_content['qa_pairs']):
-            if not isinstance(qa_pair, dict) or 'question' not in qa_pair or 'answer' not in qa_pair:
-                logger.warning(f"Skipping invalid qa_pair structure in passage_id {passage_id}, index {qa_pair_idx}")
-                continue
-
-            question = qa_pair['question']
-            answer_obj = qa_pair['answer']
-            query_id = qa_pair.get("query_id", f"{passage_id}-{qa_pair_idx}")
-
-            dataset.append({
-                "query_id": query_id,
-                "query": question,
-                "context": passage_text,
-                "answer": answer_obj,
-                "type": "ground_truth_available_drop"
-            })
-            total_loaded_qas += 1
-            if max_samples and total_loaded_qas >= max_samples:
-                logger.info(f"Loaded {total_loaded_qas} DROP samples (max requested: {max_samples}).")
-                return dataset
-
-        if max_samples and total_loaded_qas >= max_samples:
-            break
-
-    logger.info(f"Finished loading DROP. Total samples: {len(dataset)}.")
-    return dataset
+# Dataset loading functions (load_hotpotqa, load_drop_dataset) MOVED to src/utils/data_loaders.py
 
 
 def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: Optional[argparse.Namespace] = None) -> \
@@ -299,7 +199,7 @@ Dict[str, Any]:
                 dynamic_rules = rule_extractor.extract_rules_from_drop(
                     drop_json_path=drop_path,  # Path to the full DROP dataset for rule extraction
                     questions=questions_for_rules,  # Questions from the loaded samples
-                    passages=passages_for_rules,  # Passages from the loaded samples
+                    passages=passages_for_rules,   # Passages from the loaded samples
                     min_support=config.get('drop_rule_min_support', 5)  # Configurable min_support
                 )
                 # Save and switch to dynamic rules if extraction was successful
@@ -324,7 +224,7 @@ Dict[str, Any]:
         print(f"Loading HotpotQA dataset from {hotpotqa_path}...")
         test_queries = load_hotpotqa(hotpotqa_path, max_samples=samples)
         for sample_item in test_queries:  # Populate ground_truths for HotpotQA
-            ground_truths[sample_item["query_id"]] = sample_item["answer"]
+             ground_truths[sample_item["query_id"]] = sample_item["answer"]
     else:
         logger.error(f"Unknown dataset_type '{dataset_type}'. Cannot load data.")
         return {"error": f"Unknown dataset_type '{dataset_type}'"}
@@ -371,6 +271,7 @@ Dict[str, Any]:
     except Exception as e:
         logger.exception(f"Fatal error initializing symbolic reasoner: {e}")
         return {"error": f"Symbolic reasoner initialization failed: {e}"}
+
 
     # 9. NeuralRetriever (Neural Path)
     print("Initializing Neural Retriever...")
@@ -676,329 +577,19 @@ Dict[str, Any]:
 
 
 def execute_ablation_study(args: argparse.Namespace):
-    """Sets up and runs the ablation study."""
-    print(f"\n=== Initializing Ablation Study for Dataset: {args.dataset.upper()} ===")
-    dataset_type = args.dataset.lower()
-
-    # 1. Load main configuration
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, "src", "config", "config.yaml")
-    if not os.path.exists(config_path):
-        logger.error(f"Main configuration file not found at: {config_path}")
-        return
-    config = ConfigLoader.load_config(config_path)
-    model_name = config.get("model_name")
-    if not model_name:
-        logger.error("model_name not found in main configuration.")
-        return
-
-    default_data_dir = os.path.join(script_dir, "data")
-
-    # 2. Load Ablation Configurations
-    ablation_config_yaml_path = args.ablation_config
-    if not os.path.exists(ablation_config_yaml_path):
-        logger.error(f"Ablation configuration file not found at: {ablation_config_yaml_path}")
-        return
-    with open(ablation_config_yaml_path, 'r') as f:
-        loaded_ablation_configs_yaml = yaml.safe_load(f)
-
-    # Extract common parameters for symbolic reasoner and few-shot examples
-    common_embedding_model = loaded_ablation_configs_yaml.get('common_embedding_model', 'all-MiniLM-L6-v2')
-    common_max_hops_drop = loaded_ablation_configs_yaml.get('common_max_hops_drop', 3)
-    common_match_threshold_drop = loaded_ablation_configs_yaml.get('common_match_threshold_drop', 0.1)
-    common_max_hops_hotpotqa = loaded_ablation_configs_yaml.get('common_max_hops_hotpotqa', 5)
-    common_match_threshold_hotpotqa = loaded_ablation_configs_yaml.get('common_match_threshold_hotpotqa', 0.25)
-    common_few_shot_examples_path_drop = loaded_ablation_configs_yaml.get('drop_few_shot_examples_path',
-                                                                          os.path.join(default_data_dir,
-                                                                                       "drop_few_shot_examples.json"))
-
-    # Resolve rule file paths from keys
-    common_paths = {
-        "dynamic_rules_path_drop": loaded_ablation_configs_yaml.get("dynamic_rules_path_drop",
-                                                                    os.path.join(default_data_dir,
-                                                                                 "rules_drop_dynamic.json")),
-        "static_rules_path_drop": loaded_ablation_configs_yaml.get("static_rules_path_drop",
-                                                                   os.path.join(default_data_dir, "rules_drop.json")),
-        "no_rules_path": loaded_ablation_configs_yaml.get("no_rules_path",
-                                                          os.path.join(default_data_dir, "empty_rules.json")),
-        "rules_path_hotpotqa_baseline": config.get("hotpotqa_rules_file",
-                                                   os.path.join(default_data_dir, "rules_hotpotqa.json"))
-    }
-    # Ensure empty_rules.json exists if specified as no_rules_path
-    if not os.path.exists(common_paths["no_rules_path"]):
-        os.makedirs(os.path.dirname(common_paths["no_rules_path"]), exist_ok=True)
-        with open(common_paths["no_rules_path"], "w") as f_empty:
-            json.dump([], f_empty)  # Create empty JSON array
-
-    ablation_configurations_list = []
-    if dataset_type == 'drop':
-        for cfg_params in loaded_ablation_configs_yaml.get('drop_ablations', []):
-            processed_cfg = cfg_params.copy()
-            if 'rules_file_key' in processed_cfg:  # Resolve rules_file from key
-                processed_cfg['rules_file'] = common_paths.get(processed_cfg['rules_file_key'],
-                                                               processed_cfg.get('rules_file'))
-            processed_cfg['embedding_model'] = processed_cfg.get('embedding_model', common_embedding_model)
-            processed_cfg['match_threshold'] = processed_cfg.get('match_threshold', common_match_threshold_drop)
-            processed_cfg['max_hops'] = processed_cfg.get('max_hops', common_max_hops_drop)
-            # Resolve few_shot_examples_path for DROP, using common as default
-            processed_cfg['few_shot_examples_path'] = processed_cfg.get('few_shot_examples_path',
-                                                                        common_few_shot_examples_path_drop)
-            processed_cfg['model_name'] = model_name  # Add main model_name to each configuration
-            ablation_configurations_list.append(processed_cfg)
-    elif dataset_type == 'hotpotqa':
-        for cfg_params in loaded_ablation_configs_yaml.get('hotpotqa_ablations', []):
-            processed_cfg = cfg_params.copy()
-            if 'rules_file_key' in processed_cfg:
-                processed_cfg['rules_file'] = common_paths.get(processed_cfg['rules_file_key'],
-                                                               processed_cfg.get('rules_file'))
-            processed_cfg['embedding_model'] = processed_cfg.get('embedding_model', common_embedding_model)
-            processed_cfg['match_threshold'] = processed_cfg.get('match_threshold', common_match_threshold_hotpotqa)
-            processed_cfg['max_hops'] = processed_cfg.get('max_hops', common_max_hops_hotpotqa)
-            # HotpotQA doesn't typically use explicit few-shot files like DROP in this setup
-            processed_cfg['model_name'] = model_name
-            ablation_configurations_list.append(processed_cfg)
-    else:
-        logger.error(f"Unsupported dataset_type '{dataset_type}' for ablation.")
-        return
-
-    # Filter configurations based on --ablation-name
-    if args.ablation_name:
-        ablation_configurations_list = [cfg for cfg in ablation_configurations_list if
-                                        cfg['name'] == args.ablation_name]
-        if not ablation_configurations_list:
-            logger.error(f"No ablation configuration found with name '{args.ablation_name}'.")
-            return
-
-    if not ablation_configurations_list:
-        logger.error(f"No ablation configurations found for dataset_type '{dataset_type}' in {args.ablation_config}.")
-        return
-
-    # 3. Load Dataset Samples
-    samples_for_ablation: List[Dict[str, Any]] = []
-    if dataset_type == 'drop':
-        drop_path = config.get("drop_dataset_path", os.path.join(default_data_dir, "drop_dataset_dev.json"))
-        samples_for_ablation = load_drop_dataset(drop_path, max_samples=args.samples)
-    elif dataset_type == 'hotpotqa':
-        hotpotqa_path = config.get("hotpotqa_dataset_path",
-                                   os.path.join(default_data_dir, "hotpot_dev_distractor_v1.json"))
-        samples_for_ablation = load_hotpotqa(hotpotqa_path, max_samples=args.samples)
-
-    if not samples_for_ablation:
-        logger.error(f"Failed to load samples for {dataset_type} for ablation study.")
-        return
-
-    # 4. Initialize Baseline Components (used by run_ablation_study)
-    device = DeviceManager.get_device()
-    # ResourceManager is re-instantiated within run_ablation_study or _create_modified_system_manager if needed
-    # For now, passing a single instance created here to run_ablation_study.
-    resource_manager_for_ablation = ResourceManager(
-        config_path=os.path.join(script_dir, "src", "config", "resource_config.yaml"),
-        enable_performance_tracking=True,
-        history_window_size=100
-    )
-    dimensionality_manager_for_ablation = DimensionalityManager(
-        target_dim=config.get('alignment', {}).get('target_dim', 768),
-        device=device
-    )
-    # Determine baseline rules path based on dataset type, consistent with how it's selected in run_hysym_system
-    # This path is passed to run_ablation_study to inform the baseline symbolic reasoner setup
-    rules_path_for_baseline_sym_reasoner = ""
-    if dataset_type == 'drop':
-        # For DROP baseline in ablation, prefer dynamic rules if they exist from a prior standard run, else static
-        dynamic_baseline_rules = common_paths.get("dynamic_rules_path_drop",
-                                                  os.path.join(default_data_dir, "rules_drop_dynamic.json"))
-        if os.path.exists(dynamic_baseline_rules) and os.path.getsize(dynamic_baseline_rules) > 2:  # Check if not empty
-            rules_path_for_baseline_sym_reasoner = dynamic_baseline_rules
-            logger.info(
-                f"Using dynamically generated DROP rules for ablation baseline: {rules_path_for_baseline_sym_reasoner}")
-        else:
-            rules_path_for_baseline_sym_reasoner = common_paths.get("static_rules_path_drop",
-                                                                    os.path.join(default_data_dir, "rules_drop.json"))
-            logger.info(f"Using static DROP rules for ablation baseline: {rules_path_for_baseline_sym_reasoner}")
-            if not os.path.exists(rules_path_for_baseline_sym_reasoner):  # Fallback further to default name
-                rules_path_for_baseline_sym_reasoner = os.path.join(default_data_dir, "rules_drop.json")
-    else:  # hotpotqa
-        rules_path_for_baseline_sym_reasoner = common_paths.get("rules_path_hotpotqa_baseline",
-                                                                os.path.join(default_data_dir, "rules_hotpotqa.json"))
-
-    logger.info(
-        f"Effective baseline rules path for {dataset_type} ablation study: {rules_path_for_baseline_sym_reasoner}")
-
-    # Baseline Symbolic Reasoner
-    sym_reasoner_baseline_instance: Union[GraphSymbolicReasoner, GraphSymbolicReasonerDrop]
-    baseline_embedding_model = config.get('embeddings', {}).get('model_name',
-                                                                common_embedding_model)  # Use main config default
-    if dataset_type == 'drop':
-        sym_reasoner_baseline_instance = GraphSymbolicReasonerDrop(
-            rules_file=rules_path_for_baseline_sym_reasoner,
-            match_threshold=common_match_threshold_drop,  # Common default for baseline
-            max_hops=common_max_hops_drop,  # Common default
-            embedding_model=baseline_embedding_model,
-            device=device,
-            dim_manager=dimensionality_manager_for_ablation
-        )
-    else:
-        sym_reasoner_baseline_instance = GraphSymbolicReasoner(
-            rules_file=rules_path_for_baseline_sym_reasoner,
-            match_threshold=common_match_threshold_hotpotqa,  # Common default
-            max_hops=common_max_hops_hotpotqa,  # Common default
-            embedding_model=baseline_embedding_model,
-            device=device,
-            dim_manager=dimensionality_manager_for_ablation
-        )
-
-    # Baseline Neural Retriever
-    # use_drop_few_shots from main config determines if baseline NR uses few-shots
-    use_few_shots_for_baseline_nr = bool(config.get("use_drop_few_shots", 0))
-    nr_few_shot_path_for_baseline = None
-    if dataset_type == 'drop' and use_few_shots_for_baseline_nr:
-        nr_few_shot_path_for_baseline = common_few_shot_examples_path_drop
-        if not os.path.exists(nr_few_shot_path_for_baseline):
-            logger.warning(
-                f"Baseline DROP few-shot file specified ('{nr_few_shot_path_for_baseline}') but not found. Baseline NR will not use them.")
-            nr_few_shot_path_for_baseline = None
-    elif dataset_type == 'drop' and not use_few_shots_for_baseline_nr:
-        logger.info("Few-shot examples for DROP are disabled by main config for baseline Neural Retriever.")
-
-    neural_retriever_baseline_instance = NeuralRetriever(
-        model_name,  # Main model
-        use_quantization=config.get('neural_use_quantization', False),
-        max_context_length=config.get('neural_max_context_length', 2048),
-        chunk_size=config.get('neural_chunk_size', 512),
-        overlap=config.get('neural_overlap', 128),
-        device=device,
-        few_shot_examples_path=nr_few_shot_path_for_baseline  # Path for baseline NR
-    )
-
-    # Baseline support components
-    complexity_rules_path = os.path.join(script_dir, "src", "config", "complexity_rules.yaml")
-    query_expander_baseline_instance = QueryExpander(
-        complexity_config=complexity_rules_path if os.path.exists(complexity_rules_path) else None
-    )
-    response_aggregator_baseline_instance = UnifiedResponseAggregator(include_explanations=True)
-
-    # Baseline Hybrid Integrator
-    hybrid_integrator_baseline_instance = HybridIntegrator(
-        symbolic_reasoner=sym_reasoner_baseline_instance,
-        neural_retriever=neural_retriever_baseline_instance,
-        query_expander=query_expander_baseline_instance,
-        dim_manager=dimensionality_manager_for_ablation,
-        dataset_type=dataset_type
-    )
-
-    # Baseline SystemControlManager (with its own MetricsCollector for baseline run)
-    baseline_scm_metrics_dir = os.path.join(args.log_dir if args and hasattr(args, 'log_dir') else 'logs', dataset_type,
-                                            "metrics_ablation_baseline_SCM")
-    baseline_metrics_collector = MetricsCollector(dataset_type=dataset_type, metrics_dir=baseline_scm_metrics_dir)
-
-    system_manager_baseline_instance = SystemControlManager(
-        hybrid_integrator=hybrid_integrator_baseline_instance,
-        resource_manager=resource_manager_for_ablation,  # Use the RM instance created for ablation
-        aggregator=response_aggregator_baseline_instance,
-        metrics_collector=baseline_metrics_collector,  # Collector for the baseline SCM run
-        error_retry_limit=config.get('error_retry_limit', 2),
-        max_query_time=config.get('max_query_time', 30.0)
-    )
-
-    # 5. Run the Ablation Study with Progress Bar
-    print(f"\nRunning ablation study with {len(ablation_configurations_list)} configurations...")
-    config_iterator = tqdm(ablation_configurations_list, desc="Ablation Configurations", unit="config",
-                           disable=not ProgressManager.SHOW_PROGRESS)
-
-    ablation_results_summary = None
+    """ Wrapper function in main.py to call the main ablation orchestration. """
+    print(f"\n--- main.py: execute_ablation_study for Dataset: {args.dataset.upper()} ---")
+    # The actual setup, component initialization, and result processing
+    # is now handled by setup_and_orchestrate_ablation in src.ablation_study
     try:
-        ablation_results_summary = run_ablation_study(
-            samples=samples_for_ablation,
-            dataset_type=dataset_type,
-            rules_path_baseline=rules_path_for_baseline_sym_reasoner,  # Pass the determined baseline rules path
-            device=device,
-            # Pass the baseline components that _create_modified_system_manager might use as a base
-            neural_retriever_baseline=neural_retriever_baseline_instance,
-            query_expander_baseline=query_expander_baseline_instance,
-            response_aggregator_baseline=response_aggregator_baseline_instance,
-            resource_manager_baseline=resource_manager_for_ablation,  # Pass the RM for ablation context
-            system_manager_baseline=system_manager_baseline_instance,  # This is key for the baseline run
-            dimensionality_manager_baseline=dimensionality_manager_for_ablation,
-            ablation_configurations=config_iterator  # The list of ablation settings to iterate through
-        )
+        # Call the refactored function from ablation_study.py
+        # It will handle loading configs, datasets, initializing components,
+        # running ablations, and printing the summary.
+        setup_and_orchestrate_ablation(args)
     except Exception as e:
-        logger.error(f"Ablation study failed: {e}", exc_info=True)
-        # Ensure a return dictionary even on failure, if appropriate
-        return {"error": f"Ablation study failed: {e}"}
-
-    # 6. Save and Print Ablation Summary
-    ablation_log_dir = os.path.join(args.log_dir if args and hasattr(args, 'log_dir') else 'logs', dataset_type,
-                                    "ablation_results")
-    os.makedirs(ablation_log_dir, exist_ok=True)
-    ablation_summary_file = os.path.join(ablation_log_dir,
-                                         f"ablation_summary_{dataset_type}_{time.strftime('%Y%m%d_%H%M%S')}.json")
-    try:
-        with open(ablation_summary_file, 'w') as f:
-            # Use default=str for objects that are not directly JSON serializable (like numpy floats sometimes)
-            json.dump(ablation_results_summary, f, indent=2,
-                      default=lambda o: str(o) if isinstance(o, np.generic) else o.__dict__ if hasattr(o,
-                                                                                                       '__dict__') else str(
-                          o))
-        print(f"\nAblation study summary saved to: {ablation_summary_file}")
-    except Exception as e:
-        print(f"Warning: Could not save ablation study summary: {e}")
-
-    # Print detailed statistical significance results
-    print("\n=== Ablation Study Results Summary ===")
-    if ablation_results_summary and 'ablation_results' in ablation_results_summary:
-        ablation_results = ablation_results_summary.get('ablation_results', {})
-        for config_name_key, report_data in ablation_results.items():
-            print(f"\nConfiguration: {config_name_key}")  # config_name is now key from dict
-            if isinstance(report_data, dict) and 'error' in report_data:
-                print(f"  Error in this configuration run: {report_data['error']}")
-                continue
-            if not isinstance(report_data, dict):
-                print(f"  Unexpected report_data format for {config_name_key}: {type(report_data)}")
-                continue
-
-            # Print relative changes
-            relative_changes = report_data.get('relative_changes', {})
-            print("  Relative Changes from Baseline:")
-            if isinstance(relative_changes, dict):
-                for metric, change in relative_changes.items():
-                    if isinstance(change, (int, float)) and np.isfinite(change):
-                        print(f"    {metric}: {change * 100:.1f}%")
-                    else:
-                        print(f"    {metric}: {change} (Change N/A or non-finite)")
-            else:
-                print("    Relative changes data is not in the expected format.")
-
-            # Print statistical significance
-            stats_results = report_data.get('statistical_significance_vs_baseline', {})
-            print("  Statistical Significance vs. Baseline:")
-            if isinstance(stats_results, dict):
-                for metric, stats_dict in stats_results.items():  # Renamed stats to stats_dict
-                    if isinstance(stats_dict, dict) and 'error' in stats_dict and stats_dict['error']:
-                        print(f"    {metric}: {stats_dict['error']}")
-                    elif isinstance(stats_dict, dict) and all(
-                            k in stats_dict for k in ['p_value', 'effect_size', 'ci_lower', 'ci_upper', 'significant']):
-                        p_val_str = f"{stats_dict['p_value']:.3g}" if stats_dict['p_value'] is not None and np.isfinite(
-                            stats_dict['p_value']) else "N/A"
-                        eff_size_str = f"{stats_dict['effect_size']:.2f}" if stats_dict[
-                                                                                 'effect_size'] is not None and np.isfinite(
-                            stats_dict['effect_size']) else "N/A"
-                        ci_low_str = f"{stats_dict['ci_lower']:.2f}" if stats_dict[
-                                                                            'ci_lower'] is not None and np.isfinite(
-                            stats_dict['ci_lower']) else "N/A"
-                        ci_up_str = f"{stats_dict['ci_upper']:.2f}" if stats_dict[
-                                                                           'ci_upper'] is not None and np.isfinite(
-                            stats_dict['ci_upper']) else "N/A"
-                        sig_str = str(stats_dict.get('significant', 'N/A'))  # Use .get for safety
-
-                        print(f"    {metric}: p-value={p_val_str}, effect_size={eff_size_str}, "
-                              f"CI=[{ci_low_str}, {ci_up_str}], significant={sig_str}")
-                    else:
-                        print(
-                            f"    {metric}: Statistical results incomplete, contains None/NaN, or not a dict. Data: {stats_dict}")
-            else:
-                print("    Statistical significance data is not in the expected format.")
-    else:
-        print("Ablation results summary is empty or not in the expected format.")
+        logger.error(f"Call to setup_and_orchestrate_ablation failed: {e}", exc_info=True)
+        # Optionally, return an error status or re-raise
+        # For now, just logging, as the function itself should handle internal errors gracefully.
 
 
 if __name__ == "__main__":
@@ -1037,7 +628,7 @@ if __name__ == "__main__":
     if parsed_args.run_ablation:
         print(f"--- Starting Ablation Study for {parsed_args.dataset.upper()} ---")
         if parsed_args.no_output_capture:
-            execute_ablation_study(parsed_args)
+            execute_ablation_study(parsed_args) # Calls the new simplified execute_ablation_study
         else:
             # Specific log directory for this ablation run's stdout/stderr
             ablation_output_dir = os.path.join(dataset_log_dir, "ablation_run_logs")
@@ -1045,7 +636,7 @@ if __name__ == "__main__":
             try:
                 with capture_output(output_dir=ablation_output_dir) as output_path:
                     print(f"Ablation study output is being captured to: {output_path}")
-                    execute_ablation_study(parsed_args)
+                    execute_ablation_study(parsed_args) # Calls the new simplified execute_ablation_study
             except Exception as e:
                 print(f"ERROR: Failed to set up output capture or run ablation study: {e}", file=sys.stderr)
                 logger.error(f"Failed to set up output capture or run ablation study: {e}", exc_info=True)

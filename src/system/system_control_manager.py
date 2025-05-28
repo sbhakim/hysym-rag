@@ -46,6 +46,7 @@ class SystemControlManager:
             metrics_collector: MetricsCollector,
             error_retry_limit: int = 2,
             max_query_time: float = 30.0,
+            use_adaptive_logic: bool = True  # << NEW PARAMETER
     ):
         if not all([hybrid_integrator, resource_manager, aggregator, metrics_collector]):
             raise ValueError(
@@ -59,6 +60,7 @@ class SystemControlManager:
         self.max_query_time = max(max_query_time, 1.0)
         self.logger = logger
         self.logger.setLevel(logging.INFO)
+        self.use_adaptive_logic = use_adaptive_logic  # << STORE THE FLAG
 
         # Performance tracking
         self.performance_metrics = {
@@ -460,14 +462,41 @@ class SystemControlManager:
             query_id: str,
             dataset_type: Optional[str]
     ) -> str:
-        """Selects reasoning path by calling the helper logic."""
+        """Selects reasoning path by calling the helper logic or using a fixed path if adaptive logic is disabled."""
+        if not self.use_adaptive_logic:
+            fixed_path = "hybrid"  # Or your chosen fixed strategy for this ablation
+            self.logger.info(
+                f"Path Selection for QID {query_id}: Adaptive logic disabled. Using fixed path: {fixed_path}.")
+            # Optionally, log factors that would have been used for a more complete picture in path_history
+            resource_metrics = self.resource_manager.check_resources()
+            decision_factors_for_log = {
+                'query_complexity': round(query_complexity, 3),
+                'cpu_usage': round(resource_metrics.get('cpu', 0.0) or 0.0, 3),
+                'memory_usage': round(resource_metrics.get('memory', 0.0) or 0.0, 3),
+                'gpu_usage': round(resource_metrics.get('gpu', 0.0) or 0.0, 3),
+                'overall_resource_pressure': round(max(resource_metrics.get('cpu', 0.0) or 0.0,
+                                                       resource_metrics.get('memory', 0.0) or 0.0,
+                                                       resource_metrics.get('gpu', 0.0) or 0.0), 3),
+                'dataset_type': dataset_type or 'unknown',
+                'reason': f"Adaptive logic disabled, fixed path '{fixed_path}' selected."
+            }
+            if hasattr(self, 'path_history'):
+                self.path_history.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'query_id': query_id,
+                    'chosen_path': fixed_path,
+                    'factors': decision_factors_for_log, # Log what the factors were even if not used for decision
+                    'reason': decision_factors_for_log['reason']
+                })
+            return fixed_path
+
+        # Original adaptive logic
         resource_metrics = self.resource_manager.check_resources()
         cpu_usage = resource_metrics.get('cpu', 0.0) or 0.0
         memory_usage = resource_metrics.get('memory', 0.0) or 0.0
         gpu_usage = resource_metrics.get('gpu', 0.0) or 0.0
         overall_resource_pressure = max(cpu_usage, memory_usage, gpu_usage)
 
-        # Prepare factors for logging, as helper won't have all SCM context
         decision_factors = {
             'query_complexity': round(query_complexity, 3),
             'cpu_usage': round(cpu_usage, 3),
@@ -480,7 +509,6 @@ class SystemControlManager:
             'low_resource_thr': self.low_resource_thr,
             'high_resource_thr': self.high_resource_thr
         }
-        # self.logger.info(f"Path Selection Factors for QID {query_id}: {decision_factors}") # Logged by helper now if needed
 
         path, reason = _determine_reasoning_path_logic(
             query_complexity,
@@ -490,26 +518,37 @@ class SystemControlManager:
             self.high_resource_thr,
             overall_resource_pressure,
             dataset_type or 'unknown'  # Ensure it's a string
-        )
+        ) #
 
         self.logger.info(
             f"Path Selection Decision for QID {query_id}: Chosen Path='{path}' (Reason: {reason}) Factors: {decision_factors}")
 
         try:
-            self.path_history.append({
-                'timestamp': datetime.now().isoformat(),
-                'query_id': query_id,
-                'chosen_path': path,
-                'factors': decision_factors,
-                'reason': reason,
-                # 'final_status': None # To be updated later if needed
-            })
+            if hasattr(self, 'path_history'):
+                self.path_history.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'query_id': query_id,
+                    'chosen_path': path,
+                    'factors': decision_factors,
+                    'reason': reason,
+                }) # [cite: 1454]
         except Exception as hist_err:
-            self.logger.error(f"Failed to append to path_history for QID {query_id}: {hist_err}")
+            self.logger.error(f"Failed to append to path_history for QID {query_id}: {hist_err}") # [cite: 1455]
         return path
 
     def _optimize_resources(self):
-        """Calls the helper logic for optimizing resources."""
+        """Calls the helper logic for optimizing resources if adaptive logic is enabled."""
+        if not self.use_adaptive_logic:
+            self.logger.info("Resource Optimization: Adaptive logic disabled. Thresholds remain fixed at their current values.")
+            # You might want to ensure they are at *initial defaults* if they could be changed by other means
+            # For example:
+            # self.low_complexity_thr = 0.4
+            # self.high_complexity_thr = 0.8
+            # self.low_resource_thr = 0.6
+            # self.high_resource_thr = 0.85
+            return
+
+        # Original adaptive resource optimization logic
         try:
             resource_metrics = self.resource_manager.check_resources()
             cpu_usage = resource_metrics.get('cpu', 0.0) or 0.0
@@ -524,31 +563,28 @@ class SystemControlManager:
                 'high_resource_thr': self.high_resource_thr
             }
 
-            # Pass a copy of reasoning_path_stats to the helper
             updated_thresholds, adjustments_log_list = _optimize_thresholds_logic(
                 current_thresholds,
-                overall_pressure,  # Pass overall_pressure directly
-                dict(self.reasoning_path_stats),  # Pass a copy
-                # self.logger # The helper function can have its own logger or not log directly
-            )
+                overall_pressure,
+                dict(self.reasoning_path_stats)
+            ) #
 
-            # Update instance attributes from the dictionary returned by the helper
             self.low_complexity_thr = updated_thresholds['low_complexity_thr']
-            self.high_complexity_thr = updated_thresholds['high_complexity_thr']
+            self.high_complexity_thr = updated_thresholds['high_complexity_thr'] # [cite: 1459]
             self.low_resource_thr = updated_thresholds['low_resource_thr']
             self.high_resource_thr = updated_thresholds['high_resource_thr']
 
             if adjustments_log_list:
                 self.logger.info(f"Resource Optimization Adjustments: {', '.join(adjustments_log_list)}")
             else:
-                self.logger.info("Resource Optimization: No adjustments needed at this time based on current logic.")
+                self.logger.info("Resource Optimization: No adjustments needed at this time based on current logic.") # [cite: 1460]
         except Exception as e:
             self.logger.error(f"Error in _optimize_resources: {str(e)}")
             # Revert to default thresholds if optimization fails
             self.low_complexity_thr = 0.4
             self.high_complexity_thr = 0.8
             self.low_resource_thr = 0.6
-            self.high_resource_thr = 0.85
+            self.high_resource_thr = 0.85 # [cite: 1461]
             self.logger.info("Reverted path selection thresholds to default due to optimization error.")
 
     def _execute_processing_path(

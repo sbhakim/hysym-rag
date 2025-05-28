@@ -65,6 +65,13 @@ drop_ablations:
     disable_neural: True
     disable_symbolic: False
 
+  - name: "9. Hybrid (Dynamic Rules, Few-Shots, No Adaptive Logic)" # Or simply "No Adaptive Thresholds"
+    rules_file_key: "dynamic_rules_path_drop"
+    use_few_shots: True
+    disable_symbolic: False
+    disable_neural: False
+    use_adaptive_scm_logic: False # << NEW KEY
+
 # Ablation configurations for HotpotQA
 hotpotqa_ablations:
   - name: "1. Baseline Hybrid (HotpotQA)"
@@ -80,5 +87,11 @@ hotpotqa_ablations:
   - name: "3. Neural Only (HotpotQA)"
     disable_symbolic: True
     disable_neural: False
+
+  - name: "4. Hybrid (HotpotQA, No Adaptive Logic)" # Or "No Adaptive Thresholds"
+    rules_file_key: "rules_path_hotpotqa_baseline"
+    disable_symbolic: False
+    disable_neural: False
+    use_adaptive_scm_logic: False
 
 # Add other specific ablations as needed, e.g., for different fusion strategies or component disabling
