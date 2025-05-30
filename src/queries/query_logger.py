@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class QueryLogger:
     """
-    Enhanced query logger that provides comprehensive logging capabilities for HySym-RAG.
+    Enhanced query logger that provides comprehensive logging capabilities for SymRAG.
     """
 
     def __init__(self,

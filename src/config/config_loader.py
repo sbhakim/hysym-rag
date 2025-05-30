@@ -10,7 +10,7 @@ from collections import defaultdict
 
 class ConfigLoader:
     """
-    Enhanced configuration loader for HySym-RAG that supports hierarchical configs,
+    Enhanced configuration loader for SymRAG that supports hierarchical configs,
     environment overrides, and dynamic validation. Specifically designed to support
     multi-hop reasoning and HotpotQA processing configurations.
     """
@@ -40,7 +40,7 @@ class ConfigLoader:
 
     @staticmethod
     def load_config(config_file: str = "config.yaml",
-                    env_prefix: str = "HYSYM_") -> Dict[str, Any]:
+                    env_prefix: str = "SYMRAG_") -> Dict[str, Any]:
         """
         Load and validate configuration with environment variable overrides.
 

@@ -65,7 +65,7 @@ class SampleDebugger:
                 prediction_display = str(system_prediction_value)  # Already a dict, str() is for consistency in print
 
             print(f"  GROUND TRUTH    : {gt_answer_display}")
-            print(f"  HySymRAG Output : {prediction_display}")
+            print(f"  SymRAG Output   : {prediction_display}")
             print(f"  REASONING PATH  : {actual_reasoning_path}")
 
             if eval_metrics:

@@ -16,7 +16,7 @@ logger = logging.getLogger("ResourceManager")
 
 class ResourceManager:
     """
-    Enhanced resource manager for HySym-RAG that tracks CPU, GPU, and memory usage.
+    Enhanced resource manager for SymRAG that tracks CPU, GPU, and memory usage.
     Provides dynamic resource optimization in conjunction with an AdaptiveManager.
     """
 

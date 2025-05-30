@@ -156,6 +156,13 @@ hysym_code.txt
 hysym_code_1.txt
 hysym_code_2.txt
 hysym_code_3.txt
+
+extract_symrag.sh
+symrag_code.txt
+symrag_code_1.txt
+symrag_code_2.txt
+symrag_code_3.txt
+metrics/
 metrics/
 tests/hotpotqa_evaluation_results.json
 

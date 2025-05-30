@@ -27,7 +27,7 @@ def capture_output(output_dir="logs"):
     """Context manager to capture all stdout/stderr to a file."""
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(output_dir, f"hysym_run_{timestamp}.txt")
+    output_path = os.path.join(output_dir, f"symrag_run_{timestamp}.txt")
 
     tee = TeeOutput(output_path)
     sys.stdout = tee

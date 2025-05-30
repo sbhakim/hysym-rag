@@ -15,7 +15,7 @@ import string  # For punctuation removal in DROP tokenization
 
 class Evaluation:
     """
-    Enhanced evaluation system for HySym-RAG with comprehensive academic metrics.
+    Enhanced evaluation system for SymRAG with comprehensive academic metrics.
     Includes support for multi-hop reasoning evaluation (HotpotQA) and discrete reasoning (DROP),
     resource efficiency, advanced reasoning-quality metrics, ablation tracking, and significance testing.
     Updated to robustly handle DROP's structured answer format while preserving HotpotQA functionality.

@@ -12,7 +12,7 @@ from scipy import stats
 import logging
 import argparse  # Added for type hinting args
 
-# HySym-RAG component imports
+# SymRAG component imports
 from src.reasoners.networkx_symbolic_reasoner_base import GraphSymbolicReasoner
 from src.reasoners.networkx_symbolic_reasoner_drop import GraphSymbolicReasonerDrop
 from src.reasoners.neural_retriever import NeuralRetriever

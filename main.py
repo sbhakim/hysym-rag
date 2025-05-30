@@ -26,7 +26,7 @@ except ImportError:
     print("Sentence-transformers library not found. Please install it: pip install sentence-transformers")
     sys.exit(1)
 
-# HySym-RAG component imports
+# SymRAG component imports
 try:
     from src.reasoners.networkx_symbolic_reasoner_base import GraphSymbolicReasoner
     from src.reasoners.networkx_symbolic_reasoner_drop import GraphSymbolicReasonerDrop
@@ -49,7 +49,7 @@ try:
     from src.utils.data_loaders import load_hotpotqa, load_drop_dataset # MODIFIED IMPORT
 
 except ImportError as e:
-    print(f"Error importing HySym-RAG components: {e}")
+    print(f"Error importing SymRAG components: {e}")
     print("Please ensure main.py is run from the project root directory or PYTHONPATH is set correctly.")
     sys.exit(1)
 
@@ -64,10 +64,10 @@ logger = logging.getLogger(__name__)
 # Dataset loading functions (load_hotpotqa, load_drop_dataset) MOVED to src/utils/data_loaders.py
 
 
-def run_hysym_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: Optional[argparse.Namespace] = None) -> \
+def run_symrag_system(samples: int = 200, dataset_type: str = 'hotpotqa', args: Optional[argparse.Namespace] = None) -> \
 Dict[str, Any]:
-    """Main execution function for the HySym-RAG system for standard evaluation runs."""
-    print(f"\n=== Initializing HySym-RAG System for Dataset: {dataset_type.upper()} ===")
+    """Main execution function for the SymRAG system for standard evaluation runs."""
+    print(f"\n=== Initializing SymRAG System for Dataset: {dataset_type.upper()} ===")
 
     # Configure library logging levels
     for lib_name in ['transformers', 'sentence_transformers', 'urllib3.connectionpool', 'h5py', 'numexpr', 'spacy']:
@@ -594,7 +594,7 @@ def execute_ablation_study(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Run HySym-RAG system with output capture and optional ablation study.')
+        description='Run SymRAG system with output capture and optional ablation study.')
     parser.add_argument('--dataset', type=str, default='hotpotqa', choices=['hotpotqa', 'drop'],
                         help='Dataset to use for evaluation (hotpotqa or drop)')
     parser.add_argument('--log-dir', default='logs', help='Directory to save log files')
@@ -642,14 +642,14 @@ if __name__ == "__main__":
                 logger.error(f"Failed to set up output capture or run ablation study: {e}", exc_info=True)
     else:  # Standard run
         if parsed_args.no_output_capture:
-            print("--- Running standard HySym-RAG evaluation without output capture. ---")
-            run_hysym_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)
+            print("--- Running standard SymRAG evaluation without output capture. ---")
+            run_symrag_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)
         else:
             # Standard run logs go into dataset_log_dir directly
             try:
                 with capture_output(output_dir=dataset_log_dir) as output_path:
                     print(f"Output from this run is being captured to: {output_path}")
-                    run_hysym_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)
+                    run_symrag_system(samples=parsed_args.samples, dataset_type=parsed_args.dataset, args=parsed_args)
             except Exception as e:
                 print(f"ERROR: Failed to set up output capture or run system: {e}", file=sys.stderr)
                 logger.error(f"Failed to set up output capture or run system: {e}", exc_info=True)

@@ -15,7 +15,7 @@ class FeedbackManager:
     """
     Enhanced FeedbackManager that manages storage, analysis, and application of system feedback.
     Specifically designed to handle complex feedback patterns in multi-hop reasoning scenarios
-    and integrate with HySym-RAG's improved components.
+    and integrate with SymRAG's improved components.
     """
 
     def __init__(self,

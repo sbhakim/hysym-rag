@@ -35,7 +35,7 @@ DEFAULT_DROP_ANSWER = {"number": "", "spans": [], "date": {"day": "", "month": "
 
 class GraphSymbolicReasoner:
     """
-    Base class for the graph-based symbolic reasoner in HySym-RAG.
+    Base class for the graph-based symbolic reasoner in SymRAG.
     Handles static components like rule loading, semantic indexing, and text-based QA (HotpotQA).
     DROP-specific functionality is implemented in a separate module.
     """

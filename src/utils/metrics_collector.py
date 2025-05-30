@@ -16,7 +16,7 @@ import string
 
 class MetricsCollector:
     """
-    Comprehensive metrics collection and analysis system for HySym-RAG.
+    Comprehensive metrics collection and analysis system for SymRAG.
     Designed for academic evaluation and research paper results.
     Updated to fix query count discrepancy and handle DROP's structured answers.
     """

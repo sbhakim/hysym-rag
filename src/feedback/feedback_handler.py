@@ -13,7 +13,7 @@ class FeedbackHandler:
     """
     Enhanced feedback handler that collects, analyzes, and processes feedback
     about the system's performance. This component is crucial for continuous
-    improvement of the HySym-RAG system, particularly for multi-hop reasoning scenarios.
+    improvement of the SymRAG system, particularly for multi-hop reasoning scenarios.
     """
 
     def __init__(self,

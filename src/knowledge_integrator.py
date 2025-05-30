@@ -144,7 +144,7 @@ class AlignmentLayer(nn.Module):
 
     def forward(self, sym_emb: torch.Tensor, neural_emb: torch.Tensor, rule_confidence: Optional[float] = None) -> \
             Tuple[torch.Tensor, float, Optional[dict]]:
-        memory_tracking = os.environ.get('HYSYM_MEMORY_TRACKING', '0') == '1'
+        memory_tracking = os.environ.get('SYMRAG_MEMORY_TRACKING', '0') == '1'
         try:
             if memory_tracking:
                 self._log_memory_usage("start_forward")
@@ -230,7 +230,7 @@ class AlignmentLayer(nn.Module):
         pass
 
     def _log_memory_usage(self, stage: str):
-        if stage in ['start_forward', 'end_forward'] or os.environ.get('HYSYM_MEMORY_TRACKING') == '1':
+        if stage in ['start_forward', 'end_forward'] or os.environ.get('SYMRAG_MEMORY_TRACKING') == '1':
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 logger.debug(f"Memory usage at {stage}: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
