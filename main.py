@@ -542,8 +542,16 @@ Dict[str, Any]:
                 mean_u = metrics_val.get('mean_usage', 0.0) * 100
                 peak_u = metrics_val.get('peak_usage', 0.0) * 100
                 score = metrics_val.get('efficiency_score', None)
+                # --- Corrected Line Below ---
+                # Previous problematic line:
+                # print(
+                #     f"- {resource.capitalize()}: Mean Delta {mean_u:+.1f}%, Peak Delta {peak_u:.1f}%, Score {score:.2f if score is not None else 'N/A'}")
+
+                # Corrected approach:
+                score_str = f"{score:.2f}" if isinstance(score, (int, float)) else 'N/A'
                 print(
-                    f"- {resource.capitalize()}: Mean Delta {mean_u:+.1f}%, Peak Delta {peak_u:.1f}%, Score {score:.2f if score is not None else 'N/A'}")
+                    f"- {resource.capitalize()}: Mean Delta {mean_u:+.1f}%, Peak Delta {peak_u:.1f}%, Score {score_str}")
+                # --- End of Correction ---
         if 'trends' in em_metrics:
             print(f"- Efficiency Trends: {em_metrics.get('trends', {})}")
 

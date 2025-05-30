@@ -286,122 +286,149 @@ class RuleExtractor:
         logger.info(f"After filtering with min_freq={min_freq}, retained {len(filtered_patterns)} patterns")
         return filtered_patterns
 
-    def extract_span_context_patterns(self, drop_json_path: str, window: int = 5, min_freq: int = 1) -> List[Dict[str, Any]]:
+    def extract_span_context_patterns(self, drop_json_path: str, window: int = 5, min_freq: int = 1) -> List[
+        Dict[str, Any]]:
         """
         Extract and generalize context patterns around DROP answer spans.
         Uses ground-truth spans to learn reliable extraction patterns.
+        [MODIFIED]: Added re.escape() for left and right context parts and try-except for re.compile.
         """
-        logger.info(f"Starting extract_span_context_patterns with drop_json_path={drop_json_path}")
-        patterns = []
-        span_counts = Counter()
-        processed_pairs = 0
-        span_matches_found = 0
+        logger.info(f"Starting extract_span_context_patterns with drop_json_path={drop_json_path}")  # [cite: 1020]
+        patterns = []  # [cite: 1020]
+        span_counts = Counter()  # [cite: 1020]
+        processed_pairs = 0  # [cite: 1020]
+        span_matches_found = 0  # [cite: 1020]
 
         # Load and validate dataset
         try:
-            with open(drop_json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with open(drop_json_path, 'r', encoding='utf-8') as f:  # [cite: 1021]
+                data = json.load(f)  # [cite: 1022]
         except Exception as e:
-            logger.error(f"Failed to load DROP dataset from {drop_json_path}: {e}")
-            return []
+            logger.error(f"Failed to load DROP dataset from {drop_json_path}: {e}")  # [cite: 1022]
+            return []  # [cite: 1022]
 
-        if not isinstance(data, dict):
-            logger.error(f"Expected DROP dataset to be a dictionary, got type {type(data)}")
-            return []
-        logger.debug(f"DROP dataset contains {len(data)} passages")
+        if not isinstance(data, dict):  # [cite: 1022]
+            logger.error(f"Expected DROP dataset to be a dictionary, got type {type(data)}")  # [cite: 1022]
+            return []  # [cite: 1023]
+        logger.debug(f"DROP dataset contains {len(data)} passages")  # [cite: 1023]
 
         # Define flexible placeholders
-        number_pat = r"[0-9][0-9,\. ]*"
-        date_pat = r"\d{1,2}(?:/\d{1,2})?(?:/\d{2,4})?"
-        span_pat = r"[\w\s]+?"
+        number_pat = r"[0-9][0-9,\. ]*"  # [cite: 1023]
+        date_pat = r"\d{1,2}(?:/\d{1,2})?(?:/\d{2,4})?"  # [cite: 1023]
+        span_pat = r"[\w\s]+?"  # [cite: 1024]
 
-        for passage_id, passage_content in data.items():
-            if not isinstance(passage_content, dict):
-                logger.debug(f"Skipping passage {passage_id}: Expected dict, got {type(passage_content)}")
-                continue
-            if 'passage' not in passage_content or 'qa_pairs' not in passage_content:
-                logger.debug(f"Skipping passage {passage_id}: Missing 'passage' or 'qa_pairs' keys")
-                continue
-            if not isinstance(passage_content['qa_pairs'], list):
-                logger.debug(f"Skipping passage {passage_id}: 'qa_pairs' is not a list")
-                continue
+        for passage_id, passage_content in data.items():  # [cite: 1024]
+            if not isinstance(passage_content, dict):  # [cite: 1024]
+                logger.debug(
+                    f"Skipping passage {passage_id}: Expected dict, got {type(passage_content)}")  # [cite: 1024]
+                continue  # [cite: 1024]
+            if 'passage' not in passage_content or 'qa_pairs' not in passage_content:  # [cite: 1024]
+                logger.debug(f"Skipping passage {passage_id}: Missing 'passage' or 'qa_pairs' keys")  # [cite: 1025]
+                continue  # [cite: 1025]
+            if not isinstance(passage_content['qa_pairs'], list):  # [cite: 1025]
+                logger.debug(f"Skipping passage {passage_id}: 'qa_pairs' is not a list")  # [cite: 1025]
+                continue  # [cite: 1025]
 
-            passage = passage_content['passage']
-            if not isinstance(passage, str) or not passage.strip():
-                logger.debug(f"Skipping passage {passage_id}: Passage is not a valid string")
-                continue
+            passage = passage_content['passage']  # [cite: 1026]
+            if not isinstance(passage, str) or not passage.strip():  # [cite: 1026]
+                logger.debug(f"Skipping passage {passage_id}: Passage is not a valid string")  # [cite: 1026]
+                continue  # [cite: 1026]
 
-            doc = nlp(passage)
-            tokens = [token.text for token in doc]
+            doc = nlp(passage)  # [cite: 1026]
+            tokens = [token.text for token in doc]  # [cite: 1026]
 
-            for qa_pair in passage_content['qa_pairs']:
-                if not isinstance(qa_pair, dict):
-                    logger.debug(f"Skipping QA pair in passage {passage_id}: Expected dict, got {type(qa_pair)}")
-                if 'answer' not in qa_pair:
-                    logger.debug(f"Skipping QA pair in passage {passage_id}: Missing 'answer' key")
-                    continue
+            for qa_pair in passage_content['qa_pairs']:  # [cite: 1027]
+                if not isinstance(qa_pair, dict):  # [cite: 1027]
+                    logger.debug(
+                        f"Skipping QA pair in passage {passage_id}: Expected dict, got {type(qa_pair)}")  # [cite: 1027]
+                if 'answer' not in qa_pair:  # [cite: 1027]
+                    logger.debug(f"Skipping QA pair in passage {passage_id}: Missing 'answer' key")  # [cite: 1028]
+                    continue  # [cite: 1028]
 
-                processed_pairs += 1
-                answer = qa_pair['answer']
-                span = None
-                span_type = None
+                processed_pairs += 1  # [cite: 1028]
+                answer = qa_pair['answer']  # [cite: 1028]
+                span = None  # [cite: 1028]
+                span_type = None  # [cite: 1029]
 
-                if not isinstance(answer, dict):
-                    logger.debug(f"Skipping QA pair in passage {passage_id}: Answer is not a dict")
-                    continue
+                if not isinstance(answer, dict):  # [cite: 1029]
+                    logger.debug(f"Skipping QA pair in passage {passage_id}: Answer is not a dict")  # [cite: 1029]
+                    continue  # [cite: 1029]
 
-                if 'number' in answer and answer['number']:
-                    span = str(answer['number'])
-                    span_type = 'number'
-                elif 'spans' in answer and answer['spans']:
-                    span = answer['spans'][0] if isinstance(answer['spans'], list) and answer['spans'] else None
-                    span_type = 'spans'
-                elif 'date' in answer and isinstance(answer['date'], dict) and answer['date'].get('year'):
-                    span = f"{answer['date'].get('month', '')}/{answer['date'].get('day', '')}/{answer['date']['year']}"
-                    span_type = 'date'
-                else:
-                    logger.debug(f"Skipping QA pair in passage {passage_id}: No valid answer type (number, spans, date)")
-                    continue
+                if 'number' in answer and answer['number']:  # [cite: 1029]
+                    span = str(answer['number'])  # [cite: 1030]
+                    span_type = 'number'  # [cite: 1030]
+                elif 'spans' in answer and answer['spans']:  # [cite: 1030]
+                    span = answer['spans'][0] if isinstance(answer['spans'], list) and answer[
+                        'spans'] else None  # [cite: 1030]
+                    span_type = 'spans'  # [cite: 1031]
+                elif 'date' in answer and isinstance(answer['date'], dict) and answer['date'].get(
+                        'year'):  # [cite: 1031]
+                    span = f"{answer['date'].get('month', '')}/{answer['date'].get('day', '')}/{answer['date']['year']}"  # [cite: 1031]
+                    span_type = 'date'  # [cite: 1031]
+                else:  # [cite: 1031]
+                    logger.debug(
+                        f"Skipping QA pair in passage {passage_id}: No valid answer type (number, spans, date)")  # [cite: 1032]
+                    continue  # [cite: 1032]
 
-                if not span or not isinstance(span, str) or not span.strip():
-                    logger.debug(f"Skipping QA pair in passage {passage_id}: Invalid span '{span}'")
-                    continue
+                if not span or not isinstance(span, str) or not span.strip():  # [cite: 1032]
+                    logger.debug(f"Skipping QA pair in passage {passage_id}: Invalid span '{span}'")  # [cite: 1032]
+                    continue  # [cite: 1033]
 
                 # Find the span in the passage using spaCy's char_span
-                start_idx = passage.find(span)
-                if start_idx == -1:
-                    logger.debug(f"Span '{span}' not found in passage for passage {passage_id}")
+                start_idx = passage.find(span)  # [cite: 1033]
+                if start_idx == -1:  # [cite: 1033]
+                    logger.debug(f"Span '{span}' not found in passage for passage {passage_id}")  # [cite: 1034]
+                    continue  # [cite: 1034]
+
+                span_token = doc.char_span(start_idx, start_idx + len(span), alignment_mode="expand")  # [cite: 1034]
+                if span_token is None:  # [cite: 1034]
+                    logger.debug(f"Couldn't align span '{span}' in passage {passage_id}")  # [cite: 1034]
+                    continue  # [cite: 1035]
+
+                tok_idx = span_token.start  # [cite: 1035]
+                span_length = span_token.end - span_token.start  # [cite: 1035]
+                span_matches_found += 1  # [cite: 1035]
+                left = tokens[max(0, tok_idx - window):tok_idx]  # [cite: 1035]
+                right = tokens[tok_idx + span_length:tok_idx + span_length + window]  # [cite: 1036]
+
+                if not left or not right:  # [cite: 1036]
+                    logger.debug(
+                        f"Skipping pattern for span '{span}': Insufficient context (left={left}, right={right})")  # [cite: 1036]
+                    continue  # [cite: 1036]
+
+                placeholder = {"number": number_pat, "date": date_pat, "spans": span_pat}[span_type]  # [cite: 1037]
+
+                # --- MODIFICATION: Escape left and right context tokens ---
+                # Previous line:
+                # pattern = rf"{' '.join(left)}\s+({placeholder})\s+{' '.join(right)}"
+
+                escaped_left_text = ' '.join([re.escape(token) for token in left])
+                escaped_right_text = ' '.join([re.escape(token) for token in right])
+                pattern = rf"{escaped_left_text}\s+({placeholder})\s+{escaped_right_text}"
+                # --- END MODIFICATION ---
+
+                try:
+                    re.compile(pattern)  # Validate the generated regex pattern immediately
+                    span_counts[pattern] += 1  # [cite: 1037]
+                    patterns.append({  # [cite: 1037]
+                        'type': span_type,  # [cite: 1037]
+                        'pattern': pattern,  # [cite: 1038]
+                        'support': span_counts[pattern]  # [cite: 1038]
+                    })
+                    logger.debug(
+                        f"Generated pattern: Type={span_type}, Pattern='{pattern}', Support={span_counts[pattern]}")  # [cite: 1038]
+                except re.error as e:
+                    logger.error(
+                        f"RuleExtractor: Invalid regex generated by extract_span_context_patterns: '{pattern}'. Error: {e}. Left tokens: {left}, Right tokens: {right}, Placeholder: {placeholder}")
+                    # Optionally, continue to the next iteration if one pattern is bad
                     continue
 
-                span_token = doc.char_span(start_idx, start_idx + len(span), alignment_mode="expand")
-                if span_token is None:
-                    logger.debug(f"Couldn't align span '{span}' in passage {passage_id}")
-                    continue
-
-                tok_idx = span_token.start
-                span_length = span_token.end - span_token.start
-                span_matches_found += 1
-                left = tokens[max(0, tok_idx - window):tok_idx]
-                right = tokens[tok_idx + span_length:tok_idx + span_length + window]
-
-                if not left or not right:
-                    logger.debug(f"Skipping pattern for span '{span}': Insufficient context (left={left}, right={right})")
-                    continue
-
-                placeholder = {"number": number_pat, "date": date_pat, "spans": span_pat}[span_type]
-                pattern = rf"{' '.join(left)}\s+({placeholder})\s+{' '.join(right)}"
-                span_counts[pattern] += 1
-                patterns.append({
-                    'type': span_type,
-                    'pattern': pattern,
-                    'support': span_counts[pattern]
-                })
-                logger.debug(f"Generated pattern: Type={span_type}, Pattern='{pattern}', Support={span_counts[pattern]}")
-
-        logger.info(f"Processed {processed_pairs} QA pairs. Found {span_matches_found} span matches. Generated {len(patterns)} patterns before filtering (min_freq={min_freq})")
-        filtered_patterns = [p for p in patterns if p['support'] >= min_freq]
-        logger.info(f"After filtering with min_freq={min_freq}, retained {len(filtered_patterns)} patterns")
-        return filtered_patterns
+        logger.info(
+            f"Processed {processed_pairs} QA pairs. Found {span_matches_found} span matches. Generated {len(patterns)} patterns before filtering (min_freq={min_freq})")  # [cite: 1038]
+        filtered_patterns = [p for p in patterns if p['support'] >= min_freq]  # [cite: 1039]
+        logger.info(
+            f"After filtering with min_freq={min_freq}, retained {len(filtered_patterns)} patterns")  # [cite: 1039]
+        return filtered_patterns  # [cite: 1039]
 
     def extract_semantic_drop_rules(self, questions: List[str], min_support: int = 1) -> List[Dict[str, Any]]:
         """

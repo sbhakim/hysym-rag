@@ -1430,261 +1430,266 @@ class NeuralRetriever:
     def _create_enhanced_prompt(self, question: str, chunks: List[Dict],
                                 symbolic_guidance: Optional[List[Dict]] = None,
                                 dataset_type: Optional[str] = None) -> str:
-        if not question or not isinstance(question, str) or not question.strip():
-            self.logger.error("Cannot create prompt: Invalid question provided.")
-            return self._create_fallback_prompt(question)
+        if not question or not isinstance(question, str) or not question.strip(): # [cite: 2347]
+            self.logger.error("Cannot create prompt: Invalid question provided.") # [cite: 2347]
+            return self._create_fallback_prompt(question) # [cite: 2347]
 
-        prompt_parts = []
-        query_id_for_log = hashlib.sha1(question.encode('utf-8')).hexdigest()[:8]
+        prompt_parts = [] # [cite: 2347]
+        query_id_for_log = hashlib.sha1(question.encode('utf-8')).hexdigest()[:8] # [cite: 2348]
 
         # --- Few-Shot Examples Section ---
         # This check ensures few-shots are only added if loaded AND for the correct dataset type
-        if dataset_type and dataset_type.lower() == 'drop' and self.few_shot_examples:
-            prompt_parts.append("Here are some examples of how to answer questions based on context:")
+        if dataset_type and dataset_type.lower() == 'drop' and self.few_shot_examples: # [cite: 2348]
+            prompt_parts.append("Here are some examples of how to answer questions based on context:") # [cite: 2348]
             # Select a limited number of few-shot examples to avoid overly long prompts
             # You can make num_few_shot_to_include configurable if needed
-            num_few_shot_to_include = min(len(self.few_shot_examples), 2)
+            num_few_shot_to_include = min(len(self.few_shot_examples), 2) # [cite: 2349]
 
-            for i, example in enumerate(self.few_shot_examples[:num_few_shot_to_include]):
-                example_query = example.get("query", "")
-                example_context_snippet = example.get("context_snippet", "")  # Optional: include if useful
-                example_answer_obj = example.get("answer", {})
+            for i, example in enumerate(self.few_shot_examples[:num_few_shot_to_include]): # [cite: 2349]
+                example_query = example.get("query", "") # [cite: 2349]
+                example_context_snippet = example.get("context_snippet", "")  # Optional: include if useful # [cite: 2349]
+                example_answer_obj = example.get("answer", {}) # [cite: 2350]
 
-                answer_str_parts = []
-                if example_answer_obj.get("number") is not None and str(example_answer_obj.get("number")).strip():
-                    answer_str_parts.append(f"Number: {example_answer_obj['number']}")
+                answer_str_parts = [] # [cite: 2350]
+                if example_answer_obj.get("number") is not None and str(example_answer_obj.get("number")).strip(): # [cite: 2350]
+                    answer_str_parts.append(f"Number: {example_answer_obj['number']}") # [cite: 2350]
 
                 # Ensure spans is a list before joining
-                spans_data = example_answer_obj.get("spans", [])
-                if isinstance(spans_data, list) and spans_data:
-                    answer_str_parts.append(f"Spans: {', '.join(str(s) for s in spans_data)}")
+                spans_data = example_answer_obj.get("spans", []) # [cite: 2351]
+                if isinstance(spans_data, list) and spans_data: # [cite: 2351]
+                    answer_str_parts.append(f"Spans: {', '.join(str(s) for s in spans_data)}") # [cite: 2351]
 
-                date_obj = example_answer_obj.get("date", {})
-                if isinstance(date_obj, dict) and any(str(v).strip() for v in date_obj.values()):
-                    date_parts = []
-                    if str(date_obj.get('month', '')).strip(): date_parts.append(str(date_obj['month']))
-                    if str(date_obj.get('day', '')).strip(): date_parts.append(str(date_obj['day']))
-                    if str(date_obj.get('year', '')).strip(): date_parts.append(str(date_obj['year']))
-                    if date_parts:
-                        answer_str_parts.append(f"Date: {'/'.join(filter(None, date_parts))}")
+                date_obj = example_answer_obj.get("date", {}) # [cite: 2351]
+                if isinstance(date_obj, dict) and any(str(v).strip() for v in date_obj.values()): # [cite: 2352]
+                    date_parts = [] # [cite: 2352]
+                    if str(date_obj.get('month', '')).strip(): date_parts.append(str(date_obj['month'])) # [cite: 2352]
+                    if str(date_obj.get('day', '')).strip(): date_parts.append(str(date_obj['day'])) # [cite: 2352]
+                    if str(date_obj.get('year', '')).strip(): date_parts.append(str(date_obj['year'])) # [cite: 2352]
+                    if date_parts: # [cite: 2353]
+                        answer_str_parts.append(f"Date: {'/'.join(filter(None, date_parts))}") # [cite: 2353]
 
-                formatted_answer = " | ".join(answer_str_parts) if answer_str_parts else "Not Applicable"
+                formatted_answer = " | ".join(answer_str_parts) if answer_str_parts else "Not Applicable" # [cite: 2354]
 
-                prompt_parts.append(f"\nExample {i + 1}:")
-                if example_context_snippet and "REPLACE THIS" not in example_context_snippet:  # Only include valid snippets
-                    prompt_parts.append(f"Context Snippet: {example_context_snippet}")
-                prompt_parts.append(f"Question: {example_query}")
-                prompt_parts.append(f"Answer: {formatted_answer}")
-            prompt_parts.append("---")
-        elif dataset_type and dataset_type.lower() == 'drop' and not self.few_shot_examples:
-            self.logger.debug(
+                prompt_parts.append(f"\nExample {i + 1}:") # [cite: 2354]
+                if example_context_snippet and "REPLACE THIS" not in example_context_snippet:  # Only include valid snippets # [cite: 2354]
+                    prompt_parts.append(f"Context Snippet: {example_context_snippet}") # [cite: 2354]
+                prompt_parts.append(f"Question: {example_query}") # [cite: 2354]
+                prompt_parts.append(f"Answer: {formatted_answer}") # [cite: 2355]
+            prompt_parts.append("---") # [cite: 2355]
+        elif dataset_type and dataset_type.lower() == 'drop' and not self.few_shot_examples: # [cite: 2355]
+            self.logger.debug( # [cite: 2355]
                 f"[QID:{query_id_for_log}] Few-shot examples for DROP are configured to be used, but none were loaded (e.g., file not found or empty).")
 
         # --- Guidance Section ---
-        try:
-            relevant_guidance_texts = []
-            if symbolic_guidance:
+        try: # [cite: 2356]
+            relevant_guidance_texts = [] # [cite: 2356]
+            if symbolic_guidance: # [cite: 2356]
                 # Sort guidance by confidence, take top N (e.g., 2)
-                sorted_guidance = sorted(
-                    [g for g in symbolic_guidance if isinstance(g, dict) and g.get(self.guidance_statement_key)],
-                    key=lambda x: x.get(self.guidance_confidence_key, 0.0),
-                    reverse=True
+                sorted_guidance = sorted( # [cite: 2356]
+                    [g for g in symbolic_guidance if isinstance(g, dict) and g.get(self.guidance_statement_key)], # [cite: 2357]
+                    key=lambda x: x.get(self.guidance_confidence_key, 0.0), # [cite: 2357]
+                    reverse=True # [cite: 2357]
                 )
-                for guide_idx, guide in enumerate(sorted_guidance[:2]):  # Take top 2
-                    statement = guide.get(self.guidance_statement_key, '')
-                    confidence = guide.get(self.guidance_confidence_key, 0.0)
+                for guide_idx, guide in enumerate(sorted_guidance[:2]):  # Take top 2 # [cite: 2357]
+                    statement = guide.get(self.guidance_statement_key, '') # [cite: 2358]
+                    confidence = guide.get(self.guidance_confidence_key, 0.0) # [cite: 2358]
                     # Ensure statement is a string and not empty after stripping
-                    if isinstance(statement, str) and statement.strip() and confidence > 0.45:  # Confidence threshold
-                        safe_statement = statement.replace("{", "{{").replace("}", "}}")  # Escape for f-string
-                        relevant_guidance_texts.append(
-                            f"- Clue {guide_idx + 1}: {safe_statement} (Symbolic Confidence: {confidence:.2f})"
+                    if isinstance(statement, str) and statement.strip() and confidence > 0.45:  # Confidence threshold # [cite: 2358]
+                        safe_statement = statement.replace("{", "{{").replace("}", "}}")  # Escape for f-string # [cite: 2359]
+                        relevant_guidance_texts.append( # [cite: 2359]
+                            f"- Clue {guide_idx + 1}: {safe_statement} (Symbolic Confidence: {confidence:.2f})" # [cite: 2359]
                         )
-            if relevant_guidance_texts:
-                prompt_parts.append(
+            if relevant_guidance_texts: # [cite: 2360]
+                prompt_parts.append( # [cite: 2360]
                     "Hint: Consider the following potentially relevant facts derived from symbolic reasoning (their accuracy is not guaranteed):"
                 )
-                prompt_parts.extend(relevant_guidance_texts)
-                prompt_parts.append("---")
-        except Exception as e:
-            self.logger.warning(f"[QID:{query_id_for_log}] Error processing guidance for prompt: {e}")
+                prompt_parts.extend(relevant_guidance_texts) # [cite: 2361]
+                prompt_parts.append("---") # [cite: 2361]
+        except Exception as e: # [cite: 2361]
+            self.logger.warning(f"[QID:{query_id_for_log}] Error processing guidance for prompt: {e}") # [cite: 2361]
 
         # --- Context Section ---
-        context_parts = []
-        added_content_hashes = set()  # To avoid adding duplicate chunk text
-        chars_added = 0
+        context_parts = [] # [cite: 2361]
+        added_content_hashes = set()  # To avoid adding duplicate chunk text # [cite: 2361]
+        chars_added = 0 # [cite: 2362]
 
         # Prioritize shorter, more distinct chunks if many are available, or use as is if few
         # This sorting can be computationally minor for small N, but consider its impact if chunks list is huge.
-        sorted_chunks_for_prompt = sorted(chunks, key=lambda c: len(c.get('text', ''))) if len(
-            chunks) > self.top_k * 2 else chunks
+        sorted_chunks_for_prompt = sorted(chunks, key=lambda c: len(c.get('text', ''))) if len( # [cite: 2363]
+            chunks) > self.top_k * 2 else chunks # [cite: 2363]
 
-        for chunk_idx, chunk in enumerate(sorted_chunks_for_prompt):
-            chunk_text = chunk.get('text', '').strip()
+        for chunk_idx, chunk in enumerate(sorted_chunks_for_prompt): # [cite: 2363]
+            chunk_text = chunk.get('text', '').strip() # [cite: 2363]
             # Use a hash of the chunk text to avoid adding effectively identical chunks if they appear multiple times
-            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8')).hexdigest()
+            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8')).hexdigest() # [cite: 2363]
 
-            if chunk_text and chunk_hash not in added_content_hashes:
+            if chunk_text and chunk_hash not in added_content_hashes: # [cite: 2364]
                 # Estimate token length for context budget (simple character-based heuristic)
-                # A more accurate way would be to tokenize, but that's slower here.
-                # Assuming an average of ~4 chars/token for English.
-                # Max context length for LLM is self.max_context_length (tokens).
-                # Leave room for question, instructions, guidance, few-shot examples.
-                # Let's say context should take up to 70-80% of the remaining budget.
-                # This is a rough estimate and might need tuning.
-                # A simpler approach: fixed character limit for context part of the prompt.
-                context_char_limit = int(
-                    self.max_context_length * 2.5)  # Heuristic: allow more chars than strict token count
+                # ... (context character limit calculation logic from source [2364]-[2369]) ...
+                context_char_limit = int( # [cite: 2369]
+                    self.max_context_length * 2.5)  # Heuristic: allow more chars than strict token count # [cite: 2369]
 
-                if chars_added + len(chunk_text) < context_char_limit:
-                    context_parts.append(f"Passage {chunk_idx + 1}:\n{chunk_text}")
-                    added_content_hashes.add(chunk_hash)
-                    chars_added += len(chunk_text)
-                else:
-                    self.logger.debug(
-                        f"[QID:{query_id_for_log}] Context character limit ({context_char_limit} chars) reached for prompt. Added {len(context_parts)} passages.")
-                    break  # Stop adding chunks if limit is reached
+                if chars_added + len(chunk_text) < context_char_limit: # [cite: 2369]
+                    context_parts.append(f"Passage {chunk_idx + 1}:\n{chunk_text}") # [cite: 2369]
+                    added_content_hashes.add(chunk_hash) # [cite: 2369]
+                    chars_added += len(chunk_text) # [cite: 2370]
+                else: # [cite: 2370]
+                    self.logger.debug( # [cite: 2370]
+                        f"[QID:{query_id_for_log}] Context character limit ({context_char_limit} chars) reached for prompt. Added {len(context_parts)} passages.") # [cite: 2370]
+                    break  # Stop adding chunks if limit is reached # [cite: 2371]
 
-        if not context_parts:
+        if not context_parts: # [cite: 2371]
             # It's crucial to provide *some* context, even if it's a warning.
             # Otherwise, the LLM has no basis for answering.
-            prompt_parts.append("Context:\n[No relevant context passages were retrieved or all were empty.]")
-        else:
-            prompt_parts.append("Based ONLY on the following context passages, answer the question.")
-            prompt_parts.append("\n\n---\n\n".join(context_parts))  # Join passages with clear separators
-        prompt_parts.append("---")
+            prompt_parts.append("Context:\n[No relevant context passages were retrieved or all were empty.]") # [cite: 2372]
+        else: # [cite: 2372]
+            prompt_parts.append("Based ONLY on the following context passages, answer the question.") # [cite: 2372]
+            prompt_parts.append("\n\n---\n\n".join(context_parts))  # Join passages with clear separators # [cite: 2372]
+        prompt_parts.append("---") # [cite: 2372]
 
         # --- Instruction and Question Section ---
-        instruction = ""
-        query_lower = question.lower()
+        instruction = "" # [cite: 2372]
+        query_lower = question.lower() # [cite: 2373]
 
-        if dataset_type == 'drop':
-            self.logger.debug(
-                f"[QID:{query_id_for_log}] Determining DROP-specific instruction for query: '{query_lower[:50]}...'")
+        if dataset_type == 'drop': # [cite: 2373]
+            self.logger.debug( # [cite: 2373]
+                f"[QID:{query_id_for_log}] Determining DROP-specific instruction for query: '{query_lower[:50]}...'") # [cite: 2373]
             # Keywords for different DROP answer types
-            is_count_query = 'how many' in query_lower or 'count the number of' in query_lower
-            is_difference_query = 'difference' in query_lower or 'how many more' in query_lower or 'how many less' in query_lower
-            is_extreme_value_numeric_query = re.search(
-                r'\b(what|which) (is|was) the (longest|shortest|highest|lowest|first|last|greatest|smallest|maximum|minimum)\b.*\b(number|value|score|yards|points|count|total|amount|length|duration|age)\b',
+            is_count_query = 'how many' in query_lower or 'count the number of' in query_lower # [cite: 2373]
+            is_difference_query = 'difference' in query_lower or 'how many more' in query_lower or 'how many less' in query_lower # [cite: 2374]
+            is_extreme_value_numeric_query = re.search( # [cite: 2374]
+                r'\b(what|which) (is|was) the (longest|shortest|highest|lowest|first|last|greatest|smallest|maximum|minimum)\b.*\b(number|value|score|yards|points|count|total|amount|length|duration|age)\b', # [cite: 2374]
                 query_lower) or \
-                                             ('how much' in query_lower and any(
-                                                 ext in query_lower for ext in
-                                                 ['longest', 'shortest', 'highest', 'lowest']))
+                                             ('how much' in query_lower and any( # [cite: 2375]
+                                                 ext in query_lower for ext in # [cite: 2375]
+                                                 ['longest', 'shortest', 'highest', 'lowest'])) # [cite: 2376]
 
             is_who_which_what_span_query = 'who' in query_lower or \
-                                           any(ph in query_lower for ph in
-                                               ['which team', 'which player', 'what team', 'what player',
+                                           any(ph in query_lower for ph in # [cite: 2376]
+                                               ['which team', 'which player', 'what team', 'what player', # [cite: 2377]
                                                 'what is the name of', 'name the']) or \
-                                           re.search(
-                                               r'\b(what|which) (is|was) the (longest|shortest|first|last|main|primary)\b.*\b(player|team|name|entity|person|organization|group|city|state|country|location|event|title)\b',
-                                               query_lower)
-            is_date_query = 'when' in query_lower or 'what date' in query_lower or 'which year' in query_lower or 'what month' in query_lower or 'what day' in query_lower
+                                           re.search( # [cite: 2377]
+                                               r'\b(what|which) (is|was) the (longest|shortest|first|last|main|primary)\b.*\b(player|team|name|entity|person|organization|group|city|state|country|location|event|title)\b', # [cite: 2378]
+                                               query_lower) # [cite: 2379]
+            is_date_query = 'when' in query_lower or 'what date' in query_lower or 'which year' in query_lower or 'what month' in query_lower or 'what day' in query_lower # [cite: 2379]
 
-            if is_count_query or is_difference_query or is_extreme_value_numeric_query:
-                instruction = "Your task is to provide ONLY the single, final numerical answer. Do NOT include units (like 'yards' or 'points') unless the question explicitly asks for the unit as part of the answer. Do NOT include any reasoning, explanation, or introductory phrases. For example, if the answer is 7, respond with '7'."
-                if is_difference_query:
-                    instruction += " If the question asks for a difference, calculate it and provide only the resulting number."
-                elif is_extreme_value_numeric_query:
-                    instruction += " If the question asks for an extreme value (e.g., longest), provide that specific number."
-            elif is_who_which_what_span_query:
-                instruction = "Your task is to provide ONLY the name(s) of the player(s), team(s), or specific entity(ies) requested. If multiple distinct entities are requested by the question, separate them with a comma. Do NOT provide explanations or introductory phrases. The answer should be a direct span from the text if possible."
-            elif is_date_query:
-                instruction = "Your task is to provide ONLY the date. If the answer is a full date, format it as MM/DD/YYYY. If only a year, provide just the YYYY. If only month and year, format as MM/YYYY. Do NOT provide explanations or introductory phrases."
-            else:  # Default DROP instruction
-                instruction = "Carefully analyze the question and context. Provide the single, most precise answer. This could be a number (output only the number), a short text span (like a name or specific phrase from the text), or a date (MM/DD/YYYY or YYYY). Do NOT include explanations or units unless they are explicitly part of the answer span itself."
-            self.logger.debug(f"[QID:{query_id_for_log}] DROP Instruction: {instruction}")
-        else:  # Default / HotpotQA
-            instruction = "Based ONLY on the context passages and any relevant background information provided, answer the following question accurately and concisely. Provide only the answer, no explanations."
+            if is_count_query or is_difference_query or is_extreme_value_numeric_query: # [cite: 2379]
+                instruction = "Your task is to provide ONLY the single, final numerical answer. Do NOT include units (like 'yards' or 'points') unless the question explicitly asks for the unit as part of the answer. Do NOT include any reasoning, explanation, or introductory phrases. For example, if the answer is 7, respond with '7'." # [cite: 2380, 2381, 2382]
+                if is_difference_query: # [cite: 2382]
+                    instruction += " If the question asks for a difference, calculate it and provide only the resulting number." # [cite: 2382]
+                elif is_extreme_value_numeric_query: # [cite: 2382]
+                    instruction += " If the question asks for an extreme value (e.g., longest), provide that specific number." # [cite: 2383]
+            elif is_who_which_what_span_query: # [cite: 2383]
+                instruction = "Your task is to provide ONLY the name(s) of the player(s), team(s), or specific entity(ies) requested. If multiple distinct entities are requested by the question, separate them with a comma. Do NOT provide explanations or introductory phrases. The answer should be a direct span from the text if possible." # [cite: 2383, 2384, 2385]
+            elif is_date_query: # [cite: 2385]
+                instruction = "Your task is to provide ONLY the date. If the answer is a full date, format it as MM/DD/YYYY. If only a year, provide just the YYYY. If only month and year, format as MM/YYYY. Do NOT provide explanations or introductory phrases." # [cite: 2385, 2386, 2387]
+            else:  # Default DROP instruction # [cite: 2387]
+                instruction = "Carefully analyze the question and context. Provide the single, most precise answer. This could be a number (output only the number), a short text span (like a name or specific phrase from the text), or a date (MM/DD/YYYY or YYYY). Do NOT include explanations or units unless they are explicitly part of the answer span itself." # [cite: 2387, 2388, 2389]
+            self.logger.debug(f"[QID:{query_id_for_log}] DROP Instruction: {instruction}") # [cite: 2389]
+        else:  # Default / HotpotQA # [cite: 2389]
+            instruction = "Based ONLY on the context passages and any relevant background information provided, answer the following question accurately and concisely. Provide only the answer, no explanations." # [cite: 2389, 2390]
 
-        prompt_parts.append(f"Question: {question.strip()}")
-        prompt_parts.append(f"\n{instruction}")
-        prompt_parts.append("\n\nPrecise Answer:")  # Clear call to action for the LLM
+        prompt_parts.append(f"Question: {question.strip()}") # [cite: 2390]
+        prompt_parts.append(f"\n{instruction}") # [cite: 2390]
+        prompt_parts.append("\n\nPrecise Answer:")  # Clear call to action for the LLM # [cite: 2390]
 
-        final_prompt = "\n\n".join(prompt_parts)
+        # --- MODIFICATION FOR MISTRAL INSTRUCT ---
+        # Join the assembled parts to form the main content for the instruction.
+        instruction_content = "\n\n".join(prompt_parts)
+
+        # Apply Mistral Instruct formatting.
+        # The model card example for the first instruction is: "<s>[INST] What is your favourite condiment? [/INST]"
+        # final_prompt = "\n\n".join(prompt_parts) # Previous final_prompt assembly
+        final_prompt = f"<s>[INST] {instruction_content.strip()} [/INST]" # New final_prompt assembly for Mistral
+
+        self.logger.debug(f"[NR Prompt QID:{query_id_for_log}] Final Mistral-formatted Prompt (first 300 chars): {final_prompt[:300]}...")
+        # --- END MODIFICATION FOR MISTRAL INSTRUCT ---
+
 
         # --- Prompt Truncation Logic ---
         # This is a simplified version; more sophisticated truncation might be needed
         # depending on tokenizer and model specifics.
-        final_chars = len(final_prompt)
+        final_chars = len(final_prompt) # [cite: 2391]
         # Estimate max tokens based on average characters per token (e.g., 4).
         # This is a heuristic; actual token count depends on the tokenizer.
-        estimated_tokens = final_chars / 4
+        estimated_tokens = final_chars / 4 # [cite: 2391]
 
         # Use tokenizer.model_max_length if available, otherwise self.max_context_length
         # The tokenizer's max length is usually the most reliable for pre-truncation.
-        model_max_len = getattr(self.tokenizer, 'model_max_length', self.max_context_length)
+        model_max_len = getattr(self.tokenizer, 'model_max_length', self.max_context_length) # [cite: 2392]
 
-        if estimated_tokens > model_max_len * 0.95:  # If estimated tokens are close to or exceed 95% of model max length
-            self.logger.warning(
-                f"[QID:{query_id_for_log}] Estimated prompt tokens ({estimated_tokens:.0f}) close to model_max_length ({model_max_len}). Attempting to truncate context part if possible.")
+        if estimated_tokens > model_max_len * 0.95:  # If estimated tokens are close to or exceed 95% of model max length # [cite: 2392]
+            self.logger.warning( # [cite: 2392]
+                f"[QID:{query_id_for_log}] Estimated prompt tokens ({estimated_tokens:.0f}) close to model_max_length ({model_max_len}). Attempting to truncate context part if possible.") # [cite: 2392, 2393]
 
             # Try to truncate the context part more aggressively
             # This assumes 'context_parts' holds the main text blocks.
             # A more robust solution would re-calculate non_context_len precisely.
 
             # Simplified: if context_parts is large, reduce it.
-            if len(context_parts) > 1:  # If there's more than one passage
+            if len(context_parts) > 1:  # If there's more than one passage # [cite: 2394]
                 # Calculate length of non-context parts (few-shot, guidance, question, instructions)
-                non_context_prompt_parts = []
-                context_block_found = False
-                for part in prompt_parts:
-                    if "Passage 1:" in part or "[No relevant context passages were retrieved.]" in part:
-                        context_block_found = True  # Mark that we've hit the context block
-                        continue  # Skip the actual context block for length calculation of other parts
-                    if context_block_found and "---" == part.strip() and context_parts:  # Separator after context
-                        context_block_found = False  # Reset after context block
-                        continue
-                    non_context_prompt_parts.append(part)
+                non_context_prompt_parts = [] # [cite: 2394]
+                context_block_found = False # [cite: 2394]
+                for part in prompt_parts: # [cite: 2394]
+                    if "Passage 1:" in part or "[No relevant context passages were retrieved.]" in part: # [cite: 2395]
+                        context_block_found = True  # Mark that we've hit the context block # [cite: 2395]
+                        continue  # Skip the actual context block for length calculation of other parts # [cite: 2395]
+                    if context_block_found and "---" == part.strip() and context_parts:  # Separator after context # [cite: 2396]
+                        context_block_found = False  # Reset after context block # [cite: 2396]
+                        continue # [cite: 2396]
+                    non_context_prompt_parts.append(part) # [cite: 2397]
 
-                non_context_len_chars = len("\n\n".join(non_context_prompt_parts))
+                non_context_len_chars = len("\n\n".join(non_context_prompt_parts)) # [cite: 2397]
                 # Target character length for context, aiming for (model_max_len * safety_factor_chars_per_token)
                 # Safety factor (e.g., 3.5-4 chars/token)
-                target_total_chars = model_max_len * 3.5
-                available_for_context_chars = target_total_chars - non_context_len_chars - 100  # -100 for safety margin
+                target_total_chars = model_max_len * 3.5 # [cite: 2397]
+                available_for_context_chars = target_total_chars - non_context_len_chars - 100  # -100 for safety margin # [cite: 2398]
 
-                if available_for_context_chars > 0:
-                    current_context_str = "\n\n---\n\n".join(context_parts)
-                    if len(current_context_str) > available_for_context_chars:
-                        truncated_context_str = current_context_str[
-                                                :int(available_for_context_chars)] + "... [CONTEXT TRUNCATED]"
+                if available_for_context_chars > 0: # [cite: 2398]
+                    current_context_str = "\n\n---\n\n".join(context_parts) # [cite: 2398]
+                    if len(current_context_str) > available_for_context_chars: # [cite: 2398]
+                        truncated_context_str = current_context_str[ # [cite: 2399]
+                                                :int(available_for_context_chars)] + "... [CONTEXT TRUNCATED]" # [cite: 2399]
 
                         # Rebuild prompt_parts with truncated context
-                        new_prompt_parts_rebuild = []
-                        context_header_found_rebuild = False
-                        original_context_block_skipped = False
+                        new_prompt_parts_rebuild = [] # [cite: 2400]
+                        context_header_found_rebuild = False # [cite: 2400]
+                        original_context_block_skipped = False # [cite: 2400]
 
-                        for part_str in prompt_parts:
-                            if "Based ONLY on the following context passages" in part_str:
-                                new_prompt_parts_rebuild.append(part_str)  # Add context header
-                                new_prompt_parts_rebuild.append(truncated_context_str)  # Add truncated context
-                                context_header_found_rebuild = True
-                            elif context_header_found_rebuild and (
-                                    "Passage 1:" in part_str or "[No relevant context passages were retrieved.]" in part_str) and not original_context_block_skipped:
+                        for part_str in prompt_parts: # [cite: 2400]
+                            if "Based ONLY on the following context passages" in part_str: # [cite: 2401]
+                                new_prompt_parts_rebuild.append(part_str)  # Add context header # [cite: 2401]
+                                new_prompt_parts_rebuild.append(truncated_context_str)  # Add truncated context # [cite: 2401, 2402]
+                                context_header_found_rebuild = True # [cite: 2402]
+                            elif context_header_found_rebuild and ( # [cite: 2402]
+                                    "Passage 1:" in part_str or "[No relevant context passages were retrieved.]" in part_str) and not original_context_block_skipped: # [cite: 2403]
                                 # This is the original context block, skip it as we've added the truncated one
-                                original_context_block_skipped = True
-                                continue
-                            elif not (
-                                    "Passage 1:" in part_str or "[No relevant context passages were retrieved.]" in part_str and context_header_found_rebuild and not original_context_block_skipped):
+                                original_context_block_skipped = True # [cite: 2403]
+                                continue # [cite: 2404]
+                            elif not ( # [cite: 2404]
+                                    "Passage 1:" in part_str or "[No relevant context passages were retrieved.]" in part_str and context_header_found_rebuild and not original_context_block_skipped): # [cite: 2405]
                                 # Add other parts if they are not the original context block that we are replacing
-                                new_prompt_parts_rebuild.append(part_str)
+                                new_prompt_parts_rebuild.append(part_str) # [cite: 2405]
 
-                        if context_header_found_rebuild:  # Only if we successfully rebuilt
-                            final_prompt = "\n\n".join(new_prompt_parts_rebuild)
-                            self.logger.info(
-                                f"[QID:{query_id_for_log}] Context aggressively truncated. New prompt length: {len(final_prompt)} chars.")
-                        else:
-                            self.logger.warning(
-                                f"[QID:{query_id_for_log}] Could not find context header for aggressive truncation. Using original long prompt.")
-                else:
-                    self.logger.warning(
-                        f"[QID:{query_id_for_log}] Not enough available space for context after calculating non-context parts for truncation.")
-            else:
-                self.logger.info(
-                    f"[QID:{query_id_for_log}] Prompt length seems acceptable or only one context passage, less aggressive truncation applied by tokenizer if needed.")
+                        if context_header_found_rebuild:  # Only if we successfully rebuilt # [cite: 2406]
+                            final_prompt = "\n\n".join(new_prompt_parts_rebuild) # [cite: 2406]
+                            self.logger.info( # [cite: 2406]
+                                f"[QID:{query_id_for_log}] Context aggressively truncated. New prompt length: {len(final_prompt)} chars.") # [cite: 2407]
+                        else: # [cite: 2407]
+                            self.logger.warning( # [cite: 2407]
+                                f"[QID:{query_id_for_log}] Could not find context header for aggressive truncation. Using original long prompt.") # [cite: 2408, 2409]
+                else: # [cite: 2409]
+                    self.logger.warning( # [cite: 2409]
+                        f"[QID:{query_id_for_log}] Not enough available space for context after calculating non-context parts for truncation.") # [cite: 2409]
+            else: # [cite: 2410]
+                self.logger.info( # [cite: 2410]
+                    f"[QID:{query_id_for_log}] Prompt length seems acceptable or only one context passage, less aggressive truncation applied by tokenizer if needed.") # [cite: 2410]
 
         # Final check against tokenizer's max length (the tokenizer will truncate if this is still too long)
-        if len(self.tokenizer.encode(final_prompt)) > model_max_len:
-            self.logger.warning(
-                f"Final prompt (est. tokens: {len(self.tokenizer.encode(final_prompt))}) still exceeds model_max_length ({model_max_len}). Will be truncated by tokenizer.")
+        if len(self.tokenizer.encode(final_prompt)) > model_max_len: # [cite: 2410]
+            self.logger.warning( # [cite: 2410]
+                f"Final prompt (est. tokens: {len(self.tokenizer.encode(final_prompt))}) still exceeds model_max_length ({model_max_len}). Will be truncated by tokenizer.") # [cite: 2411]
 
         return final_prompt
 
