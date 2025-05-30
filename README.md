@@ -1,6 +1,8 @@
-SymRAG: Efficient Neuro-Symbolic Reasoning via Adaptive Query Routing
-Safayat Bin Hakim📄 arXiv:XXXX.XXXXX
+# SymRAG: Efficient Neuro-Symbolic Reasoning via Adaptive Query Routing
+Safayat Bin Hakim
+📄 arXiv:XXXX.XXXXX
 
+---
 ## 🧠 Abstract
 
 Retrieval-Augmented Generation (RAG) systems face a fundamental scalability challenge: computational resource allocation in hybrid neuro-symbolic architectures. We introduce SymRAG, demonstrating that adaptive routing between symbolic, neural, and hybrid processing pathways shifts from a performance optimization to a deployment necessity as model complexity increases. Through intelligent query routing based on complexity and system load, SymRAG achieves strong accuracy (89.2-93.8% exact match on HotpotQA/DROP) with exceptional efficiency (3.6-4.6% CPU utilization, 0.985-3.165s average processing). Evaluation across 2,000 queries on Llama-3.2-3B and Mistral-7B shows dramatic performance degradation when adaptive logic is disabled: 169-1151% processing time explosions, demonstrating universal routing criticality across architectures. SymRAG establishes design principles for computationally-sustainable, hybrid AI systems. 
@@ -8,6 +10,7 @@ Retrieval-Augmented Generation (RAG) systems face a fundamental scalability chal
 
 ## 🏗️ Repository Structure
 
+```
 symrag/  
 ├── data/                 # Datasets (e.g., drop_dataset_dev.json, hotpot_dev_distractor_v1.json, rules*.json)  
 ├── logs/                 # Log files for runs, metrics, output captures  
@@ -23,10 +26,10 @@ symrag/
 │   ├── system/           # SystemControlManager, UnifiedResponseAggregator, system_logic_helpers.py  
 │   └── utils/            # DataLoaders, Evaluation, MetricsCollector, DeviceManager, etc.  
 ├── tests/                # Evaluation scripts (e.g., test_hotpotqa.py)  
-├── figs/                 # 
+├── figs/                 # # Key figures from paper 
 ├── requirements.txt      # Python dependencies  
-└── README.md             # This file
-
+└── README.md             # You are here
+```
 ---
 
 ## 🚀 Getting Started
