@@ -1,25 +1,16 @@
 # SymRAG: Efficient Neuro-Symbolic Reasoning via Adaptive Query Routing
-***Safayat Bin Hakim\***
+***Safayat Bin Hakim\***  
 📄 arXiv:XXXX.XXXXX
 
 ---
+
 ## 🧠 Abstract
 
-Current Retrieval-Augmented Generation systems use uniform processing, causing inefficiency as simple queries consume resources similar to complex multi-hop tasks. We
-present SymRAG, a framework that introduces adaptive query routing via real-time complexity and load assessment to select symbolic, neural, or hybrid pathways. SymRAG’s
-neuro-symbolic approach adjusts computational pathways based on both query characteristics and system load, enabling efficient resource allocation across diverse query types. By
-combining linguistic and structural query properties with system load metrics, SymRAG
-allocates resources proportional to reasoning requirements. Evaluated on 2,000 queries
-across HotpotQA (multi-hop reasoning) and DROP (discrete reasoning) using Llama-3.2-
-3B and Mistral-7B models, SymRAG achieves competitive accuracy (97.6–100.0% exact
-match) with efficient resource utilization (3.6–6.2% CPU utilization, 0.985–3.165s processing). Disabling adaptive routing increases processing time by 169–1151%, showing its
-significance for complex models. These results suggest adaptive computation strategies
-are more sustainable and scalable for hybrid AI systems that use dynamic routing and
-neuro-symbolic frameworks.
+Current Retrieval-Augmented Generation systems use uniform processing, causing inefficiency as simple queries consume resources similar to complex multi-hop tasks. We present SymRAG, a framework that introduces adaptive query routing via real-time complexity and load assessment to select symbolic, neural, or hybrid pathways. SymRAG’s neuro-symbolic approach adjusts computational pathways based on both query characteristics and system load, enabling efficient resource allocation across diverse query types. By combining linguistic and structural query properties with system load metrics, SymRAG allocates resources proportional to reasoning requirements. Evaluated on 2,000 queries across HotpotQA (multi-hop reasoning) and DROP (discrete reasoning) using Llama-3.2-3B and Mistral-7B models, SymRAG achieves competitive accuracy (97.6–100.0% exact match) with efficient resource utilization (3.6–6.2% CPU utilization, 0.985–3.165s processing). Disabling adaptive routing increases processing time by 169–1151%, showing its significance for complex models. These results suggest adaptive computation strategies are more sustainable and scalable for hybrid AI systems that use dynamic routing and neuro-symbolic frameworks.
+
 ---
 
 ## 🏗️ Repository Structure
-
 ```
 symrag/  
 ├── data/                 # Datasets (e.g., drop_dataset_dev.json, hotpot_dev_distractor_v1.json, rules*.json)  
