@@ -7,15 +7,15 @@ import time
 import warnings
 import argparse
 import logging
-import urllib3  # type: ignore
-import yaml # For execute_ablation_study (will be moved)
+import urllib3
+import yaml
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Union
 import torch
 import numpy as np
 
 try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
+    from transformers import AutoTokenizer, AutoModelForCausalLM
 except ImportError:
     print("Transformers library not found. Please install it: pip install transformers")
     sys.exit(1)
@@ -45,8 +45,8 @@ try:
     from src.utils.device_manager import DeviceManager
     from src.utils.progress import tqdm, ProgressManager
     from src.utils.output_capture import capture_output
-    from src.ablation_study import setup_and_orchestrate_ablation # MODIFIED IMPORT
-    from src.utils.data_loaders import load_hotpotqa, load_drop_dataset # MODIFIED IMPORT
+    from src.ablation_study import setup_and_orchestrate_ablation
+    from src.utils.data_loaders import load_hotpotqa, load_drop_dataset
 
 except ImportError as e:
     print(f"Error importing SymRAG components: {e}")

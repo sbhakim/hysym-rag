@@ -5,8 +5,17 @@
 ---
 ## 🧠 Abstract
 
-Retrieval-Augmented Generation (RAG) systems face a fundamental scalability challenge: computational resource allocation in hybrid neuro-symbolic architectures. We introduce SymRAG, demonstrating that adaptive routing between symbolic, neural, and hybrid processing pathways shifts from a performance optimization to a deployment necessity as model complexity increases. Through intelligent query routing based on complexity and system load, SymRAG achieves strong accuracy (89.2-93.8% exact match on HotpotQA/DROP) with exceptional efficiency (3.6-4.6% CPU utilization, 0.985-3.165s average processing). Evaluation across 2,000 queries on Llama-3.2-3B and Mistral-7B shows dramatic performance degradation when adaptive logic is disabled: 169-1151% processing time explosions, demonstrating universal routing criticality across architectures. SymRAG establishes design principles for computationally-sustainable, hybrid AI systems. 
-
+Current Retrieval-Augmented Generation systems use uniform processing, causing inefficiency as simple queries consume resources similar to complex multi-hop tasks. We
+present SymRAG, a framework that introduces adaptive query routing via real-time complexity and load assessment to select symbolic, neural, or hybrid pathways. SymRAG’s
+neuro-symbolic approach adjusts computational pathways based on both query characteristics and system load, enabling efficient resource allocation across diverse query types. By
+combining linguistic and structural query properties with system load metrics, SymRAG
+allocates resources proportional to reasoning requirements. Evaluated on 2,000 queries
+across HotpotQA (multi-hop reasoning) and DROP (discrete reasoning) using Llama-3.2-
+3B and Mistral-7B models, SymRAG achieves competitive accuracy (97.6–100.0% exact
+match) with efficient resource utilization (3.6–6.2% CPU utilization, 0.985–3.165s processing). Disabling adaptive routing increases processing time by 169–1151%, showing its
+significance for complex models. These results suggest adaptive computation strategies
+are more sustainable and scalable for hybrid AI systems that use dynamic routing and
+neuro-symbolic frameworks.
 ---
 
 ## 🏗️ Repository Structure

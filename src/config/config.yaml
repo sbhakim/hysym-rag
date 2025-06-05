@@ -1,7 +1,7 @@
 # src/config/config.yaml
 
 # Basic System Configuration
-# model_name: "meta-llama/Llama-3.2-3B" # Previous model
+#model_name: "meta-llama/Llama-3.2-3B" # Previous model
 model_name: "mistralai/Mistral-7B-Instruct-v0.1" # New model
 data_dir: "data/" # General data directory
 
