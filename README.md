@@ -69,23 +69,29 @@ The SymRAG framework is architected as a multi-layered pipeline designed for ada
 
 ### Key Components
 
-**Query Processing:** - **QueryExpander**: Analyzes query complexity (linguistic and structural properties) and potentially expands queries.  
-- **QueryLogger**: Logs query details.  
+**Query Processing:**
+- **QueryExpander**: Analyzes query complexity (linguistic and structural properties) and potentially expands queries.
+- **QueryLogger**: Logs query details.
 
-**Adaptive Path Selection (SystemControlManager):** - Dynamically routes queries to Symbolic, Neural, or Hybrid pathways based on query complexity ($\kappa_{eff}(q)$) and system resource state ($R(t)$).  
-- Utilizes dynamically adjusted thresholds ($T_{sym}$, $T_{neural}$) for routing.  
+**Adaptive Path Selection (SystemControlManager):**
+- Dynamically routes queries to Symbolic, Neural, or Hybrid pathways based on query complexity ($\kappa_{eff}(q)$) and system resource state ($R(t)$).
+- Utilizes dynamically adjusted thresholds ($T_{sym}$, $T_{neural}$) for routing.
 
-**Symbolic Reasoning Path (GraphSymbolicReasoner & GraphSymbolicReasonerDrop):** - Employs knowledge graph-based approaches with predefined and dynamically extracted rules (e.g., 533 for DROP, 342 for HotpotQA).  
-- Provides structural guidance in hybrid processing.  
+**Symbolic Reasoning Path (GraphSymbolicReasoner & GraphSymbolicReasonerDrop):**
+- Employs knowledge graph-based approaches with predefined and dynamically extracted rules (e.g., 533 for DROP, 342 for HotpotQA).
+- Provides structural guidance in hybrid processing.
 
-**Neural Reasoning Path (NeuralRetriever):** - Uses LLMs (e.g., Llama-3.2-3B, Mistral-7B) for dense retrieval and answer generation.  
-- Can be guided by RuleGuidedRetriever for context scoring and filtering.  
-- Supports few-shot prompting for tasks like DROP.  
+**Neural Reasoning Path (NeuralRetriever):**
+- Uses LLMs (e.g., Llama-3.2-3B, Mistral-7B) for dense retrieval and answer generation.
+- Can be guided by RuleGuidedRetriever for context scoring and filtering.
+- Supports few-shot prompting for tasks like DROP.
 
-**Hybrid Integration (HybridIntegrator):** - For HotpotQA (textual multi-hop): Employs embedding alignment (via AlignmentLayer) using multi-stage projection, cross-modal attention, and confidence-weighted integration.  
-- For DROP (discrete reasoning): Uses structured reconciliation for numbers, dates, and spans, including type agreement, confidence-based selection, and value reconciliation.  
+**Hybrid Integration (HybridIntegrator):**
+- For HotpotQA (textual multi-hop): Employs embedding alignment (via AlignmentLayer) using multi-stage projection, cross-modal attention, and confidence-weighted integration.
+- For DROP (discrete reasoning): Uses structured reconciliation for numbers, dates, and spans, including type agreement, confidence-based selection, and value reconciliation.
 
-**Resource Management (ResourceManager, AdaptiveManager):** - Continuously monitors CPU, GPU, Memory, and Power.  
+**Resource Management (ResourceManager, AdaptiveManager):**
+- Continuously monitors CPU, GPU, Memory, and Power.
 - Adapts system behavior (e.g., routing thresholds) based on system load.
 
 
