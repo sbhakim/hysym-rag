@@ -57,7 +57,7 @@ List any environment variables your system needs:
 * `SYMRAG_MEMORY_TRACKING` (optional, for KnowledgeIntegrator)  
 * Potentially API keys if you switch to API-based LLMs in the future.
 
-Ensure your models (e.g., Llama-3.2-3B, mistralai/Mistral-7B-Instruct-v0.1 or v0.3) are accessible or downloaded to your Hugging Face cache.
+Ensure your models (e.g., Llama-3.2-3B, mistralai/Mistral-7B-Instruct-v0.1 or v0.3, google/gemma-1.1-7b-it) are accessible or downloaded to your Hugging Face cache.
 
 ---
 
