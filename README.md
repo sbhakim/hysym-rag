@@ -74,8 +74,8 @@ The SymRAG framework is architected as a multi-layered pipeline designed for ada
 - **QueryLogger**: Logs query details.
 
 **Adaptive Path Selection (SystemControlManager):**
-- Dynamically routes queries to Symbolic, Neural, or Hybrid pathways based on query complexity ($\kappa_{eff}(q)$) and system resource state ($R(t)$).
-- Utilizes dynamically adjusted thresholds ($T_{sym}$, $T_{neural}$) for routing.
+- Dynamically routes queries to Symbolic, Neural, or Hybrid pathways based on query complexity $\kappa_{eff}(q)$ and system resource state $R(t)$.
+- Utilizes dynamically adjusted thresholds $T_{sym}$, $T_{neural}$ for routing.
 
 **Symbolic Reasoning Path (GraphSymbolicReasoner & GraphSymbolicReasonerDrop):**
 - Employs knowledge graph-based approaches with predefined and dynamically extracted rules (e.g., 533 for DROP, 342 for HotpotQA).
