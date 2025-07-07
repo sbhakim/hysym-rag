@@ -1,6 +1,6 @@
 # SymRAG: Efficient Neuro-Symbolic Reasoning via Adaptive Query Routing
 ***Safayat Bin Hakim\***  
-📄 arXiv:XXXX.XXXXX
+📄 arXiv: [2506.12981](https://arxiv.org/abs/2506.12981)
 
 ---
 
@@ -192,13 +192,13 @@ Detailed ablation results, including statistical significance, will be saved.
 If you find SymRAG useful in your research, please consider citing:
 
 ```bibtex
-@misc{hakim_symrag_2025,
-    title={{SymRAG}: Efficient Neuro-Symbolic Reasoning via Adaptive Query Routing},
-    author={Safayat Bin Hakim},
-    year={2025},
-    eprint={XXXX.XXXXX},
-    archivePrefix={arXiv},
-    primaryClass={cs.AI}
+@article{hakim2025symrag,
+      title={Efficient Neuro-Symbolic Retrieval-Augmented Generation through Adaptive Query Routing},
+      author={Safayat Bin Hakim and Muhammad Adil and Alvaro Velasquez and Houbing Herbert Song},
+      year={2025},
+      eprint={2506.12981},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
 }
 ```
 
