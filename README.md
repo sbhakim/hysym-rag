@@ -106,33 +106,43 @@ The SymRAG framework is architected as a multi-layered pipeline designed for ada
 
 ## 📈 Key Results
 
+## 📈 Key Results
+
 SymRAG achieves state-of-the-art accuracy with exceptional resource efficiency.
 
-**Accuracy:**  
-- Llama-3.2-3B: 100% EM on HotpotQA, 99.4% EM on DROP.  
-- Mistral-7B: 100% EM on HotpotQA, 97.6% EM on DROP.  
+**Accuracy:**
+- **Processing Success Rate (SCM):** Llama-3.2-3B: 100.0% on HotpotQA, 99.4% on DROP. Mistral-7B: 100.0% on HotpotQA, 97.6% on DROP. Gemma-1.1-7B-it: 99.2% on DROP.
+- **Exact Match (EM):** Llama-3.2-3B: 91.5% on HotpotQA, 89.2% on DROP. Mistral-7B: 93.8% on HotpotQA, 91.5% on DROP. Gemma-1.1-7B-it: 72.4% on DROP.
 
-**Efficiency:**  
-- CPU utilization below 6.2% (Llama) and 3.9% (Mistral).  
-- Average processing times: 0.985s (Llama/DROP) to 3.165s (Mistral/HotpotQA).  
+**Efficiency:**
+- CPU utilization below 6.2% (Llama) and 3.9% (Mistral).
+- Average processing times: 0.941s (Gemma/DROP) to 3.165s (Mistral/HotpotQA).
 
-**Adaptive Logic Criticality:** Disabling adaptive logic leads to:  
-- Llama-3.2-3B: 168.6% processing time increase, 15.1% accuracy drop.  
-- Mistral-7B: 958% - 1151% processing time explosion.  
+**Adaptive Logic Criticality:** Disabling adaptive logic leads to:
+- Llama-3.2-3B: 168.6% processing time increase, 15.1% accuracy drop.
+- Mistral-7B: 958% (DROP) - 1151% (HotpotQA) processing time explosion.
+- Gemma-1.1-7B-it: 3164.9% processing time increase, 18.9-19.9% accuracy drop.
 
-**Path Distribution (Emergent Behavior):**  
-- Minimal use of pure symbolic paths (0-0.1%).  
-- HotpotQA: ~64% Neural, ~36% Hybrid.  
-- DROP: ~41-43% Neural, ~56-60% Hybrid.  
+**Path Distribution (Emergent Behavior - based on SCM Execution Counts):**
+- Minimal use of pure symbolic paths (0-0.1%).
+- HotpotQA: ~64% Neural, ~36% Hybrid.
+- DROP:
+    - Llama-3.2-3B: ~41.7% Neural, ~60.2% Hybrid.
+    - Mistral-7B: ~48.2% Neural, ~61.5% Hybrid.
+    - Gemma-1.1-7B-it: ~99.7% Neural, ~0.3% Hybrid.
 
 ### Table 1: Cross-Model Performance
 
-| Model          | Dataset   | Exact Match (%) | Avg Time (s)         | CPU (%) | Memory (%) | GPU (%) | Path Dist. (S/N/H) (%) |
-|----------------|-----------|-----------------|----------------------|---------|------------|---------|------------------------|
-| Llama-3.2-3B   | DROP      | 89.2            | $0.985 \pm 1.29$    | 4.6     | 5.6        | 41.1    | 0.1/41.7/60.2         |
-|                | HotpotQA  | 91.5            | $1.991 \pm 1.67$    | 6.2     | 5.6        | 42.8    | 0.0/64.0/36.0         |
-| Mistral-7B     | DROP      | 91.5            | $2.443 \pm 3.45$    | 3.6     | 8.0        | 66.0    | 0.0/43.6/56.4         |
-|                | HotpotQA  | 93.8            | $3.165 \pm 2.83$    | 3.9     | 10.8       | 68.2    | 0.0/64.0/36.0         |
+| Model | Dataset | Exact Match (%)* | Avg Time (s) | CPU (%) | Memory (%) | GPU (%) | Path Dist. (S/N/H) (%)** |
+|---|---|---|---|---|---|---|---|
+| Llama-3.2-3B | DROP | 89.2 | $0.985 \pm 1.29$ | 4.6 | 5.6 | 41.1 | 0.1/41.7/60.2 |
+| | HotpotQA | 91.5 | $1.991 \pm 1.67$ | 6.2 | 5.6 | 42.8 | 0.0/64.0/36.0 |
+| Mistral-7B | DROP | 91.5 | $2.443 \pm 3.45$ | 3.6 | 8.0 | 66.0 | 0.0/48.2/61.5 |
+| | HotpotQA | 93.8 | $3.165 \pm 2.83$ | 3.9 | 10.8 | 68.2 | 0.0/64.0/36.0 |
+| Gemma-1.1-7B-it | DROP | 72.4 | $0.941 \pm 0.549$ | 5.4 | 10.7 | 89.2 | 0.0/99.7/0.3 |
+
+\* Exact Match (EM) scores are calculated using a separate evaluation script.
+\*\* Path Distribution (S/N/H) percentages represent Symbolic/Neural/Hybrid paths based on System Control Manager (SCM) execution counts.
 
 ---
 

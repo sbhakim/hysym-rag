@@ -2,7 +2,10 @@
 
 # Basic System Configuration
 #model_name: "meta-llama/Llama-3.2-3B" # Previous model
-model_name: "mistralai/Mistral-7B-Instruct-v0.1" # New model
+#model_name: "mistralai/Mistral-7B-Instruct-v0.1" # New model
+#model_name: "tiiuae/Falcon3-Mamba-7B-Instruct"
+model_name: "google/gemma-1.1-7b-it" # Add this line to use Gemma
+
 data_dir: "data/" # General data directory
 
 # ---- Dataset Specific Paths ----
